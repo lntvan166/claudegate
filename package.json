@@ -1,0 +1,175 @@
+{
+  "name": "claudegate",
+  "displayName": "ClaudeGate",
+  "description": "Review every file Claude Code touches — accept or revert with one click.",
+  "version": "1.0.0",
+  "publisher": "lntvan166",
+  "icon": "media/icon.png",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "claude",
+    "ai",
+    "diff",
+    "review",
+    "claude-code",
+    "anthropic"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lntvan166/claudegate"
+  },
+  "license": "MIT",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claudegate",
+          "title": "ClaudeGate",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "claudegate": [
+        {
+          "id": "claudegate.reviewPanel",
+          "name": "Review Session"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "claudegate.reviewPanel",
+        "contents": "No active Claude session.\n\nRun Claude Code in your terminal to start tracking changes.\n\n[Setup Hook](command:claudegate.setupHook)\n\n[View Documentation](https://github.com/claudegate/claudegate#readme)"
+      }
+    ],
+    "commands": [
+      {
+        "command": "claudegate.setupHook",
+        "title": "Setup Hook",
+        "category": "ClaudeGate"
+      },
+      {
+        "command": "claudegate.clearSession",
+        "title": "Clear Session",
+        "category": "ClaudeGate",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "claudegate.acceptFile",
+        "title": "Accept",
+        "icon": "$(check)"
+      },
+      {
+        "command": "claudegate.rejectFile",
+        "title": "Reject",
+        "icon": "$(x)"
+      },
+      {
+        "command": "claudegate.acceptAll",
+        "title": "Accept All",
+        "category": "ClaudeGate",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "claudegate.rejectAll",
+        "title": "Reject All",
+        "category": "ClaudeGate",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "claudegate.reapplyFile",
+        "title": "Re-apply Claude's Change",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "claudegate.viewAsTree",
+        "title": "View as Tree",
+        "category": "ClaudeGate",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "claudegate.viewAsList",
+        "title": "View as List",
+        "category": "ClaudeGate",
+        "icon": "$(list-flat)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "claudegate.viewAsTree",
+          "when": "view == claudegate.reviewPanel && claudegate.viewMode == 'list'",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudegate.viewAsList",
+          "when": "view == claudegate.reviewPanel && claudegate.viewMode == 'tree'",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudegate.acceptAll",
+          "when": "view == claudegate.reviewPanel",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claudegate.rejectAll",
+          "when": "view == claudegate.reviewPanel",
+          "group": "navigation@3"
+        },
+        {
+          "command": "claudegate.clearSession",
+          "when": "view == claudegate.reviewPanel",
+          "group": "navigation@4"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "claudegate.acceptFile",
+          "when": "view == claudegate.reviewPanel && viewItem == claudegate.file.pending",
+          "group": "inline@1"
+        },
+        {
+          "command": "claudegate.rejectFile",
+          "when": "view == claudegate.reviewPanel && viewItem == claudegate.file.pending",
+          "group": "inline@2"
+        },
+        {
+          "command": "claudegate.reapplyFile",
+          "when": "view == claudegate.reviewPanel && viewItem == claudegate.file.rejected",
+          "group": "inline@1"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run bundle",
+    "bundle": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --platform=node --minify",
+    "compile": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --platform=node --sourcemap",
+    "watch": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --platform=node --sourcemap --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/diff": "^8.0.0",
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "esbuild": "^0.28.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "diff": "^9.0.0"
+  }
+}
