@@ -24,12 +24,19 @@ export class ClaudeGateContentProvider
     if (!session) return "";
     const entry = session.files[uri.path];
     if (!entry) return "";
+    if (uri.query === "side=claude") {
+      return entry.claudeContent ?? "// Claude's version not available";
+    }
     return entry.originalContent ?? "// New file — no original content";
   }
 }
 
 export function originalUri(filePath: string): vscode.Uri {
   return vscode.Uri.file(filePath).with({ scheme: SCHEME });
+}
+
+export function claudeUri(filePath: string): vscode.Uri {
+  return vscode.Uri.file(filePath).with({ scheme: SCHEME, query: "side=claude" });
 }
 
 // ─── Open diff: original (left) vs current on-disk (right) ───────────────────
@@ -43,9 +50,21 @@ export async function openDiff(
 
   const entry = session.files[filePath];
   const label = path.basename(filePath);
-  const currentUri = vscode.Uri.file(filePath);
   const beforeUri = originalUri(filePath);
 
+  // Rejected new file: the file was deleted; show Claude's saved content instead
+  if (entry.originalContent === null && entry.reviewStatus === "rejected") {
+    const rightUri = claudeUri(filePath);
+    await vscode.commands.executeCommand(
+      "vscode.diff",
+      beforeUri,
+      rightUri,
+      `ClaudeGate: ${label}  (rejected — Claude's version)`
+    );
+    return;
+  }
+
+  const currentUri = vscode.Uri.file(filePath);
   const title =
     entry.originalContent === null
       ? `ClaudeGate: ${label}  (new file)`
@@ -53,7 +72,7 @@ export async function openDiff(
 
   await vscode.commands.executeCommand("vscode.diff", beforeUri, currentUri, title);
 
-  // Scroll the right pane (current file) to the first changed line
+  // Scroll the right pane to the first changed line
   if (entry.originalContent !== null) {
     const currentDoc = await vscode.workspace.openTextDocument(filePath);
     const changes = diffLines(entry.originalContent, currentDoc.getText());
@@ -63,7 +82,6 @@ export async function openDiff(
       if (change.added || change.removed) { firstChangedLine = cursor; break; }
       if (!change.removed) cursor += change.count ?? 0;
     }
-    // Reveal in the active diff editor
     const editor = vscode.window.activeTextEditor;
     if (editor) {
       editor.revealRange(
