@@ -91,12 +91,14 @@ export class FilteredTreeProvider
   >();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
-  private viewMode: ViewMode = "list";
+  private viewMode: ViewMode;
 
   constructor(
     private readonly sessionManager: SessionManager,
-    private readonly status: ReviewStatus
+    private readonly status: ReviewStatus,
+    initialViewMode: ViewMode = "tree"
   ) {
+    this.viewMode = initialViewMode;
     sessionManager.onSessionChange(() => this._onDidChangeTreeData.fire());
   }
 

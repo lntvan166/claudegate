@@ -2,7 +2,7 @@
 
 **Review every file Claude Code touches — accept or revert with one click.**
 
-ClaudeGate bridges the gap between Claude Code (terminal) and Cursor/VS Code's visual diff workflow. When Claude modifies your files, ClaudeGate captures the before-state automatically and surfaces each change in a structured sidebar panel — the same red/green accept/reject experience you get with Cursor's native AI agent.
+Stop flying blind when Claude modifies your codebase. ClaudeGate captures every file change before it happens and surfaces each one as a structured diff — the same accept/reject workflow as Cursor's native AI review, but for Claude Code running in any terminal.
 
 ---
 
@@ -17,49 +17,41 @@ ClaudeGate bridges the gap between Claude Code (terminal) and Cursor/VS Code's v
 Three steps, no manual config:
 
 **1. Install**
-Search for `ClaudeGate` in the VS Code / Cursor Extensions panel, or install via the Marketplace.
+Install **ClaudeGate** from the VS Code / Cursor Extensions panel.
 
 **2. Setup the hook**
-Open the Command Palette (`Cmd+Shift+P`) and run:
+Open the Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`) and run:
+
 ```
 ClaudeGate: Setup Hook
 ```
-This installs a Claude Code `PreToolUse` hook that captures file changes automatically.
 
-**3. Use Claude Code normally**
-Run `claude` in your terminal as usual. When Claude writes files, ClaudeGate will catch them and show a pending count badge in the sidebar.
+This installs a `PreToolUse` hook into Claude Code that automatically snapshots files before Claude writes them.
+
+**3. Run Claude Code normally**
+Use `claude` in your terminal as usual. When Claude modifies files, ClaudeGate shows a pending count badge in the sidebar — click any file to review the diff.
 
 ---
 
 ## The Review Flow
 
-1. The **ClaudeGate** icon in the Activity Bar shows a panel with all modified files
-2. Click any file to open VS Code's native diff editor (original on the left, Claude's version on the right)
-3. Use the inline buttons to **Accept** (keep Claude's change) or **Reject** (revert to original)
+1. The **ClaudeGate** icon in the Activity Bar shows three panels: **Pending**, **Accepted**, and **Rejected**
+2. Click any pending file to open VS Code's native diff editor — original on the left, Claude's version on the right
+3. **✓ Accept** and **✕ Reject** inline links appear at the top of the diff — one click, done
+4. Accepted files move to the Accepted panel; rejected files are restored to their original content
 
 ---
 
 ## Features
 
-- Automatic session tracking via Claude Code hooks — no manual start/stop
-- File-by-file diff review using VS Code's built-in diff editor
-- Accept keeps the change as-is; Reject writes the original content back
-- New files created by Claude are deleted on Reject
-- Session history archived to `~/.claudegate/history/`
-- Pending file count badge on the sidebar panel
-- Clear Session button to archive and reset
-
----
-
-## Requirements
-
-| Requirement | Notes |
-|---|---|
-| VS Code 1.85+ or Cursor | |
-| [Claude Code](https://claude.ai/claude-code) | Anthropic's CLI |
-| Python 3.7+ | Pre-installed on macOS and most Linux distros |
-
-> **Windows:** Requires WSL (Windows Subsystem for Linux). Native Windows support is planned for a future release.
+- **Automatic session tracking** — hooks fire before every Claude file write; no manual start/stop
+- **Three independent panels** — Pending, Accepted, and Rejected with per-panel collapse and view toggle
+- **Accept/Reject CodeLens** — inline action links at the top of any pending file, in the diff view and the regular editor
+- **Folder-level actions** — accept or reject an entire directory at once (tree view mode)
+- **Undo your decisions** — re-apply Claude's changes from the Rejected panel; un-accept files back to Pending
+- **Workspace-aware filtering** — files modified outside the current workspace (e.g. `~/.claude/settings.json`) are hidden from the review panel
+- **Pending count badge** on the sidebar panel header
+- **Session history** archived to `~/.claudegate/history/`
 
 ---
 
@@ -69,39 +61,39 @@ Run `claude` in your terminal as usual. When Claude writes files, ClaudeGate wil
 Claude Code (terminal)
        │
   PreToolUse hook fires before each Write / Edit / MultiEdit
-  ~/.claudegate/hook.py reads the file's current content
+  ~/.claudegate/hook.py snapshots the current file content
        │
-  ~/.claudegate/session.json  ← shared state file
+  ~/.claudegate/session.json  ←  shared state file
        │
   ClaudeGate extension watches for changes
-       └── Updates sidebar panel in real time
+       └── Updates review panels in real time
 ```
 
-The hook only stores a file's original content **once per session** — subsequent Claude writes to the same file don't overwrite the snapshot, so you always compare against the true before-state.
+The hook captures a file's original content **once per session** — subsequent Claude writes to the same file don't overwrite the snapshot, so you always diff against the true before-state.
 
 ---
 
-## File Locations
+## Requirements
 
-| Path | Purpose |
-|---|---|
-| `~/.claudegate/hook.py` | Hook script (managed by Setup Hook command) |
-| `~/.claudegate/hook.sh` | Shell entry point called by Claude Code |
-| `~/.claudegate/session.json` | Active session state |
-| `~/.claudegate/history/` | Archived past sessions |
-| `~/.claude/settings.json` | Claude Code configuration (hook registration added here) |
+| Requirement                                  | Notes                                         |
+| -------------------------------------------- | --------------------------------------------- |
+| VS Code 1.85+ or Cursor                      |                                               |
+| [Claude Code](https://claude.ai/claude-code) | Anthropic's CLI                               |
+| Python 3.7+                                  | Pre-installed on macOS and most Linux distros |
+
+> **Windows:** Native Windows is supported. Python must be on your `PATH` (`python` or `python3`). WSL is not required.
 
 ---
 
 ## Updating the Hook
 
-If you update ClaudeGate, re-run **`ClaudeGate: Setup Hook`** to install the latest hook script.
+After updating the extension, re-run **`ClaudeGate: Setup Hook`** to install the latest hook script.
 
 ---
 
-## Contributing
+## Contributing & Issues
 
-See [CLAUDE.md](CLAUDE.md) for the architecture guide and development setup.
+Found a bug or have a feature request? [Open an issue on GitHub](https://github.com/lntvan166/claudegate/issues).
 
 ---
 

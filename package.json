@@ -82,7 +82,7 @@
       {
         "command": "claudegate.rejectFile",
         "title": "Reject",
-        "icon": "$(x)"
+        "icon": "$(close)"
       },
       {
         "command": "claudegate.acceptAll",
@@ -150,6 +150,18 @@
       }
     ],
     "menus": {
+      "editor/title": [
+        {
+          "command": "claudegate.acceptFile",
+          "when": "claudegate.activeFileIsPending",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudegate.rejectFile",
+          "when": "claudegate.activeFileIsPending",
+          "group": "navigation@2"
+        }
+      ],
       "view/title": [
         {
           "command": "claudegate.viewAsTree",

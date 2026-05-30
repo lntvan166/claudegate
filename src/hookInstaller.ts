@@ -9,10 +9,18 @@ python3 "$HOME/.claudegate/hook.py"
 `;
 
 export class HookInstaller {
-  private readonly claudegateDir = path.join(os.homedir(), ".claudegate");
-  private readonly hookPyDest = path.join(os.homedir(), ".claudegate", "hook.py");
-  private readonly hookShDest = path.join(os.homedir(), ".claudegate", "hook.sh");
+  private readonly isWindows = process.platform === "win32";
+  private pythonCmd = "python3";
+
+  private readonly claudegateDir     = path.join(os.homedir(), ".claudegate");
+  private readonly hookPyDest        = path.join(os.homedir(), ".claudegate", "hook.py");
+  private readonly hookShDest        = path.join(os.homedir(), ".claudegate", "hook.sh");
+  private readonly hookBatDest       = path.join(os.homedir(), ".claudegate", "hook.bat");
   private readonly claudeSettingsPath = path.join(os.homedir(), ".claude", "settings.json");
+
+  private get hookWrapperDest(): string {
+    return this.isWindows ? this.hookBatDest : this.hookShDest;
+  }
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -25,7 +33,7 @@ export class HookInstaller {
       fs.mkdirSync(this.claudegateDir, { recursive: true });
 
       this.installHookPy();
-      this.installHookSh();
+      this.installHookWrapper();
       this.patchClaudeSettings();
 
       this.log.appendLine("[INFO] Hook installed successfully.");
@@ -43,13 +51,19 @@ export class HookInstaller {
   }
 
   private ensurePythonAvailable(): void {
-    try {
-      child_process.execSync("python3 --version", { stdio: "ignore" });
-    } catch {
-      throw new Error(
-        "Python 3 is required but not found. Install it from https://python.org and try again."
-      );
+    // On Windows try 'python' first (typical install), then 'python3'.
+    // On macOS/Linux only 'python3' is checked to preserve existing behaviour.
+    const candidates = this.isWindows ? ["python", "python3"] : ["python3"];
+    for (const cmd of candidates) {
+      try {
+        child_process.execSync(`${cmd} --version`, { stdio: "ignore" });
+        this.pythonCmd = cmd;
+        return;
+      } catch { /* try next */ }
     }
+    throw new Error(
+      "Python 3 is required but not found. Install it from https://python.org and try again."
+    );
   }
 
   private installHookPy(): void {
@@ -60,9 +74,16 @@ export class HookInstaller {
     fs.copyFileSync(sourcePath, this.hookPyDest);
   }
 
-  private installHookSh(): void {
-    fs.writeFileSync(this.hookShDest, HOOK_SH, "utf-8");
-    fs.chmodSync(this.hookShDest, 0o755);
+  private installHookWrapper(): void {
+    if (this.isWindows) {
+      // .bat wrapper — uses the python executable found during setup and the
+      // absolute path to hook.py so the script works regardless of cwd.
+      const bat = `@echo off\n"${this.pythonCmd}" "${this.hookPyDest}"\n`;
+      fs.writeFileSync(this.hookBatDest, bat, "utf-8");
+    } else {
+      fs.writeFileSync(this.hookShDest, HOOK_SH, "utf-8");
+      fs.chmodSync(this.hookShDest, 0o755);
+    }
   }
 
   private patchClaudeSettings(): void {
@@ -84,7 +105,7 @@ export class HookInstaller {
     if (!alreadyInstalled) {
       hooks.PreToolUse.push({
         matcher: "^(Write|Edit|MultiEdit)$",
-        hooks: [{ type: "command", command: this.hookShDest }],
+        hooks: [{ type: "command", command: this.hookWrapperDest }],
       });
     }
 
@@ -94,8 +115,12 @@ export class HookInstaller {
   verify(): void {
     const issues: string[] = [];
 
-    if (!fs.existsSync(this.hookPyDest)) issues.push("hook.py not found in ~/.claudegate");
-    if (!fs.existsSync(this.hookShDest)) issues.push("hook.sh not found in ~/.claudegate");
+    if (!fs.existsSync(this.hookPyDest)) {
+      issues.push("hook.py not found in ~/.claudegate");
+    }
+    if (!fs.existsSync(this.hookWrapperDest)) {
+      issues.push(`hook.${this.isWindows ? "bat" : "sh"} not found in ~/.claudegate`);
+    }
 
     try {
       const settings = JSON.parse(fs.readFileSync(this.claudeSettingsPath, "utf-8"));

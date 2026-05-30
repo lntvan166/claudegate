@@ -11,7 +11,32 @@ import {
 import { HookInstaller } from "./hookInstaller";
 import { ClaudeGateContentProvider, SCHEME } from "./diffProvider";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
-import { ClaudeGateCodeLensProvider } from "./codeLensProvider";
+
+let _badgeBar: vscode.StatusBarItem | undefined;
+
+function getActivePendingFilePath(sessionManager: SessionManager): string | undefined {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) return undefined;
+  const uri = editor.document.uri;
+  const filePath =
+    uri.scheme === "file"       ? uri.fsPath :
+    uri.scheme === "claudegate" ? uri.path   :
+    undefined;
+  if (!filePath) return undefined;
+  return sessionManager.getSession()?.files[filePath]?.reviewStatus === "pending"
+    ? filePath
+    : undefined;
+}
+
+function refreshActiveFilePendingContext(sessionManager: SessionManager): void {
+  const editor = vscode.window.activeTextEditor;
+  if (editor) {
+    const scheme = editor.document.uri.scheme;
+    if (scheme !== "file" && scheme !== "claudegate") return;
+  }
+  const pending = getActivePendingFilePath(sessionManager);
+  vscode.commands.executeCommand("setContext", "claudegate.activeFileIsPending", pending !== undefined);
+}
 
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -20,14 +45,22 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(log);
     log.appendLine("[INFO] ClaudeGate activating…");
 
-    vscode.commands.executeCommand("setContext", "claudegate.viewMode", "list");
+    vscode.commands.executeCommand("setContext", "claudegate.viewMode", "tree");
 
     const sessionManager = new SessionManager(log);
     const hookInstaller  = new HookInstaller(context, log);
 
-    const pendingProvider  = new FilteredTreeProvider(sessionManager, "pending");
-    const acceptedProvider = new FilteredTreeProvider(sessionManager, "accepted");
-    const rejectedProvider = new FilteredTreeProvider(sessionManager, "rejected");
+    const badgeBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+    badgeBar.text    = "$(shield) 0";
+    badgeBar.tooltip = "ClaudeGate: 0 pending file(s) — click to open review panel";
+    badgeBar.command = "claudegate.pendingPanel.focus";
+    badgeBar.show();
+    _badgeBar = badgeBar;
+    context.subscriptions.push(badgeBar);
+
+    const pendingProvider  = new FilteredTreeProvider(sessionManager, "pending",  "tree");
+    const acceptedProvider = new FilteredTreeProvider(sessionManager, "accepted", "tree");
+    const rejectedProvider = new FilteredTreeProvider(sessionManager, "rejected", "tree");
 
     context.subscriptions.push(
       vscode.workspace.registerTextDocumentContentProvider(
@@ -39,13 +72,6 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
       vscode.window.registerFileDecorationProvider(
         new ClaudeGateDecorationProvider(sessionManager)
-      )
-    );
-
-    context.subscriptions.push(
-      vscode.languages.registerCodeLensProvider(
-        "*",
-        new ClaudeGateCodeLensProvider(sessionManager)
       )
     );
 
@@ -77,23 +103,27 @@ export function activate(context: vscode.ExtensionContext): void {
       // ── Pending file actions ──
       vscode.commands.registerCommand(
         "claudegate.acceptFile",
-        async (item: FileReviewItem | { filePath: string }) => {
-          sessionManager.acceptFile(item.filePath);
-          await closeDiffEditor(item.filePath);
+        async (item?: FileReviewItem | { filePath: string }) => {
+          const filePath = item?.filePath ?? getActivePendingFilePath(sessionManager);
+          if (!filePath) return;
+          sessionManager.acceptFile(filePath);
+          await closeDiffEditor(filePath);
         }
       ),
 
       vscode.commands.registerCommand(
         "claudegate.rejectFile",
-        async (item: FileReviewItem | { filePath: string }) => {
+        async (item?: FileReviewItem | { filePath: string }) => {
+          const filePath = item?.filePath ?? getActivePendingFilePath(sessionManager);
+          if (!filePath) return;
           const answer = await vscode.window.showWarningMessage(
-            `Revert "${path.basename(item.filePath)}" to its original content?`,
+            `Revert "${path.basename(filePath)}" to its original content?`,
             { modal: false },
             "Revert"
           );
           if (answer === "Revert") {
-            sessionManager.rejectFile(item.filePath);
-            await closeDiffEditor(item.filePath);
+            sessionManager.rejectFile(filePath);
+            await closeDiffEditor(filePath);
           }
         }
       ),
@@ -206,7 +236,14 @@ export function activate(context: vscode.ExtensionContext): void {
     registerOpenDiff(context, sessionManager);
 
     // ── Reactive updates ──────────────────────────────────────────────────
+    context.subscriptions.push(
+      vscode.window.onDidChangeActiveTextEditor(() =>
+        refreshActiveFilePendingContext(sessionManager)
+      )
+    );
+
     sessionManager.onSessionChange((session) => {
+      refreshActiveFilePendingContext(sessionManager);
       const counts = {
         pending:  0,
         accepted: 0,
@@ -222,11 +259,20 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.commands.executeCommand("setContext", "claudegate.rejectedCount", counts.rejected);
 
       pendingView.badge = counts.pending > 0 ? { value: counts.pending, tooltip: `${counts.pending} pending file(s)` } : undefined;
+
+      if (_badgeBar) {
+        _badgeBar.text            = `$(shield) ${counts.pending}`;
+        _badgeBar.tooltip         = `ClaudeGate: ${counts.pending} pending file(s) — click to open review panel`;
+        _badgeBar.backgroundColor = counts.pending > 0
+          ? new vscode.ThemeColor("statusBarItem.warningBackground")
+          : undefined;
+      }
     });
 
     sessionManager.startWatching();
     context.subscriptions.push({ dispose: () => sessionManager.stopWatching() });
 
+    refreshActiveFilePendingContext(sessionManager);
     log.appendLine("[INFO] ClaudeGate ready.");
   } catch (err) {
     console.error("[ClaudeGate] ACTIVATION ERROR:", err);
