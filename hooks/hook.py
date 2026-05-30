@@ -10,6 +10,7 @@ import sys
 import json
 import os
 import hashlib
+import random
 from datetime import datetime, timezone
 
 CLAUDEGATE_DIR = os.path.expanduser("~/.claudegate")
@@ -23,6 +24,13 @@ def workspace_session_file(cwd: str) -> str:
     workspace_hash = hashlib.md5(normalized.encode()).hexdigest()
     return os.path.join(SESSIONS_DIR, f"{workspace_hash}.json")
 
+
+# Known limitation: hook.py and the VS Code extension both read-modify-write
+# the same JSON file without a cross-process lock. The probability of a
+# collision is very low (both must be in their read→write window simultaneously)
+# but is non-zero when the user is actively accepting/rejecting files while
+# Claude is writing new ones. Atomic os.replace() prevents torn reads, but
+# does not prevent one writer from overwriting the other's changes.
 
 def load_session(session_file: str) -> dict | None:
     try:
@@ -41,8 +49,10 @@ def new_session() -> dict:
 
 
 def save_session(session: dict, session_file: str) -> None:
+    # Use PID + random suffix so concurrent hook invocations (e.g. MultiEdit)
+    # don't clobber each other's temp file before the atomic replace.
     os.makedirs(os.path.dirname(session_file), exist_ok=True)
-    tmp = session_file + ".tmp"
+    tmp = f"{session_file}.{os.getpid()}.{random.randint(0, 0xFFFFFF):06x}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(session, f, indent=2)
     os.replace(tmp, session_file)

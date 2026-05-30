@@ -1,5 +1,7 @@
 import * as vscode from "vscode";
+import * as fs from "fs";
 import * as path from "path";
+import * as os from "os";
 import { SessionManager } from "./sessionManager";
 import {
   FilteredTreeProvider,
@@ -12,7 +14,6 @@ import { HookInstaller } from "./hookInstaller";
 import { ClaudeGateContentProvider, SCHEME } from "./diffProvider";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
 
-let _badgeBar: vscode.StatusBarItem | undefined;
 
 function getActivePendingFilePath(sessionManager: SessionManager): string | undefined {
   const editor = vscode.window.activeTextEditor;
@@ -56,7 +57,6 @@ export function activate(context: vscode.ExtensionContext): void {
     badgeBar.tooltip = "ClaudeGate: 0 pending file(s) — click to open review panel";
     badgeBar.command = "claudegate.pendingPanel.focus";
     badgeBar.show();
-    _badgeBar = badgeBar;
     context.subscriptions.push(badgeBar);
 
     const pendingProvider  = new FilteredTreeProvider(sessionManager, "pending",  "tree");
@@ -261,17 +261,28 @@ export function activate(context: vscode.ExtensionContext): void {
 
       pendingView.badge = counts.pending > 0 ? { value: counts.pending, tooltip: `${counts.pending} pending file(s)` } : undefined;
 
-      if (_badgeBar) {
-        _badgeBar.text            = `$(shield) ${counts.pending}`;
-        _badgeBar.tooltip         = `ClaudeGate: ${counts.pending} pending file(s) — click to open review panel`;
-        _badgeBar.backgroundColor = counts.pending > 0
-          ? new vscode.ThemeColor("statusBarItem.warningBackground")
-          : undefined;
-      }
+      badgeBar.text            = `$(shield) ${counts.pending}`;
+      badgeBar.tooltip         = `ClaudeGate: ${counts.pending} pending file(s) — click to open review panel`;
+      badgeBar.backgroundColor = counts.pending > 0
+        ? new vscode.ThemeColor("statusBarItem.warningBackground")
+        : undefined;
     });
 
     sessionManager.startWatching();
     context.subscriptions.push({ dispose: () => sessionManager.stopWatching() });
+
+    // One-time migration notice: v1.0 used a single ~/.claudegate/session.json;
+    // v1.1+ uses per-workspace files. Warn users with an existing old file so
+    // they know to re-run Setup Hook and that previous session data is not migrated.
+    const legacyPath = path.join(os.homedir(), ".claudegate", "session.json");
+    const migrationKey = "claudegate.shownMigrationNotice";
+    if (fs.existsSync(legacyPath) && !context.globalState.get(migrationKey)) {
+      context.globalState.update(migrationKey, true);
+      vscode.window.showInformationMessage(
+        "ClaudeGate has been updated to use per-workspace session files. " +
+        "Please re-run 'ClaudeGate: Setup Hook' to install the updated hook script."
+      );
+    }
 
     refreshActiveFilePendingContext(sessionManager);
     log.appendLine("[INFO] ClaudeGate ready.");

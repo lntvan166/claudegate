@@ -169,6 +169,7 @@ export class SessionManager {
       }
     }
 
+    if (count === 0 && errors.length === 0) return;
     this.persist();
     this.log.appendLine(`[INFO] Rejected folder: ${folderPath} (${count} file(s))`);
     if (errors.length > 0) {
@@ -346,6 +347,12 @@ export class SessionManager {
     this.persist();
   }
 
+  // Known limitation: hook.py and the extension both read-modify-write the
+  // same JSON file without a cross-process lock. Atomic rename prevents torn
+  // reads, but a concurrent hook.py write can still overwrite accept/reject
+  // state written by the extension (and vice-versa). This is low-probability
+  // in normal single-user use; the long-term fix is a version/timestamp check.
+
   rejectAll(): void {
     if (!this.session) return;
     let count = 0;
@@ -374,6 +381,7 @@ export class SessionManager {
       }
     }
 
+    if (count === 0 && errors.length === 0) return;
     this.persist();
     this.log.appendLine(`[INFO] ` + `Rejected all: ${count} file(s)`);
 
