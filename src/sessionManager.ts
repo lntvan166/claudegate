@@ -232,9 +232,12 @@ export class SessionManager {
 
     for (const [fp, entry] of Object.entries(this.session.files)) {
       if (entry.reviewStatus !== "rejected") continue;
-      if (!entry.claudeContent) {
-        errors.push(`${path.basename(fp)}: Cannot re-apply — content not available.`);
+      if (entry.claudeContent === undefined) {
         this.log.appendLine(`[WARN] reapplyAll skipped ${fp}: no claudeContent`);
+        continue;
+      }
+      if (entry.claudeContent === null) {
+        this.log.appendLine(`[WARN] reapplyAll skipped ${fp}: Claude created new file, nothing to restore`);
         continue;
       }
       try {
@@ -248,6 +251,7 @@ export class SessionManager {
       }
     }
 
+    if (count === 0 && errors.length === 0) return;
     this.persist();
     this.log.appendLine(`[INFO] Reapplied all: ${count} file(s)`);
     if (errors.length > 0) {
@@ -265,9 +269,12 @@ export class SessionManager {
 
     for (const [fp, entry] of Object.entries(this.session.files)) {
       if (!fp.startsWith(prefix) || entry.reviewStatus !== "rejected") continue;
-      if (!entry.claudeContent) {
-        errors.push(`${path.basename(fp)}: Cannot re-apply — content not available.`);
+      if (entry.claudeContent === undefined) {
         this.log.appendLine(`[WARN] reapplyFolder skipped ${fp}: no claudeContent`);
+        continue;
+      }
+      if (entry.claudeContent === null) {
+        this.log.appendLine(`[WARN] reapplyFolder skipped ${fp}: Claude created new file, nothing to restore`);
         continue;
       }
       try {
@@ -281,6 +288,7 @@ export class SessionManager {
       }
     }
 
+    if (count === 0 && errors.length === 0) return;
     this.persist();
     this.log.appendLine(`[INFO] Reapplied folder: ${folderPath} (${count} file(s))`);
     if (errors.length > 0) {
