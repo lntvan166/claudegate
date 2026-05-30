@@ -160,7 +160,10 @@ export class ReviewTreeProvider
 
     // ── Root: group headers ──────────────────────────────────────────────────
     if (!element) {
-      const counts = this.countByStatus(session.files);
+      const workspaceFiles = Object.fromEntries(
+        Object.entries(session.files).filter(([fp]) => isInWorkspace(fp))
+      );
+      const counts = this.countByStatus(workspaceFiles);
       return (["pending", "accepted", "rejected"] as ReviewStatus[])
         .filter((s) => s === "pending" || counts[s] > 0)
         .map((s) => new GroupItem(s, counts[s]));
@@ -188,7 +191,8 @@ export class ReviewTreeProvider
         .filter(
           ([fp, e]) =>
             e.reviewStatus === element.groupStatus &&
-            fp.startsWith(element.folderPath + path.sep)
+            fp.startsWith(element.folderPath + path.sep) &&
+            isInWorkspace(fp)
         )
         .map(([fp]) => fp);
       return this.directChildren(
