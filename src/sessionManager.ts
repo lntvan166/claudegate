@@ -68,6 +68,58 @@ export class SessionManager {
     this.persist();
   }
 
+  acceptFolder(folderPath: string): void {
+    if (!this.session) return;
+    const prefix = folderPath + path.sep;
+    let count = 0;
+    for (const [fp, entry] of Object.entries(this.session.files)) {
+      if (fp.startsWith(prefix) && entry.reviewStatus === "pending") {
+        entry.reviewStatus = "accepted";
+        count++;
+      }
+    }
+    this.log.appendLine(`[INFO] Accepted folder: ${folderPath} (${count} file(s))`);
+    this.persist();
+  }
+
+  rejectFolder(folderPath: string): void {
+    if (!this.session) return;
+    const prefix = folderPath + path.sep;
+    const errors: string[] = [];
+    let count = 0;
+
+    for (const [fp, entry] of Object.entries(this.session.files)) {
+      if (!fp.startsWith(prefix) || entry.reviewStatus !== "pending") continue;
+      try {
+        entry.claudeContent = fs.readFileSync(fp, "utf-8");
+      } catch {
+        entry.claudeContent = null;
+      }
+      try {
+        if (entry.originalContent === null) {
+          fs.unlinkSync(fp);
+        } else {
+          fs.writeFileSync(fp, entry.originalContent, "utf-8");
+        }
+        entry.reviewStatus = "rejected";
+        count++;
+      } catch (err) {
+        errors.push(`${path.basename(fp)}: ${(err as Error).message}`);
+        this.log.appendLine(
+          `[ERROR] rejectFolder failed for ${fp}: ${(err as Error).message}`
+        );
+      }
+    }
+
+    this.persist();
+    this.log.appendLine(`[INFO] Rejected folder: ${folderPath} (${count} file(s))`);
+    if (errors.length > 0) {
+      vscode.window.showErrorMessage(
+        `ClaudeGate: Could not restore ${errors.length} file(s). Check Output panel for details.`
+      );
+    }
+  }
+
   rejectFile(filePath: string): void {
     const entry = this.session?.files[filePath];
     if (!entry || entry.reviewStatus !== "pending") return;
