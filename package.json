@@ -41,15 +41,25 @@
     "views": {
       "claudegate": [
         {
-          "id": "claudegate.reviewPanel",
-          "name": "Review Session"
+          "id": "claudegate.pendingPanel",
+          "name": "Pending"
+        },
+        {
+          "id": "claudegate.acceptedPanel",
+          "name": "Accepted",
+          "when": "claudegate.acceptedCount > 0"
+        },
+        {
+          "id": "claudegate.rejectedPanel",
+          "name": "Rejected",
+          "when": "claudegate.rejectedCount > 0"
         }
       ]
     },
     "viewsWelcome": [
       {
-        "view": "claudegate.reviewPanel",
-        "contents": "No active Claude session.\n\nRun Claude Code in your terminal to start tracking changes.\n\n[Setup Hook](command:claudegate.setupHook)\n\n[View Documentation](https://github.com/claudegate/claudegate#readme)"
+        "view": "claudegate.pendingPanel",
+        "contents": "No pending files.\n\nRun Claude Code in your terminal to start tracking changes.\n\n[Setup Hook](command:claudegate.setupHook)"
       }
     ],
     "commands": [
@@ -104,9 +114,44 @@
         "icon": "$(list-flat)"
       },
       {
-        "command": "claudegate.expandAll",
-        "title": "Expand All",
-        "icon": "$(expand-all)"
+        "command": "claudegate.revertAccepted",
+        "title": "Revert to Pending",
+        "icon": "$(debug-step-back)"
+      },
+      {
+        "command": "claudegate.revertAcceptedFolder",
+        "title": "Revert Folder to Pending",
+        "icon": "$(debug-step-back)"
+      },
+      {
+        "command": "claudegate.revertAcceptedAll",
+        "title": "Revert All Accepted",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "claudegate.reapplyFolder",
+        "title": "Re-apply Folder",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "claudegate.reapplyAll",
+        "title": "Re-apply All",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "claudegate.acceptActivePending",
+        "title": "Accept",
+        "icon": "$(check)"
+      },
+      {
+        "command": "claudegate.rejectActivePendingFromDiff",
+        "title": "Reject",
+        "icon": "$(x)"
+      },
+      {
+        "command": "claudegate.rejectActivePending",
+        "title": "Reject",
+        "icon": "$(x)"
       },
       {
         "command": "claudegate.acceptFolder",
@@ -122,73 +167,127 @@
     "menus": {
       "view/title": [
         {
-          "command": "claudegate.expandAll",
-          "when": "view == claudegate.reviewPanel",
-          "group": "navigation@0"
-        },
-        {
           "command": "claudegate.viewAsTree",
-          "when": "view == claudegate.reviewPanel && claudegate.viewMode == 'list'",
+          "when": "view == claudegate.pendingPanel && claudegate.viewMode == 'list'",
           "group": "navigation@1"
         },
         {
           "command": "claudegate.viewAsList",
-          "when": "view == claudegate.reviewPanel && claudegate.viewMode == 'tree'",
+          "when": "view == claudegate.pendingPanel && claudegate.viewMode == 'tree'",
           "group": "navigation@1"
         },
         {
           "command": "claudegate.acceptAll",
-          "when": "view == claudegate.reviewPanel",
+          "when": "view == claudegate.pendingPanel",
           "group": "navigation@2"
         },
         {
           "command": "claudegate.rejectAll",
-          "when": "view == claudegate.reviewPanel",
+          "when": "view == claudegate.pendingPanel",
           "group": "navigation@3"
         },
         {
           "command": "claudegate.clearSession",
-          "when": "view == claudegate.reviewPanel",
+          "when": "view == claudegate.pendingPanel",
           "group": "navigation@4"
+        },
+        {
+          "command": "claudegate.revertAcceptedAll",
+          "when": "view == claudegate.acceptedPanel",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudegate.reapplyAll",
+          "when": "view == claudegate.rejectedPanel",
+          "group": "navigation@1"
         }
       ],
       "view/item/context": [
         {
           "command": "claudegate.acceptFile",
-          "when": "view == claudegate.reviewPanel && viewItem == claudegate.file.pending",
+          "when": "view == claudegate.pendingPanel && viewItem == claudegate.file.pending",
           "group": "inline@1"
         },
         {
           "command": "claudegate.rejectFile",
-          "when": "view == claudegate.reviewPanel && viewItem == claudegate.file.pending",
+          "when": "view == claudegate.pendingPanel && viewItem == claudegate.file.pending",
           "group": "inline@2"
         },
         {
-          "command": "claudegate.reapplyFile",
-          "when": "view == claudegate.reviewPanel && viewItem == claudegate.file.rejected",
-          "group": "inline@1"
-        },
-        {
           "command": "claudegate.acceptFolder",
-          "when": "view == claudegate.reviewPanel && viewItem == claudegate.folder.pending",
+          "when": "view == claudegate.pendingPanel && viewItem == claudegate.folder.pending",
           "group": "inline@1"
         },
         {
           "command": "claudegate.rejectFolder",
-          "when": "view == claudegate.reviewPanel && viewItem == claudegate.folder.pending",
+          "when": "view == claudegate.pendingPanel && viewItem == claudegate.folder.pending",
           "group": "inline@2"
+        },
+        {
+          "command": "claudegate.revertAccepted",
+          "when": "view == claudegate.acceptedPanel && viewItem == claudegate.file.accepted",
+          "group": "inline@1"
+        },
+        {
+          "command": "claudegate.revertAcceptedFolder",
+          "when": "view == claudegate.acceptedPanel && viewItem == claudegate.folder.accepted",
+          "group": "inline@1"
+        },
+        {
+          "command": "claudegate.reapplyFile",
+          "when": "view == claudegate.rejectedPanel && viewItem == claudegate.file.rejected",
+          "group": "inline@1"
+        },
+        {
+          "command": "claudegate.reapplyFolder",
+          "when": "view == claudegate.rejectedPanel && viewItem == claudegate.folder.rejected",
+          "group": "inline@1"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "claudegate.acceptActivePending",
+          "when": "claudegate.isActivePending",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudegate.rejectActivePendingFromDiff",
+          "when": "activeEditorIsDiffEditor && claudegate.isActivePending",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claudegate.rejectActivePending",
+          "when": "!activeEditorIsDiffEditor && claudegate.isActivePending && config.claudegate.showEditorButtons",
+          "group": "navigation@2"
         }
       ],
       "commandPalette": [
-        { "command": "claudegate.acceptFile",   "when": "false" },
-        { "command": "claudegate.rejectFile",   "when": "false" },
-        { "command": "claudegate.reapplyFile",  "when": "false" },
-        { "command": "claudegate.acceptFolder", "when": "false" },
-        { "command": "claudegate.rejectFolder", "when": "false" },
-        { "command": "claudegate.viewAsTree",   "when": "false" },
-        { "command": "claudegate.viewAsList",   "when": "false" },
-        { "command": "claudegate.expandAll",    "when": "false" }
+        { "command": "claudegate.acceptFile",                 "when": "false" },
+        { "command": "claudegate.rejectFile",                 "when": "false" },
+        { "command": "claudegate.reapplyFile",                "when": "false" },
+        { "command": "claudegate.acceptFolder",               "when": "false" },
+        { "command": "claudegate.rejectFolder",               "when": "false" },
+        { "command": "claudegate.revertAccepted",             "when": "false" },
+        { "command": "claudegate.revertAcceptedFolder",       "when": "false" },
+        { "command": "claudegate.reapplyFolder",              "when": "false" },
+        { "command": "claudegate.viewAsTree",                 "when": "false" },
+        { "command": "claudegate.viewAsList",                 "when": "false" },
+        { "command": "claudegate.acceptActivePending",        "when": "false" },
+        { "command": "claudegate.rejectActivePendingFromDiff","when": "false" },
+        { "command": "claudegate.rejectActivePending",        "when": "false" },
+        { "command": "claudegate.revertAcceptedAll",          "when": "false" },
+        { "command": "claudegate.reapplyAll",                 "when": "false" }
       ]
+    },
+    "configuration": {
+      "title": "ClaudeGate",
+      "properties": {
+        "claudegate.showEditorButtons": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show Accept/Reject buttons in the editor title bar for pending files. Buttons in the diff view are always shown."
+        }
+      }
     }
   },
   "scripts": {
