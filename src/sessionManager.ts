@@ -83,6 +83,43 @@ export class SessionManager {
     this.persist();
   }
 
+  revertAccepted(filePath: string): void {
+    const entry = this.session?.files[filePath];
+    if (!entry || entry.reviewStatus !== "accepted") return;
+    entry.reviewStatus = "pending";
+    this.log.appendLine(`[INFO] Reverted accepted: ${filePath}`);
+    this.persist();
+  }
+
+  revertAcceptedAll(): void {
+    if (!this.session) return;
+    let count = 0;
+    for (const entry of Object.values(this.session.files)) {
+      if (entry.reviewStatus === "accepted") {
+        entry.reviewStatus = "pending";
+        count++;
+      }
+    }
+    if (count === 0) return;
+    this.log.appendLine(`[INFO] Reverted all accepted: ${count} file(s)`);
+    this.persist();
+  }
+
+  revertAcceptedFolder(folderPath: string): void {
+    if (!this.session) return;
+    const prefix = folderPath + path.sep;
+    let count = 0;
+    for (const [fp, entry] of Object.entries(this.session.files)) {
+      if (fp.startsWith(prefix) && entry.reviewStatus === "accepted") {
+        entry.reviewStatus = "pending";
+        count++;
+      }
+    }
+    if (count === 0) return;
+    this.log.appendLine(`[INFO] Reverted accepted folder: ${folderPath} (${count} file(s))`);
+    this.persist();
+  }
+
   rejectFolder(folderPath: string): void {
     if (!this.session) return;
     const prefix = folderPath + path.sep;
@@ -186,6 +223,71 @@ export class SessionManager {
     entry.reviewStatus = "pending"; // back to pending so user can review again
     entry.claudeContent = undefined;
     this.persist();
+  }
+
+  reapplyAll(): void {
+    if (!this.session) return;
+    const errors: string[] = [];
+    let count = 0;
+
+    for (const [fp, entry] of Object.entries(this.session.files)) {
+      if (entry.reviewStatus !== "rejected") continue;
+      if (!entry.claudeContent) {
+        errors.push(`${path.basename(fp)}: Cannot re-apply — content not available.`);
+        this.log.appendLine(`[WARN] reapplyAll skipped ${fp}: no claudeContent`);
+        continue;
+      }
+      try {
+        fs.writeFileSync(fp, entry.claudeContent, "utf-8");
+        entry.reviewStatus = "pending";
+        entry.claudeContent = undefined;
+        count++;
+      } catch (err) {
+        errors.push(`${path.basename(fp)}: ${(err as Error).message}`);
+        this.log.appendLine(`[ERROR] reapplyAll failed for ${fp}: ${(err as Error).message}`);
+      }
+    }
+
+    this.persist();
+    this.log.appendLine(`[INFO] Reapplied all: ${count} file(s)`);
+    if (errors.length > 0) {
+      vscode.window.showErrorMessage(
+        `ClaudeGate: Could not re-apply ${errors.length} file(s). Check Output panel for details.`
+      );
+    }
+  }
+
+  reapplyFolder(folderPath: string): void {
+    if (!this.session) return;
+    const prefix = folderPath + path.sep;
+    const errors: string[] = [];
+    let count = 0;
+
+    for (const [fp, entry] of Object.entries(this.session.files)) {
+      if (!fp.startsWith(prefix) || entry.reviewStatus !== "rejected") continue;
+      if (!entry.claudeContent) {
+        errors.push(`${path.basename(fp)}: Cannot re-apply — content not available.`);
+        this.log.appendLine(`[WARN] reapplyFolder skipped ${fp}: no claudeContent`);
+        continue;
+      }
+      try {
+        fs.writeFileSync(fp, entry.claudeContent, "utf-8");
+        entry.reviewStatus = "pending";
+        entry.claudeContent = undefined;
+        count++;
+      } catch (err) {
+        errors.push(`${path.basename(fp)}: ${(err as Error).message}`);
+        this.log.appendLine(`[ERROR] reapplyFolder failed for ${fp}: ${(err as Error).message}`);
+      }
+    }
+
+    this.persist();
+    this.log.appendLine(`[INFO] Reapplied folder: ${folderPath} (${count} file(s))`);
+    if (errors.length > 0) {
+      vscode.window.showErrorMessage(
+        `ClaudeGate: Could not re-apply ${errors.length} file(s). Check Output panel for details.`
+      );
+    }
   }
 
   // Mark rejected without writing to disk (used after inline diff already wrote the file)
