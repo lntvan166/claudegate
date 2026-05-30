@@ -5,14 +5,14 @@ import {
   FilteredTreeProvider,
   FileReviewItem,
   FolderItem,
+  registerOpenDiff,
   closeDiffEditor,
 } from "./reviewPanel";
 import { HookInstaller } from "./hookInstaller";
-import { ClaudeGateContentProvider, SCHEME, openDiff } from "./diffProvider";
+import { ClaudeGateContentProvider, SCHEME } from "./diffProvider";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
+import { ClaudeGateCodeLensProvider } from "./codeLensProvider";
 
-// Path of the active pending file — read by editor-title button commands
-let activePendingFilePath: string | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   try {
@@ -39,6 +39,13 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
       vscode.window.registerFileDecorationProvider(
         new ClaudeGateDecorationProvider(sessionManager)
+      )
+    );
+
+    context.subscriptions.push(
+      vscode.languages.registerCodeLensProvider(
+        "*",
+        new ClaudeGateCodeLensProvider(sessionManager)
       )
     );
 
@@ -193,75 +200,10 @@ export function activate(context: vscode.ExtensionContext): void {
         acceptedProvider.setViewMode("list");
         rejectedProvider.setViewMode("list");
         vscode.commands.executeCommand("setContext", "claudegate.viewMode", "list");
-      }),
-
-      // ── Editor-title buttons (active pending file) ──
-      vscode.commands.registerCommand("claudegate.acceptActivePending", async () => {
-        if (!activePendingFilePath) return;
-        sessionManager.acceptFile(activePendingFilePath);
-        await closeDiffEditor(activePendingFilePath);
-      }),
-
-      // Used from diff view — no confirmation dialog
-      vscode.commands.registerCommand("claudegate.rejectActivePendingFromDiff", async () => {
-        if (!activePendingFilePath) return;
-        sessionManager.rejectFile(activePendingFilePath);
-        await closeDiffEditor(activePendingFilePath);
-      }),
-
-      // Used from regular editor — shows confirmation
-      vscode.commands.registerCommand("claudegate.rejectActivePending", async () => {
-        if (!activePendingFilePath) return;
-        const answer = await vscode.window.showWarningMessage(
-          `Revert "${path.basename(activePendingFilePath)}" to its original content?`,
-          { modal: false },
-          "Revert"
-        );
-        if (answer === "Revert") {
-          sessionManager.rejectFile(activePendingFilePath);
-          await closeDiffEditor(activePendingFilePath);
-        }
       })
     );
 
-    context.subscriptions.push(
-      vscode.commands.registerCommand(
-        "claudegate.openDiff",
-        async (filePath: string) => {
-          await openDiff(filePath, sessionManager);
-          // Explicitly set active pending state — diff editors don't reliably
-          // fire onDidChangeActiveTextEditor, so we set it here on open.
-          const session = sessionManager.getSession();
-          if (session?.files[filePath]?.reviewStatus === "pending") {
-            activePendingFilePath = filePath;
-            vscode.commands.executeCommand("setContext", "claudegate.isActivePending", true);
-          } else {
-            activePendingFilePath = undefined;
-            vscode.commands.executeCommand("setContext", "claudegate.isActivePending", false);
-          }
-        }
-      )
-    );
-
-    // ── Active pending file tracking ──────────────────────────────────────
-    function updateActivePending(): void {
-      const editor = vscode.window.activeTextEditor;
-      const uri = editor?.document.uri;
-      const filePath =
-        uri?.scheme === "file"        ? uri.fsPath :
-        uri?.scheme === "claudegate"  ? uri.path   :
-        undefined;
-      const session = sessionManager.getSession();
-      const isPending = !!(
-        filePath && session?.files[filePath]?.reviewStatus === "pending"
-      );
-      activePendingFilePath = isPending ? filePath : undefined;
-      vscode.commands.executeCommand("setContext", "claudegate.isActivePending", isPending);
-    }
-
-    context.subscriptions.push(
-      vscode.window.onDidChangeActiveTextEditor(() => updateActivePending())
-    );
+    registerOpenDiff(context, sessionManager);
 
     // ── Reactive updates ──────────────────────────────────────────────────
     sessionManager.onSessionChange((session) => {
@@ -278,8 +220,6 @@ export function activate(context: vscode.ExtensionContext): void {
 
       vscode.commands.executeCommand("setContext", "claudegate.acceptedCount", counts.accepted);
       vscode.commands.executeCommand("setContext", "claudegate.rejectedCount", counts.rejected);
-
-      updateActivePending();
 
       pendingView.badge = counts.pending > 0 ? { value: counts.pending, tooltip: `${counts.pending} pending file(s)` } : undefined;
     });
