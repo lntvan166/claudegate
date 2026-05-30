@@ -66,7 +66,7 @@ export class FolderItem extends vscode.TreeItem {
     // resourceUri → VS Code uses the active theme's folder icon
     this.resourceUri  = vscode.Uri.file(folderPath);
     this.tooltip      = folderPath;
-    this.contextValue = "claudegate.folder";
+    this.contextValue = `claudegate.folder.${groupStatus}`;
   }
 }
 
@@ -111,6 +111,12 @@ function relativeDir(filePath: string): string {
   return parts.slice(-2).join("/");
 }
 
+function isInWorkspace(filePath: string): boolean {
+  const folders = vscode.workspace.workspaceFolders;
+  if (!folders || folders.length === 0) return true;
+  return folders.some((f) => filePath.startsWith(f.uri.fsPath + path.sep));
+}
+
 // ─── Tree data provider ───────────────────────────────────────────────────────
 
 export type ViewMode = "list" | "tree";
@@ -139,6 +145,10 @@ export class ReviewTreeProvider
     return this.viewMode;
   }
 
+  expandAll(): void {
+    this._onDidChangeTreeData.fire();
+  }
+
   getTreeItem(element: vscode.TreeItem): vscode.TreeItem {
     return element;
   }
@@ -159,7 +169,7 @@ export class ReviewTreeProvider
     // ── Group children ───────────────────────────────────────────────────────
     if (element instanceof GroupItem) {
       const files = Object.entries(session.files)
-        .filter(([, e]) => e.reviewStatus === element.groupStatus)
+        .filter(([fp, e]) => e.reviewStatus === element.groupStatus && isInWorkspace(fp))
         .map(([fp]) => fp);
 
       if (this.viewMode === "list") {
