@@ -139,21 +139,6 @@
         "icon": "$(debug-restart)"
       },
       {
-        "command": "claudegate.acceptActivePending",
-        "title": "Accept",
-        "icon": "$(check)"
-      },
-      {
-        "command": "claudegate.rejectActivePendingFromDiff",
-        "title": "Reject",
-        "icon": "$(x)"
-      },
-      {
-        "command": "claudegate.rejectActivePending",
-        "title": "Reject",
-        "icon": "$(x)"
-      },
-      {
         "command": "claudegate.acceptFolder",
         "title": "Accept Folder",
         "icon": "$(check)"
@@ -264,23 +249,6 @@
           "group": "inline@1"
         }
       ],
-      "editor/title": [
-        {
-          "command": "claudegate.acceptActivePending",
-          "when": "claudegate.isActivePending",
-          "group": "navigation@1"
-        },
-        {
-          "command": "claudegate.rejectActivePendingFromDiff",
-          "when": "activeEditorIsDiffEditor && claudegate.isActivePending",
-          "group": "navigation@2"
-        },
-        {
-          "command": "claudegate.rejectActivePending",
-          "when": "!activeEditorIsDiffEditor && claudegate.isActivePending && config.claudegate.showEditorButtons",
-          "group": "navigation@2"
-        }
-      ],
       "commandPalette": [
         { "command": "claudegate.acceptFile",                 "when": "false" },
         { "command": "claudegate.rejectFile",                 "when": "false" },
@@ -292,22 +260,9 @@
         { "command": "claudegate.reapplyFolder",              "when": "false" },
         { "command": "claudegate.viewAsTree",                 "when": "false" },
         { "command": "claudegate.viewAsList",                 "when": "false" },
-        { "command": "claudegate.acceptActivePending",        "when": "false" },
-        { "command": "claudegate.rejectActivePendingFromDiff","when": "false" },
-        { "command": "claudegate.rejectActivePending",        "when": "false" },
         { "command": "claudegate.revertAcceptedAll",          "when": "false" },
         { "command": "claudegate.reapplyAll",                 "when": "false" }
       ]
-    },
-    "configuration": {
-      "title": "ClaudeGate",
-      "properties": {
-        "claudegate.showEditorButtons": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show Accept/Reject buttons in the editor title bar for pending files. Buttons in the diff view are always shown."
-        }
-      }
     }
   },
   "scripts": {
