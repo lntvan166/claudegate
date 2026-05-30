@@ -78,6 +78,7 @@ export class SessionManager {
         count++;
       }
     }
+    if (count === 0) return;
     this.log.appendLine(`[INFO] Accepted folder: ${folderPath} (${count} file(s))`);
     this.persist();
   }
@@ -90,10 +91,11 @@ export class SessionManager {
 
     for (const [fp, entry] of Object.entries(this.session.files)) {
       if (!fp.startsWith(prefix) || entry.reviewStatus !== "pending") continue;
+      let savedClaudeContent: string | null;
       try {
-        entry.claudeContent = fs.readFileSync(fp, "utf-8");
+        savedClaudeContent = fs.readFileSync(fp, "utf-8");
       } catch {
-        entry.claudeContent = null;
+        savedClaudeContent = null;
       }
       try {
         if (entry.originalContent === null) {
@@ -101,6 +103,7 @@ export class SessionManager {
         } else {
           fs.writeFileSync(fp, entry.originalContent, "utf-8");
         }
+        entry.claudeContent = savedClaudeContent;
         entry.reviewStatus = "rejected";
         count++;
       } catch (err) {
