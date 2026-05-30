@@ -7,18 +7,38 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
-## [1.0.0] — 2026-05-28
+## [1.0.0] — 2026-05-30
 
-### Added
+First public release. ClaudeGate gives you the same accept/reject review workflow for Claude Code (terminal) that Cursor provides for its own AI agent.
 
-- **Automatic session tracking** via Claude Code `PreToolUse` hooks — captures original file content before every `Write`, `Edit`, and `MultiEdit` tool call
-- **One-command setup** (`ClaudeGate: Setup Hook`) installs the hook script and patches `~/.claude/settings.json` automatically
-- **Sidebar review panel** listing all files modified in the current Claude session, sorted by review status (pending first)
-- **Native VS Code diff editor** — clicking a file opens the built-in red/green diff view (original left, Claude's version right)
-- **Inline Accept / Reject buttons** per file in the sidebar
-  - Accept: keeps Claude's version, marks file as reviewed
-  - Reject: writes original content back to disk; new files created by Claude are deleted
-- **Status bar indicator** showing pending file count with warning highlight
-- **Clear Session** button to archive the current session and reset the panel
-- **Session history** automatically archived to `~/.claudegate/history/`
-- **Setup verification** — "Verify Setup" action confirms hook script and settings are in place
+### Review workflow
+
+- **Automatic file snapshots** — a `PreToolUse` hook fires before every `Write`, `Edit`, and `MultiEdit` call. The original file content is captured once per file per session; subsequent Claude writes to the same file never overwrite that snapshot.
+- **Native diff editor** — click any pending file to open VS Code's built-in diff view: original on the left, Claude's version on the right.
+- **Accept** keeps Claude's change and marks the file reviewed. **Reject** writes the original content back to disk; files that didn't exist before Claude are deleted on reject.
+- **Accept/Reject buttons** appear in the editor title bar whenever a pending file is open, and as inline actions on each file row in the sidebar.
+- **Undo decisions** — re-apply Claude's changes from the Rejected panel; move Accepted files back to Pending.
+
+### Sidebar panels
+
+- **Three independent panels** — Pending, Accepted, and Rejected — each with its own collapse and view-mode toggle.
+- **Tree and List view** — switch between a flat file list and a folder tree per panel.
+- **Folder-level actions** — Accept or Reject an entire directory at once in tree view.
+- **Pending count badge** on the sidebar panel header.
+- **Workspace-aware filtering** — files modified outside the current workspace (e.g. `~/.claude/settings.json`) are hidden.
+
+### Status bar
+
+- **`$(shield) N` badge** on the left status bar shows the pending file count and highlights orange when files are waiting for review. Clicking it opens the review panel.
+
+### Session management
+
+- **Per-workspace session files** — each project gets its own `~/.claudegate/sessions/<hash>.json`. Two VS Code windows with two Claude sessions running simultaneously stay fully isolated with no shared state.
+- **Session history** — completed sessions are automatically archived to `~/.claudegate/history/`.
+- **Clear Session** — archive and reset the current session at any time.
+
+### Setup
+
+- **One-command setup** — `ClaudeGate: Setup Hook` installs the hook script and patches `~/.claude/settings.json` automatically.
+- **Verify Setup** — confirms the hook script and settings registration are in place.
+- **Windows native support** — generates a `hook.bat` wrapper on Windows; detects `python` or `python3` automatically. WSL is not required.
