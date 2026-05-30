@@ -242,6 +242,9 @@ export function activate(context: vscode.ExtensionContext): void {
           if (session?.files[filePath]?.reviewStatus === "pending") {
             activePendingFilePath = filePath;
             vscode.commands.executeCommand("setContext", "claudegate.isActivePending", true);
+          } else {
+            activePendingFilePath = undefined;
+            vscode.commands.executeCommand("setContext", "claudegate.isActivePending", false);
           }
         }
       )
