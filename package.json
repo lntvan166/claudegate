@@ -177,6 +177,26 @@
           "group": "navigation@1"
         },
         {
+          "command": "claudegate.viewAsTree",
+          "when": "view == claudegate.acceptedPanel && claudegate.viewMode == 'list'",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudegate.viewAsList",
+          "when": "view == claudegate.acceptedPanel && claudegate.viewMode == 'tree'",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudegate.viewAsTree",
+          "when": "view == claudegate.rejectedPanel && claudegate.viewMode == 'list'",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudegate.viewAsList",
+          "when": "view == claudegate.rejectedPanel && claudegate.viewMode == 'tree'",
+          "group": "navigation@1"
+        },
+        {
           "command": "claudegate.acceptAll",
           "when": "view == claudegate.pendingPanel",
           "group": "navigation@2"
