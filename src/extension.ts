@@ -47,7 +47,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.commands.executeCommand("setContext", "claudegate.viewMode", "tree");
 
-    const sessionManager = new SessionManager(log);
+    const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const sessionManager = new SessionManager(log, workspacePath);
     const hookInstaller  = new HookInstaller(context, log);
 
     const badgeBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);

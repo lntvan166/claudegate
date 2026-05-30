@@ -21,6 +21,8 @@ export interface Session {
 
 export class SessionManager {
   private readonly sessionPath: string;
+  private readonly sessionFilename: string;
+  private readonly watchDir: string;
   private readonly claudegateDir: string;
   private session: Session | null = null;
   private watcher: fs.FSWatcher | null = null;
@@ -28,17 +30,33 @@ export class SessionManager {
   private readonly _onSessionChange = new vscode.EventEmitter<Session | null>();
   readonly onSessionChange = this._onSessionChange.event;
 
-  constructor(private readonly log: vscode.OutputChannel) {
+  constructor(
+    private readonly log: vscode.OutputChannel,
+    workspacePath?: string
+  ) {
     this.claudegateDir = path.join(os.homedir(), ".claudegate");
-    this.sessionPath = path.join(this.claudegateDir, "session.json");
+
+    if (workspacePath) {
+      // Mirror hook.py: normcase (lower-case on Windows) + abspath, then MD5.
+      const resolved  = path.resolve(workspacePath);
+      const normalized = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+      const hash = crypto.createHash("md5").update(normalized).digest("hex");
+      this.sessionFilename = `${hash}.json`;
+      this.watchDir   = path.join(this.claudegateDir, "sessions");
+      this.sessionPath = path.join(this.watchDir, this.sessionFilename);
+    } else {
+      this.sessionFilename = "session.json";
+      this.watchDir   = this.claudegateDir;
+      this.sessionPath = path.join(this.claudegateDir, "session.json");
+    }
   }
 
   startWatching(): void {
-    fs.mkdirSync(this.claudegateDir, { recursive: true });
+    fs.mkdirSync(this.watchDir, { recursive: true });
     this.loadSession();
 
-    this.watcher = fs.watch(this.claudegateDir, (_event, filename) => {
-      if (filename === "session.json") {
+    this.watcher = fs.watch(this.watchDir, (_event, filename) => {
+      if (filename === this.sessionFilename) {
         this.loadSession();
       }
     });
@@ -193,7 +211,6 @@ export class SessionManager {
 
   reapplyFile(filePath: string): void {
     const entry = this.session?.files[filePath];
-    console.log("[ClaudeGate] reapplyFile", filePath, "status=", entry?.reviewStatus, "claudeContent=", entry?.claudeContent !== undefined ? "present" : "MISSING");
     if (!entry || entry.reviewStatus !== "rejected") return;
     if (entry.claudeContent === undefined) {
       vscode.window.showWarningMessage(
@@ -379,14 +396,11 @@ export class SessionManager {
   }
 
   private loadSession(): void {
-    console.log("[ClaudeGate] loadSession() path=", this.sessionPath);
     try {
       const raw = fs.readFileSync(this.sessionPath, "utf-8");
       this.session = JSON.parse(raw) as Session;
-      console.log("[ClaudeGate] session loaded, files=", Object.keys(this.session.files));
-      this.log.appendLine(`[INFO] ` + `Session loaded: ${Object.keys(this.session.files).length} file(s), status=${this.session.status}`);
-    } catch (err) {
-      console.log("[ClaudeGate] loadSession failed:", err);
+      this.log.appendLine(`[INFO] Session loaded: ${Object.keys(this.session.files).length} file(s), status=${this.session.status}`);
+    } catch {
       this.session = null;
     }
     this._onSessionChange.fire(this.session);

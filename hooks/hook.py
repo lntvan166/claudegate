@@ -2,19 +2,31 @@
 """
 ClaudeGate PreToolUse hook.
 Captures original file content before any Claude write and records it in
-~/.claudegate/session.json.
+~/.claudegate/sessions/<workspace-hash>.json.
+Each workspace gets its own session file, so multiple simultaneous Claude
+sessions in different projects don't interfere with each other.
 """
 import sys
 import json
 import os
+import hashlib
 from datetime import datetime, timezone
 
-SESSION_FILE = os.path.expanduser("~/.claudegate/session.json")
+CLAUDEGATE_DIR = os.path.expanduser("~/.claudegate")
+SESSIONS_DIR   = os.path.join(CLAUDEGATE_DIR, "sessions")
 
 
-def load_session() -> dict | None:
+def workspace_session_file(cwd: str) -> str:
+    """Return the session file path for the given working directory."""
+    # Normalise: resolve to absolute path, lower-case on Windows (normcase).
+    normalized = os.path.normcase(os.path.abspath(cwd))
+    workspace_hash = hashlib.md5(normalized.encode()).hexdigest()
+    return os.path.join(SESSIONS_DIR, f"{workspace_hash}.json")
+
+
+def load_session(session_file: str) -> dict | None:
     try:
-        with open(SESSION_FILE, "r", encoding="utf-8") as f:
+        with open(session_file, "r", encoding="utf-8") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return None
@@ -28,10 +40,12 @@ def new_session() -> dict:
     }
 
 
-def save_session(session: dict) -> None:
-    os.makedirs(os.path.dirname(SESSION_FILE), exist_ok=True)
-    with open(SESSION_FILE, "w", encoding="utf-8") as f:
+def save_session(session: dict, session_file: str) -> None:
+    os.makedirs(os.path.dirname(session_file), exist_ok=True)
+    tmp = session_file + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(session, f, indent=2)
+    os.replace(tmp, session_file)
 
 
 def main() -> None:
@@ -45,9 +59,12 @@ def main() -> None:
     if not file_path:
         sys.exit(0)
 
+    cwd = hook_input.get("cwd", os.getcwd())
+
     if not os.path.isabs(file_path):
-        cwd = hook_input.get("cwd", os.getcwd())
         file_path = os.path.normpath(os.path.join(cwd, file_path))
+
+    session_file = workspace_session_file(cwd)
 
     try:
         with open(file_path, "r", encoding="utf-8") as f:
@@ -55,30 +72,23 @@ def main() -> None:
     except (FileNotFoundError, PermissionError):
         original_content = None
 
-    session = load_session() or new_session()
-
+    session = load_session(session_file) or new_session()
     existing = session["files"].get(file_path)
 
     if existing is None:
-        # First time this file is touched in this session — record original
         session["files"][file_path] = {
             "originalContent": original_content,
             "reviewStatus": "pending",
         }
-        # Re-open a reviewed session when Claude writes new files
         if session.get("status") == "reviewed":
             session["status"] = "active"
-        save_session(session)
+        save_session(session, session_file)
 
     elif existing["reviewStatus"] in ("accepted", "rejected"):
-        # File was already reviewed but Claude is writing it again.
-        # Capture the current state as the new "original" and mark pending.
         existing["originalContent"] = original_content
         existing["reviewStatus"] = "pending"
         session["status"] = "active"
-        save_session(session)
-
-    # If reviewStatus == "pending": original is already captured, do nothing.
+        save_session(session, session_file)
 
 
 if __name__ == "__main__":
