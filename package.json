@@ -9,16 +9,25 @@
     "vscode": "^1.85.0"
   },
   "categories": [
+    "SCM Providers",
     "Other"
   ],
   "keywords": [
     "claude",
+    "claude-code",
+    "anthropic",
     "ai",
     "diff",
     "review",
-    "claude-code",
-    "anthropic"
+    "cursor",
+    "accept",
+    "reject",
+    "code review"
   ],
+  "galleryBanner": {
+    "color": "#1e1e2e",
+    "theme": "dark"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/lntvan166/claudegate"
