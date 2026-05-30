@@ -107,20 +107,23 @@ export function activate(context: vscode.ExtensionContext): void {
       "claudegate.rejectFolder",
       async (item: FolderItem) => {
         const session = sessionManager.getSession();
-        const pendingCount = Object.entries(session?.files ?? {}).filter(
-          ([fp, e]) =>
-            fp.startsWith(item.folderPath + path.sep) &&
-            e.reviewStatus === "pending"
-        ).length;
-        if (pendingCount === 0) return;
+        const pendingFiles = Object.entries(session?.files ?? {})
+          .filter(
+            ([fp, e]) =>
+              fp.startsWith(item.folderPath + path.sep) &&
+              e.reviewStatus === "pending"
+          )
+          .map(([fp]) => fp);
+        if (pendingFiles.length === 0) return;
         const folderName = path.basename(item.folderPath);
         const answer = await vscode.window.showWarningMessage(
-          `Revert ${pendingCount} file(s) in "${folderName}" to their original content?`,
+          `Revert ${pendingFiles.length} file(s) in "${folderName}" to their original content?`,
           { modal: false },
           "Revert"
         );
         if (answer === "Revert") {
           sessionManager.rejectFolder(item.folderPath);
+          await Promise.all(pendingFiles.map((fp) => closeDiffEditor(fp)));
         }
       }
     ),
