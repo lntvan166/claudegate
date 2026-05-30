@@ -11,8 +11,6 @@ import { HookInstaller } from "./hookInstaller";
 import { ClaudeGateContentProvider, SCHEME, openDiff } from "./diffProvider";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
 
-let statusBarItem: vscode.StatusBarItem;
-
 // Path of the active pending file — read by editor-title button commands
 let activePendingFilePath: string | undefined;
 
@@ -58,11 +56,6 @@ export function activate(context: vscode.ExtensionContext): void {
       showCollapseAll:  true,
     });
     context.subscriptions.push(pendingView, acceptedView, rejectedView);
-
-    // Status bar
-    statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-    statusBarItem.command = "workbench.view.extension.claudegate";
-    context.subscriptions.push(statusBarItem);
 
     // ── Commands ──────────────────────────────────────────────────────────
     context.subscriptions.push(
@@ -287,11 +280,8 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.commands.executeCommand("setContext", "claudegate.rejectedCount", counts.rejected);
 
       updateActivePending();
-      updateStatusBar(session ? counts.pending : -1);
 
-      pendingView.badge  = counts.pending  > 0 ? { value: counts.pending,  tooltip: `${counts.pending} pending file(s)`  } : undefined;
-      acceptedView.badge = counts.accepted > 0 ? { value: counts.accepted, tooltip: `${counts.accepted} accepted file(s)` } : undefined;
-      rejectedView.badge = counts.rejected > 0 ? { value: counts.rejected, tooltip: `${counts.rejected} rejected file(s)` } : undefined;
+      pendingView.badge = counts.pending > 0 ? { value: counts.pending, tooltip: `${counts.pending} pending file(s)` } : undefined;
     });
 
     sessionManager.startWatching();
@@ -304,26 +294,4 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 }
 
-export function deactivate(): void {
-  statusBarItem?.dispose();
-}
-
-function updateStatusBar(pendingCount: number): void {
-  if (pendingCount < 0) {
-    statusBarItem.text = "$(circle-slash) ClaudeGate: No active review";
-    statusBarItem.tooltip = "No active Claude session";
-    statusBarItem.backgroundColor = undefined;
-    statusBarItem.show();
-    return;
-  }
-  if (pendingCount === 0) {
-    statusBarItem.text = "$(check) ClaudeGate: All reviewed";
-    statusBarItem.tooltip = "All changes reviewed — clear session when done";
-    statusBarItem.backgroundColor = undefined;
-  } else {
-    statusBarItem.text = `$(diff) ClaudeGate: ${pendingCount} pending`;
-    statusBarItem.tooltip = `${pendingCount} file${pendingCount !== 1 ? "s" : ""} waiting for review`;
-    statusBarItem.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
-  }
-  statusBarItem.show();
-}
+export function deactivate(): void {}
