@@ -103,3 +103,23 @@ See [CLAUDE.md](CLAUDE.md) for the architecture guide and development setup.
 ## License
 
 MIT — see [LICENSE](LICENSE)
+
+---
+
+## Hiding the Accept/Reject buttons in the editor
+
+By default, ClaudeGate shows **Accept** (✓) and **Reject** (✕) icon buttons in the editor title bar whenever you open a file that is pending review. They also appear in the ClaudeGate diff view with no extra configuration.
+
+To hide the buttons in the regular editor (not the diff view):
+
+1. Open Settings (`Cmd+,` / `Ctrl+,`)
+2. Search for **`ClaudeGate: Show Editor Buttons`**
+3. Uncheck the setting
+
+Or add this to your `settings.json`:
+
+```json
+"claudegate.showEditorButtons": false
+```
+
+> **Note:** The buttons in the diff view (opened by clicking a file in the ClaudeGate sidebar) are always shown and cannot be disabled separately.
