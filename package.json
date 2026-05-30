@@ -34,7 +34,7 @@
         {
           "id": "claudegate",
           "title": "ClaudeGate",
-          "icon": "media/icon.svg"
+          "icon": "media/icon-activity.svg"
         }
       ]
     },
@@ -102,10 +102,30 @@
         "title": "View as List",
         "category": "ClaudeGate",
         "icon": "$(list-flat)"
+      },
+      {
+        "command": "claudegate.expandAll",
+        "title": "Expand All",
+        "icon": "$(expand-all)"
+      },
+      {
+        "command": "claudegate.acceptFolder",
+        "title": "Accept Folder",
+        "icon": "$(check)"
+      },
+      {
+        "command": "claudegate.rejectFolder",
+        "title": "Reject Folder",
+        "icon": "$(x)"
       }
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "claudegate.expandAll",
+          "when": "view == claudegate.reviewPanel",
+          "group": "navigation@0"
+        },
         {
           "command": "claudegate.viewAsTree",
           "when": "view == claudegate.reviewPanel && claudegate.viewMode == 'list'",
@@ -147,7 +167,27 @@
           "command": "claudegate.reapplyFile",
           "when": "view == claudegate.reviewPanel && viewItem == claudegate.file.rejected",
           "group": "inline@1"
+        },
+        {
+          "command": "claudegate.acceptFolder",
+          "when": "view == claudegate.reviewPanel && viewItem == claudegate.folder.pending",
+          "group": "inline@1"
+        },
+        {
+          "command": "claudegate.rejectFolder",
+          "when": "view == claudegate.reviewPanel && viewItem == claudegate.folder.pending",
+          "group": "inline@2"
         }
+      ],
+      "commandPalette": [
+        { "command": "claudegate.acceptFile",   "when": "false" },
+        { "command": "claudegate.rejectFile",   "when": "false" },
+        { "command": "claudegate.reapplyFile",  "when": "false" },
+        { "command": "claudegate.acceptFolder", "when": "false" },
+        { "command": "claudegate.rejectFolder", "when": "false" },
+        { "command": "claudegate.viewAsTree",   "when": "false" },
+        { "command": "claudegate.viewAsList",   "when": "false" },
+        { "command": "claudegate.expandAll",    "when": "false" }
       ]
     }
   },
