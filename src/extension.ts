@@ -5,11 +5,10 @@ import {
   FilteredTreeProvider,
   FileReviewItem,
   FolderItem,
-  registerOpenDiff,
   closeDiffEditor,
 } from "./reviewPanel";
 import { HookInstaller } from "./hookInstaller";
-import { ClaudeGateContentProvider, SCHEME } from "./diffProvider";
+import { ClaudeGateContentProvider, SCHEME, openDiff } from "./diffProvider";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
 
 let statusBarItem: vscode.StatusBarItem;
@@ -189,13 +188,17 @@ export function activate(context: vscode.ExtensionContext): void {
         }
       }),
 
-      // ── View mode toggle (pending panel only) ──
+      // ── View mode toggle (all panels) ──
       vscode.commands.registerCommand("claudegate.viewAsTree", () => {
         pendingProvider.setViewMode("tree");
+        acceptedProvider.setViewMode("tree");
+        rejectedProvider.setViewMode("tree");
         vscode.commands.executeCommand("setContext", "claudegate.viewMode", "tree");
       }),
       vscode.commands.registerCommand("claudegate.viewAsList", () => {
         pendingProvider.setViewMode("list");
+        acceptedProvider.setViewMode("list");
+        rejectedProvider.setViewMode("list");
         vscode.commands.executeCommand("setContext", "claudegate.viewMode", "list");
       }),
 
@@ -228,7 +231,21 @@ export function activate(context: vscode.ExtensionContext): void {
       })
     );
 
-    registerOpenDiff(context, sessionManager);
+    context.subscriptions.push(
+      vscode.commands.registerCommand(
+        "claudegate.openDiff",
+        async (filePath: string) => {
+          await openDiff(filePath, sessionManager);
+          // Explicitly set active pending state — diff editors don't reliably
+          // fire onDidChangeActiveTextEditor, so we set it here on open.
+          const session = sessionManager.getSession();
+          if (session?.files[filePath]?.reviewStatus === "pending") {
+            activePendingFilePath = filePath;
+            vscode.commands.executeCommand("setContext", "claudegate.isActivePending", true);
+          }
+        }
+      )
+    );
 
     // ── Active pending file tracking ──────────────────────────────────────
     function updateActivePending(): void {
@@ -269,9 +286,9 @@ export function activate(context: vscode.ExtensionContext): void {
       updateActivePending();
       updateStatusBar(session ? counts.pending : -1);
 
-      pendingView.description  = counts.pending  > 0 ? String(counts.pending)  : undefined;
-      acceptedView.description = counts.accepted > 0 ? String(counts.accepted) : undefined;
-      rejectedView.description = counts.rejected > 0 ? String(counts.rejected) : undefined;
+      pendingView.badge  = counts.pending  > 0 ? { value: counts.pending,  tooltip: `${counts.pending} pending file(s)`  } : undefined;
+      acceptedView.badge = counts.accepted > 0 ? { value: counts.accepted, tooltip: `${counts.accepted} accepted file(s)` } : undefined;
+      rejectedView.badge = counts.rejected > 0 ? { value: counts.rejected, tooltip: `${counts.rejected} rejected file(s)` } : undefined;
     });
 
     sessionManager.startWatching();
