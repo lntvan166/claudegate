@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import { SessionManager } from "./sessionManager";
-import { ReviewTreeProvider, registerOpenDiff, FileReviewItem, closeDiffEditor, GroupItem } from "./reviewPanel";
+import { ReviewTreeProvider, registerOpenDiff, FileReviewItem, FolderItem, closeDiffEditor, GroupItem } from "./reviewPanel";
 import { HookInstaller } from "./hookInstaller";
 import { ClaudeGateContentProvider, SCHEME } from "./diffProvider";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
@@ -38,7 +38,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // Sidebar tree view
   const treeView = vscode.window.createTreeView("claudegate.reviewPanel", {
     treeDataProvider: treeProvider,
-    showCollapseAll: false,
+    showCollapseAll: true,
   });
   context.subscriptions.push(treeView);
 
@@ -93,6 +93,36 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand("claudegate.viewAsList", () =>
       treeProvider.setViewMode("list")
+    ),
+    vscode.commands.registerCommand("claudegate.expandAll", () =>
+      treeProvider.expandAll()
+    ),
+    vscode.commands.registerCommand(
+      "claudegate.acceptFolder",
+      (item: FolderItem) => {
+        sessionManager.acceptFolder(item.folderPath);
+      }
+    ),
+    vscode.commands.registerCommand(
+      "claudegate.rejectFolder",
+      async (item: FolderItem) => {
+        const session = sessionManager.getSession();
+        const pendingCount = Object.entries(session?.files ?? {}).filter(
+          ([fp, e]) =>
+            fp.startsWith(item.folderPath + path.sep) &&
+            e.reviewStatus === "pending"
+        ).length;
+        if (pendingCount === 0) return;
+        const folderName = path.basename(item.folderPath);
+        const answer = await vscode.window.showWarningMessage(
+          `Revert ${pendingCount} file(s) in "${folderName}" to their original content?`,
+          { modal: false },
+          "Revert"
+        );
+        if (answer === "Revert") {
+          sessionManager.rejectFolder(item.folderPath);
+        }
+      }
     ),
 
     vscode.commands.registerCommand("claudegate.acceptAll", async () => {
