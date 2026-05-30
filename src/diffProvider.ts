@@ -14,9 +14,13 @@ export class ClaudeGateContentProvider
   readonly onDidChange = this._onDidChange.event;
 
   constructor(private readonly sessionManager: SessionManager) {
-    sessionManager.onSessionChange(() =>
-      this._onDidChange.fire(vscode.Uri.parse(`${SCHEME}://refresh`))
-    );
+    sessionManager.onSessionChange((session) => {
+      if (!session) return;
+      for (const fp of Object.keys(session.files)) {
+        this._onDidChange.fire(originalUri(fp));
+        this._onDidChange.fire(claudeUri(fp));
+      }
+    });
   }
 
   provideTextDocumentContent(uri: vscode.Uri): string {

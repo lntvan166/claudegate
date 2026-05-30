@@ -192,9 +192,16 @@ export class SessionManager {
   markRejected(filePath: string): void {
     const entry = this.session?.files[filePath];
     if (!entry || entry.reviewStatus !== "pending") return;
+    let savedClaudeContent: string | null;
+    try {
+      savedClaudeContent = fs.readFileSync(filePath, "utf-8");
+    } catch {
+      savedClaudeContent = null;
+    }
     if (entry.originalContent === null) {
       try { fs.unlinkSync(filePath); } catch { /* already gone */ }
     }
+    entry.claudeContent = savedClaudeContent;
     entry.reviewStatus = "rejected";
     this.persist();
   }
@@ -219,12 +226,19 @@ export class SessionManager {
 
     for (const [filePath, entry] of Object.entries(this.session.files)) {
       if (entry.reviewStatus !== "pending") continue;
+      let savedClaudeContent: string | null;
+      try {
+        savedClaudeContent = fs.readFileSync(filePath, "utf-8");
+      } catch {
+        savedClaudeContent = null;
+      }
       try {
         if (entry.originalContent === null) {
           fs.unlinkSync(filePath);
         } else {
           fs.writeFileSync(filePath, entry.originalContent, "utf-8");
         }
+        entry.claudeContent = savedClaudeContent;
         entry.reviewStatus = "rejected";
         count++;
       } catch (err) {
