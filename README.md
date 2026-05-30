@@ -6,6 +6,12 @@ ClaudeGate bridges the gap between Claude Code (terminal) and Cursor/VS Code's v
 
 ---
 
+## Screenshot
+
+![ClaudeGate in action](media/ClaudeGateDemo.png)
+
+---
+
 ## Quick Start
 
 Three steps, no manual config:
@@ -21,7 +27,7 @@ ClaudeGate: Setup Hook
 This installs a Claude Code `PreToolUse` hook that captures file changes automatically.
 
 **3. Use Claude Code normally**
-Run `claude` in your terminal as usual. When Claude writes files, ClaudeGate will catch them and show a pending count in the status bar.
+Run `claude` in your terminal as usual. When Claude writes files, ClaudeGate will catch them and show a pending count badge in the sidebar.
 
 ---
 
@@ -30,7 +36,6 @@ Run `claude` in your terminal as usual. When Claude writes files, ClaudeGate wil
 1. The **ClaudeGate** icon in the Activity Bar shows a panel with all modified files
 2. Click any file to open VS Code's native diff editor (original on the left, Claude's version on the right)
 3. Use the inline buttons to **Accept** (keep Claude's change) or **Reject** (revert to original)
-4. The status bar shows how many files are still pending
 
 ---
 
@@ -41,7 +46,7 @@ Run `claude` in your terminal as usual. When Claude writes files, ClaudeGate wil
 - Accept keeps the change as-is; Reject writes the original content back
 - New files created by Claude are deleted on Reject
 - Session history archived to `~/.claudegate/history/`
-- Status bar indicator with pending file count
+- Pending file count badge on the sidebar panel
 - Clear Session button to archive and reset
 
 ---
@@ -103,23 +108,3 @@ See [CLAUDE.md](CLAUDE.md) for the architecture guide and development setup.
 ## License
 
 MIT — see [LICENSE](LICENSE)
-
----
-
-## Hiding the Accept/Reject buttons in the editor
-
-By default, ClaudeGate shows **Accept** (✓) and **Reject** (✕) icon buttons in the editor title bar whenever you open a file that is pending review. They also appear in the ClaudeGate diff view with no extra configuration.
-
-To hide the buttons in the regular editor (not the diff view):
-
-1. Open Settings (`Cmd+,` / `Ctrl+,`)
-2. Search for **`ClaudeGate: Show Editor Buttons`**
-3. Uncheck the setting
-
-Or add this to your `settings.json`:
-
-```json
-"claudegate.showEditorButtons": false
-```
-
-> **Note:** The buttons in the diff view (opened by clicking a file in the ClaudeGate sidebar) are always shown and cannot be disabled separately.
