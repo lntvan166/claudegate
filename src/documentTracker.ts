@@ -10,6 +10,9 @@ const IGNORED_DIRS = new Set([
   "coverage", ".nyc_output", ".turbo", ".svelte-kit",
 ]);
 
+// File suffixes that indicate editor/VCS temporary files, never source files.
+const IGNORED_SUFFIXES = [".git", ".orig", ".tmp", "~"];
+
 export class DocumentTracker {
   private readonly snapshots = new Map<string, string | null>();
   private readonly disposables: vscode.Disposable[] = [];
@@ -38,7 +41,8 @@ export class DocumentTracker {
     this.disposables.push(
       watcher,
       watcher.onDidChange((uri) => this.handleFileChange(uri)),
-      watcher.onDidCreate((uri) => this.handleFileChange(uri))
+      watcher.onDidCreate((uri) => this.handleFileChange(uri)),
+      watcher.onDidDelete((uri) => this.handleFileDelete(uri))
     );
   }
 
@@ -76,12 +80,26 @@ export class DocumentTracker {
     this.log.appendLine(`[INFO] DocumentTracker: captured ${path.basename(filePath)}`);
   }
 
+  private handleFileDelete(uri: vscode.Uri): void {
+    const filePath = uri.fsPath;
+    const session = this.sessionManager.getSession();
+    const entry = session?.files[filePath];
+    if (entry?.reviewStatus === "pending") {
+      this.sessionManager.removePendingFile(filePath);
+      this.snapshots.delete(filePath);
+      this.log.appendLine(`[INFO] DocumentTracker: removed deleted file ${path.basename(filePath)}`);
+    }
+  }
+
   private isInWorkspace(filePath: string): boolean {
     if (!this.workspacePath) return false;
     return filePath.startsWith(this.workspacePath + path.sep);
   }
 
   private isIgnoredPath(filePath: string): boolean {
-    return filePath.split(path.sep).some((segment) => IGNORED_DIRS.has(segment));
+    const segments = filePath.split(path.sep);
+    if (segments.some((s) => IGNORED_DIRS.has(s))) return true;
+    const filename = segments[segments.length - 1];
+    return IGNORED_SUFFIXES.some((suffix) => filename.endsWith(suffix));
   }
 }

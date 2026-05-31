@@ -435,6 +435,13 @@ export class SessionManager {
     }
   }
 
+  removePendingFile(filePath: string): void {
+    const entry = this.session?.files[filePath];
+    if (!entry || entry.reviewStatus !== "pending") return;
+    delete this.session!.files[filePath];
+    this.persist();
+  }
+
   clearAccepted(): void {
     if (!this.session) return;
     let count = 0;
