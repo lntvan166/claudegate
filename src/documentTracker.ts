@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import * as fs from "fs";
 import * as path from "path";
 import { SessionManager } from "./sessionManager";
 
@@ -65,6 +66,7 @@ export class DocumentTracker {
     const filePath = uri.fsPath;
     if (!this.isInWorkspace(filePath)) return;
     if (this.isIgnoredPath(filePath)) return;
+    try { if (fs.statSync(filePath).isDirectory()) return; } catch { return; }
 
     const session = this.sessionManager.getSession();
     // Skip any file already in the session regardless of status.
