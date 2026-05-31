@@ -1,16 +1,16 @@
-# ClaudeGate
+# Claude Gate
 
 **Review every file Claude Code touches — accept or revert with one click.**
 
-Stop flying blind when Claude modifies your codebase. ClaudeGate captures every file change before it happens and surfaces each one as a structured diff — the same accept/reject workflow as Cursor's native AI review, but for Claude Code running in any terminal.
+Stop flying blind when Claude modifies your codebase. Claude Gate captures every file change before it happens and surfaces each one as a structured diff — the same accept/reject workflow as Cursor's native AI review, but for Claude Code running in any terminal.
 
-> **Note:** ClaudeGate supports two modes: the **Claude Code terminal CLI** (`claude` command) via pre-installed hooks, and the **Claude Code VS Code/Cursor GUI extension** via automatic file change detection. GUI mode works best in "pure sessions" where Claude makes changes and you review before editing further — all file changes during a GUI session are captured for review.
+> **Note:** Claude Gate supports two modes: the **Claude Code terminal CLI** (`claude` command) via pre-installed hooks, and the **Claude Code VS Code/Cursor GUI extension** via automatic file change detection. GUI mode works best in "pure sessions" where Claude makes changes and you review before editing further — all file changes during a GUI session are captured for review.
 
 ---
 
 ## Screenshot
 
-![ClaudeGate in action](media/ClaudeGateDemo.png)
+![Claude Gate in action](media/ClaudeGateDemo.png)
 
 ---
 
@@ -19,25 +19,25 @@ Stop flying blind when Claude modifies your codebase. ClaudeGate captures every 
 Three steps, no manual config:
 
 **1. Install**
-Install **ClaudeGate** from the VS Code / Cursor Extensions panel.
+Install **Claude Gate** from the VS Code / Cursor Extensions panel.
 
 **2. Setup the hook**
 Open the Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`) and run:
 
 ```
-ClaudeGate: Setup Hook
+Claude Gate: Setup Hook
 ```
 
 This installs a `PreToolUse` hook into Claude Code that automatically snapshots files before Claude writes them.
 
 **3. Run Claude Code normally**
-Use `claude` in your terminal as usual. When Claude modifies files, ClaudeGate shows a pending count badge in the sidebar — click any file to review the diff.
+Use `claude` in your terminal as usual. When Claude modifies files, Claude Gate shows a pending count badge in the sidebar — click any file to review the diff.
 
 ---
 
 ## The Review Flow
 
-1. The **ClaudeGate** icon in the Activity Bar shows three panels: **Pending**, **Accepted**, and **Rejected**
+1. The **Claude Gate** icon in the Activity Bar shows three panels: **Pending**, **Accepted**, and **Rejected**
 2. Click any pending file to open VS Code's native diff editor — original on the left, Claude's version on the right
 3. **✓ Accept** and **✕ Reject** inline links appear at the top of the diff — one click, done
 4. Accepted files move to the Accepted panel; rejected files are restored to their original content
@@ -69,7 +69,7 @@ Claude Code (terminal CLI)          Claude Code (VS Code GUI extension)
                        ▼
         ~/.claudegate/sessions/<workspace>.json
                        │
-             ClaudeGate review panels
+             Claude Gate review panels
 ```
 
 The hook captures a file's original content **once per session** — subsequent Claude writes to the same file don't overwrite the snapshot, so you always diff against the true before-state.
@@ -90,7 +90,7 @@ The hook captures a file's original content **once per session** — subsequent 
 
 ## Updating the Hook
 
-After updating the extension, re-run **`ClaudeGate: Setup Hook`** to install the latest hook script.
+After updating the extension, re-run **`Claude Gate: Setup Hook`** to install the latest hook script.
 
 ---
 
