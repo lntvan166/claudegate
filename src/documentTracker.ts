@@ -2,6 +2,14 @@ import * as vscode from "vscode";
 import * as path from "path";
 import { SessionManager } from "./sessionManager";
 
+// Directory segments that are never Claude-authored — skip any path containing these.
+const IGNORED_DIRS = new Set([
+  "node_modules", ".git", "dist", "build", "out", ".next", ".nuxt",
+  "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+  "target", "vendor", "Pods", ".dart_tool", ".gradle", ".cache",
+  "coverage", ".nyc_output", ".turbo", ".svelte-kit",
+]);
+
 export class DocumentTracker {
   private readonly snapshots = new Map<string, string | null>();
   private readonly disposables: vscode.Disposable[] = [];
@@ -52,7 +60,7 @@ export class DocumentTracker {
   private handleFileChange(uri: vscode.Uri): void {
     const filePath = uri.fsPath;
     if (!this.isInWorkspace(filePath)) return;
-    if (filePath.includes(path.sep + ".git" + path.sep)) return;
+    if (this.isIgnoredPath(filePath)) return;
 
     const session = this.sessionManager.getSession();
     if (session?.files[filePath]?.reviewStatus === "pending") return;
@@ -68,5 +76,9 @@ export class DocumentTracker {
   private isInWorkspace(filePath: string): boolean {
     if (!this.workspacePath) return false;
     return filePath.startsWith(this.workspacePath + path.sep);
+  }
+
+  private isIgnoredPath(filePath: string): boolean {
+    return filePath.split(path.sep).some((segment) => IGNORED_DIRS.has(segment));
   }
 }
