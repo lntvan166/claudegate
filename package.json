@@ -138,6 +138,18 @@
         "icon": "$(discard)"
       },
       {
+        "command": "claudegate.clearAccepted",
+        "title": "Clear All Accepted",
+        "category": "ClaudeGate",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "claudegate.clearRejected",
+        "title": "Clear All Rejected",
+        "category": "ClaudeGate",
+        "icon": "$(clear-all)"
+      },
+      {
         "command": "claudegate.reapplyFolder",
         "title": "Re-apply Folder",
         "icon": "$(debug-restart)"
@@ -223,9 +235,19 @@
           "group": "navigation@1"
         },
         {
+          "command": "claudegate.clearAccepted",
+          "when": "view == claudegate.acceptedPanel && claudegate.acceptedCount > 0",
+          "group": "navigation@2"
+        },
+        {
           "command": "claudegate.reapplyAll",
           "when": "view == claudegate.rejectedPanel",
           "group": "navigation@1"
+        },
+        {
+          "command": "claudegate.clearRejected",
+          "when": "view == claudegate.rejectedPanel && claudegate.rejectedCount > 0",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [

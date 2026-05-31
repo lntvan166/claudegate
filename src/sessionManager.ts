@@ -435,6 +435,34 @@ export class SessionManager {
     }
   }
 
+  clearAccepted(): void {
+    if (!this.session) return;
+    let count = 0;
+    for (const [filePath, entry] of Object.entries(this.session.files)) {
+      if (entry.reviewStatus === "accepted") {
+        delete this.session.files[filePath];
+        count++;
+      }
+    }
+    if (count === 0) return;
+    this.log.appendLine(`[INFO] Cleared accepted: ${count} file(s)`);
+    this.persist();
+  }
+
+  clearRejected(): void {
+    if (!this.session) return;
+    let count = 0;
+    for (const [filePath, entry] of Object.entries(this.session.files)) {
+      if (entry.reviewStatus === "rejected") {
+        delete this.session.files[filePath];
+        count++;
+      }
+    }
+    if (count === 0) return;
+    this.log.appendLine(`[INFO] Cleared rejected: ${count} file(s)`);
+    this.persist();
+  }
+
   clearSession(): void {
     if (!this.session) return;
     this.archiveSession();

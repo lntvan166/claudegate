@@ -177,6 +177,10 @@ export function activate(context: vscode.ExtensionContext): void {
         sessionManager.revertAcceptedAll()
       ),
 
+      vscode.commands.registerCommand("claudegate.clearAccepted", () =>
+        sessionManager.clearAccepted()
+      ),
+
       // ── Rejected file/folder actions ──
       vscode.commands.registerCommand(
         "claudegate.reapplyFile",
@@ -220,6 +224,10 @@ export function activate(context: vscode.ExtensionContext): void {
           await Promise.all(files.map(([fp]) => closeDiffEditor(fp)));
         }
       }),
+
+      vscode.commands.registerCommand("claudegate.clearRejected", () =>
+        sessionManager.clearRejected()
+      ),
 
       // ── View mode toggle (all panels) ──
       vscode.commands.registerCommand("claudegate.viewAsTree", () => {
