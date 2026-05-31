@@ -7,6 +7,33 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.1.0] — 2026-05-31
+
+### Added
+
+- **Claude Code VS Code/Cursor GUI extension support** — ClaudeGate now captures file changes made by the Claude Code GUI extension (not just the terminal CLI). A new `DocumentTracker` snapshots files as they are opened in the editor and detects changes via a file system watcher. Both detection paths feed the same review panel with no configuration required.
+  - Works best in "pure sessions" where Claude makes changes and you review before editing further.
+  - Coexists cleanly with the hook path — whichever fires first for a given file owns it; the other skips it.
+  - Re-edits of previously accepted or rejected files are correctly re-queued for review.
+
+### Fixed
+
+- **Packaging** — development-only files (`.superpowers/`, `.claude/`, `.qodo/`, `docs/`) were incorrectly bundled in previous releases. The correct ignore file (`.vscodeignore`) is now used; the published package is ~95% smaller.
+
+### Changed
+
+- **Extension icon** — updated to a torii gate icon.
+
+---
+
+## [1.0.1] — 2026-05-31
+
+### Changed
+
+- **README** — added a note clarifying that the Claude Code VS Code/Cursor GUI extension is not yet supported (terminal CLI only). Superseded by v1.1.0.
+
+---
+
 ## [1.0.0] — 2026-05-30
 
 First public release. ClaudeGate gives you the same accept/reject review workflow for Claude Code (terminal) that Cursor provides for its own AI agent.
