@@ -4,6 +4,8 @@
 
 Stop flying blind when Claude modifies your codebase. ClaudeGate captures every file change before it happens and surfaces each one as a structured diff — the same accept/reject workflow as Cursor's native AI review, but for Claude Code running in any terminal.
 
+> **Note:** ClaudeGate supports two modes: the **Claude Code terminal CLI** (`claude` command) via pre-installed hooks, and the **Claude Code VS Code/Cursor GUI extension** via automatic file change detection. GUI mode works best in "pure sessions" where Claude makes changes and you review before editing further — all file changes during a GUI session are captured for review.
+
 ---
 
 ## Screenshot
@@ -58,15 +60,16 @@ Use `claude` in your terminal as usual. When Claude modifies files, ClaudeGate s
 ## How It Works
 
 ```
-Claude Code (terminal)
-       │
-  PreToolUse hook fires before each Write / Edit / MultiEdit
-  ~/.claudegate/hook.py snapshots the current file content
-       │
-  ~/.claudegate/session.json  ←  shared state file
-       │
-  ClaudeGate extension watches for changes
-       └── Updates review panels in real time
+Claude Code (terminal CLI)          Claude Code (VS Code GUI extension)
+        │                                        │
+  PreToolUse hook fires                 DocumentTracker watches
+  hook.py snapshots original          file system for changes
+        │                                        │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ~/.claudegate/sessions/<workspace>.json
+                       │
+             ClaudeGate review panels
 ```
 
 The hook captures a file's original content **once per session** — subsequent Claude writes to the same file don't overwrite the snapshot, so you always diff against the true before-state.
@@ -78,7 +81,7 @@ The hook captures a file's original content **once per session** — subsequent 
 | Requirement                                  | Notes                                         |
 | -------------------------------------------- | --------------------------------------------- |
 | VS Code 1.85+ or Cursor                      |                                               |
-| [Claude Code](https://claude.ai/claude-code) | Anthropic's CLI                               |
+| [Claude Code](https://claude.ai/claude-code) | Terminal CLI or VS Code/Cursor GUI extension  |
 | Python 3.7+                                  | Pre-installed on macOS and most Linux distros |
 
 > **Windows:** Native Windows is supported. Python must be on your `PATH` (`python` or `python3`). WSL is not required.
