@@ -13,6 +13,7 @@ import {
 import { HookInstaller } from "./hookInstaller";
 import { ClaudeGateContentProvider, SCHEME } from "./diffProvider";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
+import { DocumentTracker } from "./documentTracker";
 
 
 function getActivePendingFilePath(sessionManager: SessionManager): string | undefined {
@@ -51,6 +52,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     const sessionManager = new SessionManager(log, workspacePath);
     const hookInstaller  = new HookInstaller(context, log);
+    const documentTracker = new DocumentTracker(sessionManager, workspacePath, log);
 
     const badgeBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
     badgeBar.text    = "$(shield) 0";
@@ -270,6 +272,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
     sessionManager.startWatching();
     context.subscriptions.push({ dispose: () => sessionManager.stopWatching() });
+
+    documentTracker.start();
+    context.subscriptions.push({ dispose: () => documentTracker.stop() });
 
     // One-time migration notice: v1.0 used a single ~/.claudegate/session.json;
     // v1.1+ uses per-workspace files. Warn users with an existing old file so
