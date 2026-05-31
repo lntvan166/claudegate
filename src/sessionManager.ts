@@ -78,6 +78,47 @@ export class SessionManager {
     ).length;
   }
 
+  trackFileChange(filePath: string, originalContent: string | null): void {
+    // Create session if it doesn't exist (in memory; persist() will write it)
+    if (!this.session) {
+      this.session = {
+        sessionId: new Date().toISOString(),
+        status: "active",
+        files: {},
+      };
+    }
+
+    const entry = this.session.files[filePath];
+
+    // If file not yet in session, add it
+    if (!entry) {
+      this.session.files[filePath] = {
+        originalContent,
+        reviewStatus: "pending",
+      };
+      // Reset session status from "reviewed" to "active" if needed
+      if (this.session.status === "reviewed") {
+        this.session.status = "active";
+      }
+      this.persist();
+      return;
+    }
+
+    // If already pending, no-op
+    if (entry.reviewStatus === "pending") {
+      return;
+    }
+
+    // If accepted or rejected, reset to pending
+    if (entry.reviewStatus === "accepted" || entry.reviewStatus === "rejected") {
+      entry.originalContent = originalContent;
+      entry.reviewStatus = "pending";
+      entry.claudeContent = undefined;
+      this.session.status = "active";
+      this.persist();
+    }
+  }
+
   acceptFile(filePath: string): void {
     const entry = this.session?.files[filePath];
     if (!entry || entry.reviewStatus !== "pending") return;
