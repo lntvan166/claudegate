@@ -2,25 +2,32 @@
 
 ## What This Project Does
 
-ClaudeGate is a VS Code/Cursor extension that captures file changes made by Claude Code (terminal CLI) and presents them in a structured review panel. The user can accept or reject each change using VS Code's native diff editor.
+ClaudeGate is a VS Code/Cursor extension that captures file changes made by Claude Code and presents them in a structured review panel. The user can accept or reject each change using VS Code's native diff editor.
+
+Two detection paths are supported:
+- **Terminal CLI** — a `PreToolUse` hook in `~/.claude/settings.json` fires before every write and snapshots the file before Claude changes it.
+- **VS Code/Cursor GUI extension** — a `DocumentTracker` watches VS Code document lifecycle events and the file system to capture changes made by the Claude Code GUI extension without any hook.
 
 ---
 
 ## Architecture
 
-Three components share state through a single JSON file:
-
 ```
-hooks/hook.py          ← copied to ~/.claudegate/hook.py at setup
-       │  writes original content before Claude modifies files
-       ▼
-~/.claudegate/session.json   ← shared state (watched by extension)
-       │
-src/sessionManager.ts  ← watches session.json, exposes session state
-src/reviewPanel.ts     ← TreeView sidebar listing modified files
-src/diffProvider.ts    ← serves original content via claudegate: URI scheme
-src/hookInstaller.ts   ← Setup Hook command: installs scripts, patches settings
-src/extension.ts       ← entry point, wires everything together
+Claude Code (terminal CLI)            Claude Code (VS Code GUI extension)
+        │                                          │
+  PreToolUse hook fires                  DocumentTracker watches
+  hook.py snapshots original           onDidOpenTextDocument + FS watcher
+        │                                          │
+        └──────────────┬────────────────────────────┘
+                       ▼
+      ~/.claudegate/sessions/<workspace-hash>.json   ← shared state per workspace
+                       │
+        src/sessionManager.ts  ← reads/writes session file, accept/reject logic
+        src/reviewPanel.ts     ← TreeView sidebar (Pending / Accepted / Rejected)
+        src/diffProvider.ts    ← claudegate: URI scheme, opens native diff editor
+        src/decorationProvider.ts ← file explorer badges for pending files
+        src/hookInstaller.ts   ← Setup Hook command
+        src/extension.ts       ← entry point, wires everything together
 ```
 
 ---
@@ -30,34 +37,38 @@ src/extension.ts       ← entry point, wires everything together
 | File | Responsibility |
 |---|---|
 | `src/extension.ts` | Activation, command registration, status bar |
-| `src/sessionManager.ts` | Read/write `session.json`, file watcher, accept/reject logic |
-| `src/reviewPanel.ts` | `vscode.TreeDataProvider` for the sidebar panel |
+| `src/sessionManager.ts` | Read/write session JSON, file watcher, accept/reject/clear logic |
+| `src/documentTracker.ts` | GUI extension support — snapshots docs, detects FS changes |
+| `src/reviewPanel.ts` | `vscode.TreeDataProvider` for the three sidebar panels |
 | `src/diffProvider.ts` | `TextDocumentContentProvider` for `claudegate:` URIs; `openDiff` helper |
+| `src/decorationProvider.ts` | File explorer badge (`!`) for pending files |
 | `src/hookInstaller.ts` | Installs `hook.py` + `hook.sh`, patches `~/.claude/settings.json` |
-| `hooks/hook.py` | Python hook script — source file copied to `~/.claudegate/hook.py` |
+| `hooks/hook.py` | Python hook script — copied to `~/.claudegate/hook.py` at setup |
 
 ---
 
 ## Session State Schema
 
-`~/.claudegate/session.json`:
+Per-workspace session file at `~/.claudegate/sessions/<md5(workspacePath)>.json`:
 
 ```json
 {
-  "sessionId": "2026-05-28T19:44:00.000000+00:00",
+  "sessionId": "2026-05-31T10:00:00.000000+00:00",
   "status": "active | reviewed",
   "files": {
     "/absolute/path/to/file.ts": {
       "originalContent": "string | null",
+      "claudeContent": "string | null | undefined",
       "reviewStatus": "pending | accepted | rejected"
     }
   }
 }
 ```
 
-- `originalContent: null` means Claude created this file (it did not exist before). Rejecting it deletes the file.
-- `status: reviewed` is set automatically when all files have a non-pending status.
-- A new session is started automatically when `hook.py` runs and finds `status: reviewed`.
+- `originalContent: null` — Claude created this file (didn't exist before). Rejecting it deletes the file.
+- `claudeContent` — saved at reject time so the action can be undone (re-apply). `undefined` means not saved (old entry or accepted file).
+- `status: reviewed` — set automatically when all files have a non-pending status.
+- The workspace hash is `MD5(path.resolve(workspacePath))` (lowercased on Windows). Both `hook.py` and `SessionManager` use the same algorithm so they always agree on the filename.
 
 ---
 
@@ -82,52 +93,73 @@ src/extension.ts       ← entry point, wires everything together
 
 ---
 
+## DocumentTracker (GUI path)
+
+`src/documentTracker.ts` provides GUI extension support without hooks:
+
+1. On `start()`: snapshots all currently open documents (`vscode.workspace.textDocuments`).
+2. On `onDidOpenTextDocument`: snapshots newly opened documents — this is the "before Claude edits" capture point.
+3. On `FileSystemWatcher` `onDidChange` / `onDidCreate`: if the changed file has a snapshot and is not already in the session, calls `sessionManager.trackFileChange(filePath, originalContent)`.
+
+**Ignored paths**: `node_modules`, `.git`, `dist`, `build`, `out`, `target`, `vendor`, `__pycache__`, and other generated directories are skipped to avoid thousands of spurious events when Claude installs dependencies.
+
+**Coexistence with hook**: whichever path fires first for a file owns it. The other path skips any file already present in the session.
+
+---
+
 ## Development Setup
 
 ```bash
 # Install dependencies
 npm install
 
-# Compile TypeScript
+# Compile TypeScript (with source maps)
 npm run compile
 
-# Watch mode (auto-recompile)
+# Watch mode (auto-recompile on save)
 npm run watch
+
+# Type-check without emitting
+npm run typecheck
 ```
 
-Press **F5** in VS Code to launch the Extension Development Host with the extension loaded.
+Press **F5** in VS Code to launch the Extension Development Host.
 
 To test the hook manually:
 
 ```bash
 echo '{"tool_name":"Write","cwd":"/tmp","tool_input":{"file_path":"test.txt"}}' \
   | python3 hooks/hook.py
-cat ~/.claudegate/session.json
+ls ~/.claudegate/sessions/
 ```
 
 ---
 
 ## Publishing to the Marketplace
 
-1. Install `vsce`: `npm install -g @vscode/vsce`
-2. Update `publisher` in `package.json` to your VS Code Marketplace publisher ID
-3. Replace `media/icon.svg` with a 128×128 PNG named `media/icon.png` and update `package.json`
-4. Run: `vsce package` to generate a `.vsix` for local testing
-5. Run: `vsce publish` to publish
+```bash
+npm install -g @vscode/vsce   # one-time
+vsce login <publisher-id>      # requires Azure DevOps PAT with Marketplace → Manage scope
+vsce publish                   # bumps and publishes
+```
+
+The `.vscodeignore` file controls what gets packaged. vsce reads `.vscodeignore` (not `.vsixignore`). Keep dev-only directories (`.superpowers/`, `docs/`, `.claude/`, `.qodo/`) listed there.
 
 ---
 
 ## Adding Features
 
-- **New commands**: Register in `src/extension.ts` and add to `contributes.commands` + `contributes.menus` in `package.json`
-- **Hook changes**: Edit `hooks/hook.py` — users must re-run **Setup Hook** to pick up the new version
-- **Session behavior**: `src/sessionManager.ts` owns all session read/write logic; keep side effects there
+- **New commands**: Register in `src/extension.ts` and add to `contributes.commands` + `contributes.menus` in `package.json`.
+- **Hook changes**: Edit `hooks/hook.py` — users must re-run **Setup Hook** to pick up the new version.
+- **Session behavior**: `src/sessionManager.ts` owns all session read/write logic; keep side effects there.
+- **GUI detection changes**: `src/documentTracker.ts` owns all VS Code document/FS watching logic.
 
 ---
 
 ## Design Decisions
 
 - **File snapshot over git**: No git dependency — works in any directory, including non-git projects.
-- **Home directory for state** (`~/.claudegate/`): Session state is shared across all projects and survives workspace changes.
-- **One session at a time**: Keeps the review flow linear. A new Claude session automatically starts when the previous one is marked `reviewed`.
-- **Python for the hook**: Python 3 is pre-installed on macOS/Linux and handles JSON and file I/O without extra dependencies. The alternative (a Node.js script) would require installing Node in the shell environment where Claude runs.
+- **Per-workspace session files** (`~/.claudegate/sessions/<hash>.json`): Multiple simultaneous Claude sessions in different projects stay fully isolated. The hash is `MD5(resolvedWorkspacePath)`, computed identically by `hook.py` and `SessionManager`.
+- **Two detection paths**: The hook is authoritative for the terminal CLI (fires synchronously before writes). The `DocumentTracker` fills the gap for the GUI extension using VS Code's own event system.
+- **Only pending files get a badge**: Accepted and rejected files are undecorated in the file explorer to avoid clashing with git's own `A`/`R` status indicators.
+- **Python for the hook**: Python 3 is pre-installed on macOS/Linux and handles JSON and file I/O without extra dependencies.
