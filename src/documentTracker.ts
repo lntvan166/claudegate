@@ -37,6 +37,7 @@ export class DocumentTracker {
   stop(): void {
     for (const d of this.disposables) d.dispose();
     this.disposables.length = 0;
+    this.snapshots.clear();
   }
 
   private snapshotDocument(doc: vscode.TextDocument): void {
@@ -51,9 +52,10 @@ export class DocumentTracker {
   private handleFileChange(uri: vscode.Uri): void {
     const filePath = uri.fsPath;
     if (!this.isInWorkspace(filePath)) return;
+    if (filePath.includes(path.sep + ".git" + path.sep)) return;
 
     const session = this.sessionManager.getSession();
-    if (session?.files[filePath]) return;
+    if (session?.files[filePath]?.reviewStatus === "pending") return;
 
     const originalContent = this.snapshots.has(filePath)
       ? (this.snapshots.get(filePath) ?? null)
