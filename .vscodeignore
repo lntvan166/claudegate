@@ -2,10 +2,35 @@
 .vscode-test/**
 src/**
 out/test/**
-.gitignore
-.eslintrc.json
-tsconfig.json
-**/*.map
-**/*.ts
-!out/**
+out/**/*.map
+!out/extension.js
 node_modules/**
+
+# Dev tool data (not for marketplace users)
+.superpowers/**
+.claude/**
+.qodo/**
+docs/**
+
+# Internal docs
+CLAUDE.md
+CHANGELOG.md
+
+# Media assets not used in the marketplace listing
+media/icon.svg
+media/icon-activity.svg
+
+# Build and lint config
+.gitignore
+.gitattributes
+.eslintrc.json
+.eslintrc*
+tsconfig.json
+tsconfig*.json
+.editorconfig
+.prettierrc*
+.eslintignore
+
+# Misc
+*.vsix
+test.txt

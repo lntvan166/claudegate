@@ -1,8 +1,10 @@
-src/**
-.vscode/**
-.github/**
-docs/**
-.superpowers/**
+src
+.vscode
+.github
+docs
+.superpowers
+.claude
+.qodo
 
 tsconfig*.json
 .eslintrc*
@@ -22,4 +24,4 @@ test.txt
 *.vsix
 .gitignore
 .gitattributes
-node_modules/**
+node_modules
