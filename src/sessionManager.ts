@@ -100,6 +100,7 @@ export class SessionManager {
       if (this.session.status === "reviewed") {
         this.session.status = "active";
       }
+      this.log.appendLine(`[INFO] Tracking: ${filePath}`);
       this.persist();
       return;
     }
@@ -115,6 +116,7 @@ export class SessionManager {
       entry.reviewStatus = "pending";
       entry.claudeContent = undefined;
       this.session.status = "active";
+      this.log.appendLine(`[INFO] Re-tracking: ${filePath}`);
       this.persist();
     }
   }
