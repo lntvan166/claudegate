@@ -7,6 +7,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.1.4] — 2026-05-31
+
+### Fixed
+
+- **Spurious `.git` temp files in review panel** — VS Code's git extension creates temporary files like `package.json.git` on disk during diff/comparison operations and then deletes them. These were being captured as pending review items and stuck there permanently. Files ending in `.git`, `.orig`, `.tmp`, or `~` are now filtered out before entering the session.
+- **Deleted pending files lingering in review panel** — if a pending file is deleted from disk while in the session (e.g. a temp file VS Code removed), it is now automatically removed from the review panel via an `onDidDelete` watcher handler.
+
+---
+
 ## [1.1.3] — 2026-05-31
 
 ### Added
