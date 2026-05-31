@@ -7,6 +7,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.1.5] — 2026-06-01
+
+### Fixed
+
+- **Duplicate folder name in review panel** — when Claude created a new directory, VS Code's file system watcher (`**/*`) fired an `onDidCreate` event for the directory path itself. `DocumentTracker` had no guard against directories, so the folder path was added to the session as a phantom file entry. In tree view this rendered as both a collapsible `FolderItem` (correct) and an unclickable leaf with the same name (wrong). Directory paths are now skipped before entering the session.
+
+---
+
 ## [1.1.4] — 2026-05-31
 
 ### Fixed
