@@ -43,9 +43,9 @@ function refreshActiveFilePendingContext(sessionManager: SessionManager): void {
 
 export function activate(context: vscode.ExtensionContext): void {
   try {
-    const log = vscode.window.createOutputChannel("ClaudeGate");
+    const log = vscode.window.createOutputChannel("Claude Gate");
     context.subscriptions.push(log);
-    log.appendLine("[INFO] ClaudeGate activating…");
+    log.appendLine("[INFO] Claude Gate activating…");
 
     vscode.commands.executeCommand("setContext", "claudegate.viewMode", "tree");
 
@@ -56,7 +56,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
     const badgeBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
     badgeBar.text    = "$(shield) 0";
-    badgeBar.tooltip = "ClaudeGate: 0 pending file(s) — click to open review panel";
+    badgeBar.tooltip = "Claude Gate: 0 pending file(s) — click to open review panel";
     badgeBar.command = "claudegate.pendingPanel.focus";
     badgeBar.show();
     context.subscriptions.push(badgeBar);
@@ -272,7 +272,7 @@ export function activate(context: vscode.ExtensionContext): void {
       pendingView.badge = counts.pending > 0 ? { value: counts.pending, tooltip: `${counts.pending} pending file(s)` } : undefined;
 
       badgeBar.text            = `$(shield) ${counts.pending}`;
-      badgeBar.tooltip         = `ClaudeGate: ${counts.pending} pending file(s) — click to open review panel`;
+      badgeBar.tooltip         = `Claude Gate: ${counts.pending} pending file(s) — click to open review panel`;
       badgeBar.backgroundColor = counts.pending > 0
         ? new vscode.ThemeColor("statusBarItem.warningBackground")
         : undefined;
@@ -292,16 +292,16 @@ export function activate(context: vscode.ExtensionContext): void {
     if (fs.existsSync(legacyPath) && !context.globalState.get(migrationKey)) {
       context.globalState.update(migrationKey, true);
       vscode.window.showInformationMessage(
-        "ClaudeGate has been updated to use per-workspace session files. " +
-        "Please re-run 'ClaudeGate: Setup Hook' to install the updated hook script."
+        "Claude Gate has been updated to use per-workspace session files. " +
+        "Please re-run 'Claude Gate: Setup Hook' to install the updated hook script."
       );
     }
 
     refreshActiveFilePendingContext(sessionManager);
-    log.appendLine("[INFO] ClaudeGate ready.");
+    log.appendLine("[INFO] Claude Gate ready.");
   } catch (err) {
-    console.error("[ClaudeGate] ACTIVATION ERROR:", err);
-    vscode.window.showErrorMessage(`ClaudeGate failed to activate: ${(err as Error).message}`);
+    console.error("[Claude Gate] ACTIVATION ERROR:", err);
+    vscode.window.showErrorMessage(`Claude Gate failed to activate: ${(err as Error).message}`);
   }
 }
 

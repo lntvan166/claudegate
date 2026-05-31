@@ -10,9 +10,9 @@ const BADGES: Record<string, string> = {
 };
 
 const TOOLTIPS: Record<string, string> = {
-  pending:  "ClaudeGate: pending review",
-  accepted: "ClaudeGate: accepted",
-  rejected: "ClaudeGate: rejected",
+  pending:  "Claude Gate: pending review",
+  accepted: "Claude Gate: accepted",
+  rejected: "Claude Gate: rejected",
 };
 
 export class ClaudeGateDecorationProvider
@@ -37,7 +37,7 @@ export class ClaudeGateDecorationProvider
     return {
       badge: BADGES[s],
       color: COLORS[s],
-      tooltip: TOOLTIPS[s] ?? `ClaudeGate: ${s}`,
+      tooltip: TOOLTIPS[s] ?? `Claude Gate: ${s}`,
       propagate: false,
     };
   }

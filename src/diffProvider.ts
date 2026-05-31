@@ -63,7 +63,7 @@ export async function openDiff(
       "vscode.diff",
       beforeUri,
       rightUri,
-      `ClaudeGate: ${label}  (rejected — Claude's version)`
+      `Claude Gate: ${label}  (rejected — Claude's version)`
     );
     return;
   }
@@ -71,8 +71,8 @@ export async function openDiff(
   const currentUri = vscode.Uri.file(filePath);
   const title =
     entry.originalContent === null
-      ? `ClaudeGate: ${label}  (new file)`
-      : `ClaudeGate: ${label}  (original ↔ current)`;
+      ? `Claude Gate: ${label}  (new file)`
+      : `Claude Gate: ${label}  (original ↔ current)`;
 
   await vscode.commands.executeCommand("vscode.diff", beforeUri, currentUri, title);
 

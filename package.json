@@ -1,8 +1,8 @@
 {
   "name": "claudegate",
-  "displayName": "ClaudeGate",
+  "displayName": "Claude Gate",
   "description": "Review every file Claude Code touches — accept or revert with one click.",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "publisher": "lntvan166",
   "icon": "media/icon.png",
   "engines": {
@@ -42,7 +42,7 @@
       "activitybar": [
         {
           "id": "claudegate",
-          "title": "ClaudeGate",
+          "title": "Claude Gate",
           "icon": "media/icon-activity.png"
         }
       ]
@@ -75,12 +75,12 @@
       {
         "command": "claudegate.setupHook",
         "title": "Setup Hook",
-        "category": "ClaudeGate"
+        "category": "Claude Gate"
       },
       {
         "command": "claudegate.clearSession",
         "title": "Clear Session",
-        "category": "ClaudeGate",
+        "category": "Claude Gate",
         "icon": "$(trash)"
       },
       {
@@ -96,13 +96,13 @@
       {
         "command": "claudegate.acceptAll",
         "title": "Accept All",
-        "category": "ClaudeGate",
+        "category": "Claude Gate",
         "icon": "$(check-all)"
       },
       {
         "command": "claudegate.rejectAll",
         "title": "Reject All",
-        "category": "ClaudeGate",
+        "category": "Claude Gate",
         "icon": "$(discard)"
       },
       {
@@ -113,13 +113,13 @@
       {
         "command": "claudegate.viewAsTree",
         "title": "View as Tree",
-        "category": "ClaudeGate",
+        "category": "Claude Gate",
         "icon": "$(list-tree)"
       },
       {
         "command": "claudegate.viewAsList",
         "title": "View as List",
-        "category": "ClaudeGate",
+        "category": "Claude Gate",
         "icon": "$(list-flat)"
       },
       {
@@ -140,13 +140,13 @@
       {
         "command": "claudegate.clearAccepted",
         "title": "Clear All Accepted",
-        "category": "ClaudeGate",
+        "category": "Claude Gate",
         "icon": "$(clear-all)"
       },
       {
         "command": "claudegate.clearRejected",
         "title": "Clear All Rejected",
-        "category": "ClaudeGate",
+        "category": "Claude Gate",
         "icon": "$(clear-all)"
       },
       {

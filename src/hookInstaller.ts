@@ -38,14 +38,14 @@ export class HookInstaller {
 
       this.log.appendLine("[INFO] Hook installed successfully.");
       const action = await vscode.window.showInformationMessage(
-        "ClaudeGate: Hook installed. Run Claude Code normally — changes will appear in the sidebar.",
+        "Claude Gate: Hook installed. Run Claude Code normally — changes will appear in the sidebar.",
         "Verify Setup"
       );
       if (action === "Verify Setup") this.verify();
     } catch (err) {
       this.log.appendLine(`[ERROR] Setup failed: ${(err as Error).message}`);
       vscode.window.showErrorMessage(
-        `ClaudeGate setup failed: ${(err as Error).message}`
+        `Claude Gate setup failed: ${(err as Error).message}`
       );
     }
   }
@@ -132,9 +132,9 @@ export class HookInstaller {
     }
 
     if (issues.length === 0) {
-      vscode.window.showInformationMessage("ClaudeGate: All checks passed!");
+      vscode.window.showInformationMessage("Claude Gate: All checks passed!");
     } else {
-      vscode.window.showErrorMessage(`ClaudeGate issues: ${issues.join(" · ")}`);
+      vscode.window.showErrorMessage(`Claude Gate issues: ${issues.join(" · ")}`);
     }
   }
 }

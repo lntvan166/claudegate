@@ -217,7 +217,7 @@ export class SessionManager {
     this.log.appendLine(`[INFO] Rejected folder: ${folderPath} (${count} file(s))`);
     if (errors.length > 0) {
       vscode.window.showErrorMessage(
-        `ClaudeGate: Could not restore ${errors.length} file(s). Check Output panel for details.`
+        `Claude Gate: Could not restore ${errors.length} file(s). Check Output panel for details.`
       );
     }
   }
@@ -244,7 +244,7 @@ export class SessionManager {
     } catch (err) {
       this.log.appendLine(`[ERROR] ` + `Failed to reject ${filePath}: ${(err as Error).message}`);
       vscode.window.showErrorMessage(
-        `ClaudeGate: Could not restore ${path.basename(filePath)} — ${(err as Error).message}`
+        `Claude Gate: Could not restore ${path.basename(filePath)} — ${(err as Error).message}`
       );
       return;
     }
@@ -258,7 +258,7 @@ export class SessionManager {
     if (!entry || entry.reviewStatus !== "rejected") return;
     if (entry.claudeContent === undefined) {
       vscode.window.showWarningMessage(
-        `ClaudeGate: Cannot re-apply — reject this file first with the updated extension.`
+        `Claude Gate: Cannot re-apply — reject this file first with the updated extension.`
       );
       return;
     }
@@ -267,7 +267,7 @@ export class SessionManager {
       if (entry.claudeContent === null) {
         // Claude had created a new file that we deleted — nothing to restore
         vscode.window.showWarningMessage(
-          `ClaudeGate: Cannot re-apply — Claude's version of "${path.basename(filePath)}" was not saved.`
+          `Claude Gate: Cannot re-apply — Claude's version of "${path.basename(filePath)}" was not saved.`
         );
         return;
       }
@@ -276,7 +276,7 @@ export class SessionManager {
     } catch (err) {
       this.log.appendLine(`[ERROR] ` + `Failed to re-apply ${filePath}: ${(err as Error).message}`);
       vscode.window.showErrorMessage(
-        `ClaudeGate: Could not re-apply ${path.basename(filePath)} — ${(err as Error).message}`
+        `Claude Gate: Could not re-apply ${path.basename(filePath)} — ${(err as Error).message}`
       );
       return;
     }
@@ -317,7 +317,7 @@ export class SessionManager {
     this.log.appendLine(`[INFO] Reapplied all: ${count} file(s)`);
     if (errors.length > 0) {
       vscode.window.showErrorMessage(
-        `ClaudeGate: Could not re-apply ${errors.length} file(s). Check Output panel for details.`
+        `Claude Gate: Could not re-apply ${errors.length} file(s). Check Output panel for details.`
       );
     }
   }
@@ -354,7 +354,7 @@ export class SessionManager {
     this.log.appendLine(`[INFO] Reapplied folder: ${folderPath} (${count} file(s))`);
     if (errors.length > 0) {
       vscode.window.showErrorMessage(
-        `ClaudeGate: Could not re-apply ${errors.length} file(s). Check Output panel for details.`
+        `Claude Gate: Could not re-apply ${errors.length} file(s). Check Output panel for details.`
       );
     }
   }
@@ -430,7 +430,7 @@ export class SessionManager {
 
     if (errors.length > 0) {
       vscode.window.showErrorMessage(
-        `ClaudeGate: Could not restore ${errors.length} file(s). Check Output panel for details.`
+        `Claude Gate: Could not restore ${errors.length} file(s). Check Output panel for details.`
       );
     }
   }
