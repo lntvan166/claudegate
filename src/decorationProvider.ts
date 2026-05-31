@@ -2,15 +2,11 @@ import * as vscode from "vscode";
 import { SessionManager } from "./sessionManager";
 
 const COLORS: Record<string, vscode.ThemeColor> = {
-  pending:  new vscode.ThemeColor("gitDecoration.modifiedResourceForeground"),
-  accepted: new vscode.ThemeColor("gitDecoration.addedResourceForeground"),
-  rejected: new vscode.ThemeColor("gitDecoration.deletedResourceForeground"),
+  pending: new vscode.ThemeColor("gitDecoration.modifiedResourceForeground"),
 };
 
 const BADGES: Record<string, string> = {
-  pending:  "M",
-  accepted: "A",
-  rejected: "R",
+  pending: "!",
 };
 
 const TOOLTIPS: Record<string, string> = {
@@ -41,7 +37,7 @@ export class ClaudeGateDecorationProvider
     return {
       badge: BADGES[s],
       color: COLORS[s],
-      tooltip: TOOLTIPS[s],
+      tooltip: TOOLTIPS[s] ?? `ClaudeGate: ${s}`,
       propagate: false,
     };
   }

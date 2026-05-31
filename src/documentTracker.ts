@@ -63,7 +63,10 @@ export class DocumentTracker {
     if (this.isIgnoredPath(filePath)) return;
 
     const session = this.sessionManager.getSession();
-    if (session?.files[filePath]?.reviewStatus === "pending") return;
+    // Skip any file already in the session regardless of status.
+    // Limiting to === "pending" causes accepted files to be re-queued
+    // when git or VS Code touches them without changing content.
+    if (session?.files[filePath]) return;
 
     const originalContent = this.snapshots.has(filePath)
       ? (this.snapshots.get(filePath) ?? null)
