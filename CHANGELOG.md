@@ -7,6 +7,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.1.3] — 2026-05-31
+
+### Added
+
+- **Clear All buttons** — "Clear All Accepted" (`$(clear-all)`) and "Clear All Rejected" (`$(clear-all)`) toolbar buttons on their respective sidebar panels. Removes entries from the review view without touching files on disk — useful for cleaning up after a review is complete.
+
+---
+
 ## [1.1.2] — 2026-05-31
 
 ### Fixed
