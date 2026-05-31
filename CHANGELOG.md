@@ -42,6 +42,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.1.6] — 2026-06-01
+
+### Changed
+
+- **Extension renamed to "Claude Gate"** — display name, activity bar title, command palette category, all user-facing notifications, diff editor titles, and README updated. Internal command IDs (`claudegate.*`) and TypeScript class names are unchanged.
+
+---
+
 ## [1.1.5] — 2026-06-01
 
 ### Fixed
