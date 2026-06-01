@@ -14,9 +14,29 @@ const IGNORED_DIRS = new Set([
 // File suffixes that indicate editor/VCS temporary files, never source files.
 const IGNORED_SUFFIXES = [".git", ".orig", ".tmp", "~"];
 
+const EDITOR_CHANGE_WINDOW_MS = 10_000;
+const FS_BATCH_DEBOUNCE_MS = 300;
+
+interface FsEvent {
+  uri: vscode.Uri;
+  isCreate: boolean;
+}
+
+interface FsCandidate {
+  filePath: string;
+  isCreate: boolean;
+  hasSnapshot: boolean;
+  snapshot: string | null;
+  currentContent: string;
+  hasRecentEditorChange: boolean;
+}
+
 export class DocumentTracker {
   private readonly snapshots = new Map<string, string | null>();
+  private readonly lastEditorChangeMs = new Map<string, number>();
   private readonly disposables: vscode.Disposable[] = [];
+  private fsEventQueue: FsEvent[] = [];
+  private fsBatchTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
     private readonly sessionManager: SessionManager,
@@ -30,7 +50,13 @@ export class DocumentTracker {
     }
 
     this.disposables.push(
-      vscode.workspace.onDidOpenTextDocument((doc) => this.snapshotDocument(doc))
+      vscode.workspace.onDidOpenTextDocument((doc) => this.snapshotDocument(doc)),
+      vscode.workspace.onDidChangeTextDocument((event) => {
+        if (event.document.uri.scheme !== "file") return;
+        const filePath = event.document.uri.fsPath;
+        if (!this.isInWorkspace(filePath)) return;
+        this.lastEditorChangeMs.set(filePath, Date.now());
+      })
     );
 
     if (!this.workspacePath) return;
@@ -41,16 +67,22 @@ export class DocumentTracker {
 
     this.disposables.push(
       watcher,
-      watcher.onDidChange((uri) => this.handleFileChange(uri)),
-      watcher.onDidCreate((uri) => this.handleFileChange(uri)),
+      watcher.onDidChange((uri) => this.enqueueFileChange(uri, false)),
+      watcher.onDidCreate((uri) => this.enqueueFileChange(uri, true)),
       watcher.onDidDelete((uri) => this.handleFileDelete(uri))
     );
   }
 
   stop(): void {
+    if (this.fsBatchTimer !== undefined) {
+      clearTimeout(this.fsBatchTimer);
+      this.fsBatchTimer = undefined;
+    }
+    this.fsEventQueue = [];
     for (const d of this.disposables) d.dispose();
     this.disposables.length = 0;
     this.snapshots.clear();
+    this.lastEditorChangeMs.clear();
   }
 
   private snapshotDocument(doc: vscode.TextDocument): void {
@@ -62,24 +94,107 @@ export class DocumentTracker {
     }
   }
 
-  private handleFileChange(uri: vscode.Uri): void {
-    const filePath = uri.fsPath;
-    if (!this.isInWorkspace(filePath)) return;
-    if (this.isIgnoredPath(filePath)) return;
-    try { if (fs.statSync(filePath).isDirectory()) return; } catch { return; }
+  private enqueueFileChange(uri: vscode.Uri, isCreate: boolean): void {
+    this.fsEventQueue.push({ uri, isCreate });
+    if (this.fsBatchTimer !== undefined) clearTimeout(this.fsBatchTimer);
+    this.fsBatchTimer = setTimeout(() => this.processFsEventBatch(), FS_BATCH_DEBOUNCE_MS);
+  }
 
+  private processFsEventBatch(): void {
+    this.fsBatchTimer = undefined;
+    const batch = this.fsEventQueue.splice(0);
+    if (batch.length === 0) return;
+
+    const now = Date.now();
     const session = this.sessionManager.getSession();
-    // Skip any file already in the session regardless of status.
-    // Limiting to === "pending" causes accepted files to be re-queued
-    // when git or VS Code touches them without changing content.
-    if (session?.files[filePath]) return;
+    const candidates: FsCandidate[] = [];
 
-    const originalContent = this.snapshots.has(filePath)
-      ? (this.snapshots.get(filePath) ?? null)
-      : null;
+    for (const { uri, isCreate } of batch) {
+      const filePath = uri.fsPath;
+      if (!this.isInWorkspace(filePath)) continue;
+      if (this.isIgnoredPath(filePath)) continue;
+      try { if (fs.statSync(filePath).isDirectory()) continue; } catch { continue; }
+      if (session?.files[filePath]) continue;
 
+      // Design: modifications require a cached snapshot from a prior document open.
+      const hasSnapshot = this.snapshots.has(filePath);
+      if (!isCreate && !hasSnapshot) continue;
+
+      let currentContent: string;
+      try {
+        currentContent = fs.readFileSync(filePath, "utf-8");
+      } catch {
+        continue;
+      }
+
+      const snapshot = hasSnapshot ? (this.snapshots.get(filePath) ?? null) : null;
+      const lastEdit = this.lastEditorChangeMs.get(filePath) ?? 0;
+      candidates.push({
+        filePath,
+        isCreate,
+        hasSnapshot,
+        snapshot,
+        currentContent,
+        hasRecentEditorChange: now - lastEdit <= EDITOR_CHANGE_WINDOW_MS,
+      });
+    }
+
+    if (candidates.length === 0) return;
+
+    const anyEditorActivity = candidates.some((c) => c.hasRecentEditorChange);
+    // git pull / checkout / codegen: many updates to existing files, many new files
+    // from remote, or a mixed batch — none follow a recent in-editor change.
+    const allExistingFileChanges = candidates.every(
+      (c) => !c.isCreate || c.hasSnapshot
+    );
+    const allNewCreatesWithoutSnapshot = candidates.every(
+      (c) => c.isCreate && !c.hasSnapshot
+    );
+    const mixedPullBatch = candidates.some(
+      (c) => !c.isCreate && c.hasSnapshot
+    );
+    const looksLikeExternalBulk =
+      !anyEditorActivity &&
+      candidates.length >= 2 &&
+      (allExistingFileChanges ||
+        allNewCreatesWithoutSnapshot ||
+        mixedPullBatch);
+
+    if (looksLikeExternalBulk) {
+      for (const c of candidates) {
+        this.refreshSnapshot(c.filePath, c.currentContent);
+      }
+      this.log.appendLine(
+        `[INFO] DocumentTracker: ignored bulk external change (${candidates.length} file(s))`
+      );
+      return;
+    }
+
+    for (const c of candidates) {
+      if (c.isCreate && !c.hasSnapshot) {
+        this.captureFile(c.filePath, null);
+        continue;
+      }
+
+      if (!c.hasSnapshot) continue;
+      if (c.currentContent === c.snapshot) continue;
+
+      if (!c.hasRecentEditorChange) {
+        this.refreshSnapshot(c.filePath, c.currentContent);
+        continue;
+      }
+
+      this.captureFile(c.filePath, c.snapshot);
+    }
+  }
+
+  private captureFile(filePath: string, originalContent: string | null): void {
     this.sessionManager.trackFileChange(filePath, originalContent);
     this.log.appendLine(`[INFO] DocumentTracker: captured ${path.basename(filePath)}`);
+  }
+
+  private refreshSnapshot(filePath: string, content: string): void {
+    this.snapshots.set(filePath, content);
   }
 
   private handleFileDelete(uri: vscode.Uri): void {
