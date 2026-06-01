@@ -19,6 +19,13 @@ export interface Session {
   files: Record<string, FileEntry>;
 }
 
+// A pending "new file" (originalContent === null) whose path has vanished was a
+// temp file Claude created and then removed — there is nothing left to review,
+// so it is pruned. The PreToolUse hook records the entry *before* Claude writes
+// the file, so a genuinely new file briefly does not exist on disk; the grace
+// delay avoids pruning it in that window.
+const RECONCILE_GRACE_MS = 1500;
+
 export class SessionManager {
   private readonly sessionPath: string;
   private readonly sessionFilename: string;
@@ -26,6 +33,7 @@ export class SessionManager {
   private readonly claudegateDir: string;
   private session: Session | null = null;
   private watcher: fs.FSWatcher | null = null;
+  private reconcileTimer: ReturnType<typeof setTimeout> | null = null;
 
   private readonly _onSessionChange = new vscode.EventEmitter<Session | null>();
   readonly onSessionChange = this._onSessionChange.event;
@@ -65,6 +73,10 @@ export class SessionManager {
   stopWatching(): void {
     this.watcher?.close();
     this.watcher = null;
+    if (this.reconcileTimer) {
+      clearTimeout(this.reconcileTimer);
+      this.reconcileTimer = null;
+    }
   }
 
   getSession(): Session | null {
@@ -490,6 +502,34 @@ export class SessionManager {
       this.session = null;
     }
     this._onSessionChange.fire(this.session);
+    this.scheduleReconcile();
+  }
+
+  // Prune temp files Claude created then deleted, after a grace delay so a
+  // just-created file (recorded by the hook before the write lands) survives.
+  private scheduleReconcile(): void {
+    if (!this.session || this.reconcileTimer) return;
+    this.reconcileTimer = setTimeout(() => {
+      this.reconcileTimer = null;
+      this.reconcileVanishedNewFiles();
+    }, RECONCILE_GRACE_MS);
+  }
+
+  private reconcileVanishedNewFiles(): void {
+    if (!this.session) return;
+    let removed = 0;
+    for (const [filePath, entry] of Object.entries(this.session.files)) {
+      if (
+        entry.reviewStatus === "pending" &&
+        entry.originalContent === null &&
+        !fs.existsSync(filePath)
+      ) {
+        delete this.session.files[filePath];
+        removed++;
+        this.log.appendLine(`[INFO] Pruned vanished new file: ${filePath}`);
+      }
+    }
+    if (removed > 0) this.persist();
   }
 
   private persist(): void {

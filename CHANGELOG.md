@@ -7,6 +7,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.1.10] — 2026-06-01
+
+### Fixed
+
+- **Temp files Claude created then deleted stayed in the panel** — the hook fires only on `Write`/`Edit`/`MultiEdit`, so a temp file Claude created (recorded as a pending "new file") and later removed was never cleaned up on the terminal path, and the GUI delete handler only fires when a live window is watching that workspace. The session now reconciles on load: a pending new-file entry whose path no longer exists is pruned. A short grace delay protects genuinely new files, which the hook records just before the write lands.
+
+---
+
 ## [1.1.9] — 2026-06-01
 
 ### Fixed
