@@ -11,7 +11,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
-- **False captures from git and codegen** — `DocumentTracker` treated every file system change in the workspace as a Claude edit. Operations like `git checkout`, `git pull`, and `make verify-generate` (or any bulk codegen) could flood the review panel with unrelated files. Changes are now tracked only when they follow a recent in-editor edit; bulk external writes refresh snapshots instead of entering the session. Modifications to files that were never opened in the editor are skipped, matching the original GUI detection design.
+- **False captures from git and codegen** — `DocumentTracker` treated every file system change in the workspace as a Claude edit. Operations like `git checkout`, `git pull` (or any bulk codegen) could flood the review panel with unrelated files. Changes are now tracked only when they follow a recent in-editor edit; bulk external writes refresh snapshots instead of entering the session. Modifications to files that were never opened in the editor are skipped, matching the original GUI detection design.
 
 ---
 
