@@ -14,7 +14,8 @@ const IGNORED_DIRS = new Set([
 // File suffixes that indicate editor/VCS temporary files, never source files.
 const IGNORED_SUFFIXES = [".git", ".orig", ".tmp", "~"];
 
-const EDITOR_CHANGE_WINDOW_MS = 10_000;
+// git/codegen typically touch many files at once; Claude GUI edits are usually few.
+const BULK_FILE_THRESHOLD = 8;
 const FS_BATCH_DEBOUNCE_MS = 300;
 
 interface FsEvent {
@@ -28,12 +29,10 @@ interface FsCandidate {
   hasSnapshot: boolean;
   snapshot: string | null;
   currentContent: string;
-  hasRecentEditorChange: boolean;
 }
 
 export class DocumentTracker {
   private readonly snapshots = new Map<string, string | null>();
-  private readonly lastEditorChangeMs = new Map<string, number>();
   private readonly disposables: vscode.Disposable[] = [];
   private fsEventQueue: FsEvent[] = [];
   private fsBatchTimer: ReturnType<typeof setTimeout> | undefined;
@@ -50,13 +49,7 @@ export class DocumentTracker {
     }
 
     this.disposables.push(
-      vscode.workspace.onDidOpenTextDocument((doc) => this.snapshotDocument(doc)),
-      vscode.workspace.onDidChangeTextDocument((event) => {
-        if (event.document.uri.scheme !== "file") return;
-        const filePath = event.document.uri.fsPath;
-        if (!this.isInWorkspace(filePath)) return;
-        this.lastEditorChangeMs.set(filePath, Date.now());
-      })
+      vscode.workspace.onDidOpenTextDocument((doc) => this.snapshotDocument(doc))
     );
 
     if (!this.workspacePath) return;
@@ -82,7 +75,6 @@ export class DocumentTracker {
     for (const d of this.disposables) d.dispose();
     this.disposables.length = 0;
     this.snapshots.clear();
-    this.lastEditorChangeMs.clear();
   }
 
   private snapshotDocument(doc: vscode.TextDocument): void {
@@ -105,7 +97,6 @@ export class DocumentTracker {
     const batch = this.fsEventQueue.splice(0);
     if (batch.length === 0) return;
 
-    const now = Date.now();
     const session = this.sessionManager.getSession();
     const candidates: FsCandidate[] = [];
 
@@ -128,37 +119,23 @@ export class DocumentTracker {
       }
 
       const snapshot = hasSnapshot ? (this.snapshots.get(filePath) ?? null) : null;
-      const lastEdit = this.lastEditorChangeMs.get(filePath) ?? 0;
       candidates.push({
         filePath,
         isCreate,
         hasSnapshot,
         snapshot,
         currentContent,
-        hasRecentEditorChange: now - lastEdit <= EDITOR_CHANGE_WINDOW_MS,
       });
     }
 
     if (candidates.length === 0) return;
 
-    const anyEditorActivity = candidates.some((c) => c.hasRecentEditorChange);
-    // git pull / checkout / codegen: many updates to existing files, many new files
-    // from remote, or a mixed batch — none follow a recent in-editor change.
-    const allExistingFileChanges = candidates.every(
-      (c) => !c.isCreate || c.hasSnapshot
-    );
     const allNewCreatesWithoutSnapshot = candidates.every(
       (c) => c.isCreate && !c.hasSnapshot
     );
-    const mixedPullBatch = candidates.some(
-      (c) => !c.isCreate && c.hasSnapshot
-    );
     const looksLikeExternalBulk =
-      !anyEditorActivity &&
-      candidates.length >= 2 &&
-      (allExistingFileChanges ||
-        allNewCreatesWithoutSnapshot ||
-        mixedPullBatch);
+      candidates.length >= BULK_FILE_THRESHOLD ||
+      (candidates.length >= 2 && allNewCreatesWithoutSnapshot);
 
     if (looksLikeExternalBulk) {
       for (const c of candidates) {
@@ -178,11 +155,6 @@ export class DocumentTracker {
 
       if (!c.hasSnapshot) continue;
       if (c.currentContent === c.snapshot) continue;
-
-      if (!c.hasRecentEditorChange) {
-        this.refreshSnapshot(c.filePath, c.currentContent);
-        continue;
-      }
 
       this.captureFile(c.filePath, c.snapshot);
     }

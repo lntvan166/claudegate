@@ -7,6 +7,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.1.8] — 2026-06-01
+
+### Fixed
+
+- **Claude GUI edits not captured (v1.1.7 regression)** — v1.1.7 required a recent in-editor text change before tracking, but the Claude Code GUI often writes directly to disk without firing `onDidChangeTextDocument`. Single-file edits (e.g. one `.tsx` file) were silently ignored. Tracking no longer depends on editor change events.
+- **Bulk external detection retuned** — git pull, checkout, and codegen are still filtered out, now by batch size (8+ files in one debounced window, or 2+ brand-new files with no prior snapshot) instead of the unreliable editor-activity signal. Small Claude GUI edits (1–few files with a cached snapshot) are captured again.
+
+---
+
 ## [1.1.7] — 2026-06-01
 
 ### Fixed
