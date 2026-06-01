@@ -6,6 +6,8 @@ Captures original file content before any Claude write and records it in
 Each workspace gets its own session file, so multiple simultaneous Claude
 sessions in different projects don't interfere with each other.
 """
+from __future__ import annotations
+
 import sys
 import json
 import os
@@ -15,12 +17,37 @@ from datetime import datetime, timezone
 
 CLAUDEGATE_DIR = os.path.expanduser("~/.claudegate")
 SESSIONS_DIR   = os.path.join(CLAUDEGATE_DIR, "sessions")
+WORKSPACE_ROOTS_FILE = os.path.join(CLAUDEGATE_DIR, "workspace-roots.json")
 
 
-def workspace_session_file(cwd: str) -> str:
-    """Return the session file path for the given working directory."""
-    # Normalise: resolve to absolute path, lower-case on Windows (normcase).
-    normalized = os.path.normcase(os.path.abspath(cwd))
+def workspace_root_for_file(file_path: str, cwd: str) -> str:
+    """Match the VS Code extension session hash — use workspace folder, not Claude cwd."""
+    abs_file = os.path.normcase(os.path.abspath(file_path))
+    roots: list[str] = []
+    try:
+        with open(WORKSPACE_ROOTS_FILE, encoding="utf-8") as f:
+            roots = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, TypeError):
+        roots = []
+
+    # Pick the most specific (longest) matching root so nested or stale roots
+    # in the shared list never misroute a file to the wrong session.
+    best: str | None = None
+    for root in roots:
+        abs_root = os.path.normcase(os.path.abspath(root))
+        if abs_file == abs_root or abs_file.startswith(abs_root + os.sep):
+            if best is None or len(abs_root) > len(best):
+                best = abs_root
+
+    if best is not None:
+        return best
+
+    return os.path.normcase(os.path.abspath(cwd))
+
+
+def workspace_session_file(workspace_root: str) -> str:
+    """Return the session file path for the given workspace root."""
+    normalized = os.path.normcase(os.path.abspath(workspace_root))
     workspace_hash = hashlib.md5(normalized.encode()).hexdigest()
     return os.path.join(SESSIONS_DIR, f"{workspace_hash}.json")
 
@@ -74,7 +101,7 @@ def main() -> None:
     if not os.path.isabs(file_path):
         file_path = os.path.normpath(os.path.join(cwd, file_path))
 
-    session_file = workspace_session_file(cwd)
+    session_file = workspace_session_file(workspace_root_for_file(file_path, cwd))
 
     try:
         with open(file_path, "r", encoding="utf-8") as f:
@@ -92,6 +119,11 @@ def main() -> None:
         }
         if session.get("status") == "reviewed":
             session["status"] = "active"
+        save_session(session, session_file)
+
+    elif existing["reviewStatus"] == "pending" and existing.get("originalContent") is None and original_content is not None:
+        # DocumentTracker may have recorded this file first without a snapshot.
+        existing["originalContent"] = original_content
         save_session(session, session_file)
 
     elif existing["reviewStatus"] in ("accepted", "rejected"):

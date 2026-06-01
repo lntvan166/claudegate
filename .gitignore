@@ -4,3 +4,4 @@ node_modules/
 .vscode-test/
 .superpowers/
 .qodo
+__pycache__/

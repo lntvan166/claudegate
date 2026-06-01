@@ -14,6 +14,7 @@ import { HookInstaller } from "./hookInstaller";
 import { ClaudeGateContentProvider, SCHEME } from "./diffProvider";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
 import { DocumentTracker } from "./documentTracker";
+import { persistWorkspaceRoots } from "./workspaceRoots";
 
 
 function getActivePendingFilePath(sessionManager: SessionManager): string | undefined {
@@ -48,6 +49,11 @@ export function activate(context: vscode.ExtensionContext): void {
     log.appendLine("[INFO] Claude Gate activating…");
 
     vscode.commands.executeCommand("setContext", "claudegate.viewMode", "tree");
+
+    persistWorkspaceRoots();
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeWorkspaceFolders(() => persistWorkspaceRoots())
+    );
 
     const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     const sessionManager = new SessionManager(log, workspacePath);

@@ -3,10 +3,8 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as child_process from "child_process";
-
-const HOOK_SH = `#!/usr/bin/env bash
-python3 "$HOME/.claudegate/hook.py"
-`;
+import * as crypto from "crypto";
+import { persistWorkspaceRoots } from "./workspaceRoots";
 
 export class HookInstaller {
   private readonly isWindows = process.platform === "win32";
@@ -31,6 +29,7 @@ export class HookInstaller {
     try {
       this.ensurePythonAvailable();
       fs.mkdirSync(this.claudegateDir, { recursive: true });
+      persistWorkspaceRoots();
 
       this.installHookPy();
       this.installHookWrapper();
@@ -81,7 +80,8 @@ export class HookInstaller {
       const bat = `@echo off\n"${this.pythonCmd}" "${this.hookPyDest}"\n`;
       fs.writeFileSync(this.hookBatDest, bat, "utf-8");
     } else {
-      fs.writeFileSync(this.hookShDest, HOOK_SH, "utf-8");
+      const sh = `#!/usr/bin/env bash\n${this.pythonCmd} "$HOME/.claudegate/hook.py"\n`;
+      fs.writeFileSync(this.hookShDest, sh, "utf-8");
       fs.chmodSync(this.hookShDest, 0o755);
     }
   }
@@ -120,6 +120,39 @@ export class HookInstaller {
     }
     if (!fs.existsSync(this.hookWrapperDest)) {
       issues.push(`hook.${this.isWindows ? "bat" : "sh"} not found in ~/.claudegate`);
+    }
+
+    if (fs.existsSync(this.hookPyDest)) {
+      // Smoke-test the hook against a throwaway cwd that matches no workspace
+      // root, then delete the session file it creates so verification doesn't
+      // pollute ~/.claudegate/sessions.
+      const probeDir = path.join(
+        os.tmpdir(),
+        `claudegate-verify-${crypto.randomBytes(4).toString("hex")}`
+      );
+      try {
+        child_process.execSync(`${this.pythonCmd} "${this.hookPyDest}"`, {
+          input: JSON.stringify({
+            tool_name: "Write",
+            cwd: probeDir,
+            tool_input: { file_path: "test.txt" },
+          }),
+          stdio: ["pipe", "ignore", "pipe"],
+        });
+      } catch (err) {
+        const detail = (err as { stderr?: Buffer }).stderr?.toString().trim();
+        issues.push(
+          `hook.py crashes under ${this.pythonCmd}${detail ? `: ${detail.split("\n").pop()}` : ""}`
+        );
+      } finally {
+        // Mirror hook.py's hashing (normcase + abspath, lower-case on Windows).
+        const resolved = path.resolve(probeDir);
+        const normalized = this.isWindows ? resolved.toLowerCase() : resolved;
+        const hash = crypto.createHash("md5").update(normalized).digest("hex");
+        try {
+          fs.unlinkSync(path.join(this.claudegateDir, "sessions", `${hash}.json`));
+        } catch { /* nothing to clean up */ }
+      }
     }
 
     try {

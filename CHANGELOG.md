@@ -7,6 +7,16 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.1.9] — 2026-06-01
+
+### Fixed
+
+- **Hook crash on macOS system Python 3.9** — `hook.py` used `dict | None` type annotations (Python 3.10+). On macOS, `python3` is often 3.9.x, so the hook crashed at import time and never captured `originalContent`. Added `from __future__ import annotations` for 3.9 compatibility. Setup verification now smoke-tests `hook.py` with the detected Python executable.
+- **Existing files shown as "new file" in monorepos / multiple windows** — the hook keyed session files off Claude's terminal `cwd` (often a subproject), while the VS Code extension keyed off the workspace root, so the hook captured `originalContent` into a different session file than the sidebar reads. The extension now writes `~/.claudegate/workspace-roots.json`; the hook resolves the workspace folder that contains the target file and backfills pending entries with missing originals. The roots file is now **merged across every open window** (instead of each window overwriting it) and the hook matches the **most specific** root, so files edited in one project no longer get routed to another window's session.
+- **Setup verification no longer pollutes the sessions directory** — the `hook.py` smoke-test now runs against a throwaway temp directory and removes the session file it creates.
+
+---
+
 ## [1.1.8] — 2026-06-01
 
 ### Fixed
