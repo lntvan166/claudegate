@@ -7,6 +7,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.1.12] — 2026-06-03
+
+### Added
+
+- **Hook auto-sync on activate** — when installed `~/.claudegate/hook.py` differs from the extension bundle (SHA-256), the extension copies the new script and refreshes the wrapper, then shows a one-time notification per bundled version with optional **Verify Setup**. Registering the hook in `~/.claude/settings.json` still requires **Setup Hook** if not yet registered; a separate warning is shown when the script exists but settings lack the claudegate entry.
+
+---
+
 ## [1.1.11] — 2026-06-03
 
 ### Fixed

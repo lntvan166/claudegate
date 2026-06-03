@@ -6,6 +6,11 @@ import * as child_process from "child_process";
 import * as crypto from "crypto";
 import { persistWorkspaceRoots } from "./workspaceRoots";
 
+type HookSyncAction = "none" | "installed" | "updated";
+
+const HOOK_SYNC_NOTIFIED_KEY = "claudegate.hookSyncNotifiedForHash";
+const HOOK_SETTINGS_WARNED_KEY = "claudegate.hookSettingsWarned";
+
 export class HookInstaller {
   private readonly isWindows = process.platform === "win32";
   private pythonCmd = "python3";
@@ -65,11 +70,116 @@ export class HookInstaller {
     );
   }
 
+  private hashFile(filePath: string): string {
+    const data = fs.readFileSync(filePath);
+    return crypto.createHash("sha256").update(data).digest("hex");
+  }
+
+  private bundledHookSourcePath(): string {
+    return path.join(this.context.extensionPath, "hooks", "hook.py");
+  }
+
+  private bundledHookHash(): string {
+    return this.hashFile(this.bundledHookSourcePath());
+  }
+
+  private installedHookHash(): string | null {
+    if (!fs.existsSync(this.hookPyDest)) return null;
+    return this.hashFile(this.hookPyDest);
+  }
+
+  async syncHookIfNeeded(): Promise<HookSyncAction> {
+    const source = this.bundledHookSourcePath();
+    if (!fs.existsSync(source)) {
+      this.log.appendLine("[ERROR] Bundled hook.py not found; cannot sync.");
+      return "none";
+    }
+
+    let bundledHash: string;
+    try {
+      bundledHash = this.bundledHookHash();
+    } catch (err) {
+      this.log.appendLine(
+        `[ERROR] Cannot hash bundled hook: ${(err as Error).message}`
+      );
+      return "none";
+    }
+
+    const installedHash = this.installedHookHash();
+    if (installedHash === bundledHash) return "none";
+
+    fs.mkdirSync(this.claudegateDir, { recursive: true });
+
+    try {
+      this.ensurePythonAvailable();
+      this.installHookPy();
+      this.installHookWrapper();
+    } catch (err) {
+      this.installHookPy();
+      this.log.appendLine(`[WARN] Hook sync: ${(err as Error).message}`);
+      void vscode.window.showErrorMessage(
+        "Claude Gate: Hook script updated but wrapper needs Python. Run 'Setup Hook'."
+      );
+      return installedHash === null ? "installed" : "updated";
+    }
+
+    const action: HookSyncAction =
+      installedHash === null ? "installed" : "updated";
+    this.log.appendLine(
+      `[INFO] Hook sync: ${action} (hash ${bundledHash.slice(0, 12)}…)`
+    );
+
+    if (action === "updated") {
+      const notified = this.context.globalState.get<string>(
+        HOOK_SYNC_NOTIFIED_KEY
+      );
+      if (notified !== bundledHash) {
+        const version = this.context.extension.packageJSON.version as string;
+        const choice = await vscode.window.showInformationMessage(
+          `Claude Gate: Hook script updated to match extension v${version}.`,
+          "Verify Setup"
+        );
+        await this.context.globalState.update(
+          HOOK_SYNC_NOTIFIED_KEY,
+          bundledHash
+        );
+        if (choice === "Verify Setup") this.verify();
+      }
+    }
+
+    return action;
+  }
+
+  warnIfHookNotRegisteredInSettings(): void {
+    if (!fs.existsSync(this.hookPyDest)) return;
+    if (this.context.globalState.get(HOOK_SETTINGS_WARNED_KEY)) return;
+
+    let raw = "";
+    try {
+      raw = fs.readFileSync(this.claudeSettingsPath, "utf-8");
+    } catch {
+      return;
+    }
+
+    if (raw.includes("claudegate")) return;
+
+    void this.context.globalState.update(HOOK_SETTINGS_WARNED_KEY, true);
+    void vscode.window
+      .showWarningMessage(
+        "Claude Gate: Hook script is installed but not registered in ~/.claude/settings.json. Terminal Claude won't be tracked until you run Setup Hook.",
+        "Setup Hook"
+      )
+      .then((action) => {
+        if (action === "Setup Hook") void this.setup();
+      });
+  }
+
   private installHookPy(): void {
-    const sourcePath = path.join(this.context.extensionPath, "hooks", "hook.py");
+    const sourcePath = this.bundledHookSourcePath();
     if (!fs.existsSync(sourcePath)) {
       throw new Error(`hook.py not found at ${sourcePath}. Reinstall the extension.`);
     }
+    fs.mkdirSync(this.claudegateDir, { recursive: true });
     fs.copyFileSync(sourcePath, this.hookPyDest);
   }
 

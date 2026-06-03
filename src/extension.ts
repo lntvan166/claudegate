@@ -59,6 +59,9 @@ export function activate(context: vscode.ExtensionContext): void {
     const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     const sessionManager = new SessionManager(log, workspacePath);
     const hookInstaller  = new HookInstaller(context, log);
+    void hookInstaller.syncHookIfNeeded().then(() => {
+      hookInstaller.warnIfHookNotRegisteredInSettings();
+    });
     const documentTracker = new DocumentTracker(sessionManager, workspacePath, log);
 
     const badgeBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
