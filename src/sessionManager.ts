@@ -3,6 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as crypto from "crypto";
+import { isInWorkspace } from "./workspaceScope";
 
 export type ReviewStatus = "pending" | "accepted" | "rejected";
 export type SessionStatus = "active" | "reviewed";
@@ -85,8 +86,8 @@ export class SessionManager {
 
   getPendingCount(): number {
     if (!this.session) return 0;
-    return Object.values(this.session.files).filter(
-      (f) => f.reviewStatus === "pending"
+    return Object.entries(this.session.files).filter(
+      ([fp, f]) => f.reviewStatus === "pending" && isInWorkspace(fp)
     ).length;
   }
 
@@ -392,8 +393,8 @@ export class SessionManager {
   acceptAll(): void {
     if (!this.session) return;
     let count = 0;
-    for (const entry of Object.values(this.session.files)) {
-      if (entry.reviewStatus === "pending") {
+    for (const [filePath, entry] of Object.entries(this.session.files)) {
+      if (entry.reviewStatus === "pending" && isInWorkspace(filePath)) {
         entry.reviewStatus = "accepted";
         count++;
       }
@@ -414,7 +415,7 @@ export class SessionManager {
     const errors: string[] = [];
 
     for (const [filePath, entry] of Object.entries(this.session.files)) {
-      if (entry.reviewStatus !== "pending") continue;
+      if (entry.reviewStatus !== "pending" || !isInWorkspace(filePath)) continue;
       let savedClaudeContent: string | null;
       try {
         savedClaudeContent = fs.readFileSync(filePath, "utf-8");
@@ -498,11 +499,25 @@ export class SessionManager {
       const raw = fs.readFileSync(this.sessionPath, "utf-8");
       this.session = JSON.parse(raw) as Session;
       this.log.appendLine(`[INFO] Session loaded: ${Object.keys(this.session.files).length} file(s), status=${this.session.status}`);
+      this.pruneOutOfWorkspaceEntries();
     } catch {
       this.session = null;
     }
     this._onSessionChange.fire(this.session);
     this.scheduleReconcile();
+  }
+
+  private pruneOutOfWorkspaceEntries(): void {
+    if (!this.session) return;
+    let removed = 0;
+    for (const filePath of Object.keys(this.session.files)) {
+      if (!isInWorkspace(filePath)) {
+        delete this.session.files[filePath];
+        removed++;
+        this.log.appendLine(`[INFO] Pruned out-of-workspace entry: ${filePath}`);
+      }
+    }
+    if (removed > 0) this.persist();
   }
 
   // Prune temp files Claude created then deleted, after a grace delay so a

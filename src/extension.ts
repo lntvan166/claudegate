@@ -15,6 +15,7 @@ import { ClaudeGateContentProvider, SCHEME } from "./diffProvider";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
 import { DocumentTracker } from "./documentTracker";
 import { persistWorkspaceRoots } from "./workspaceRoots";
+import { isInWorkspace } from "./workspaceScope";
 
 
 function getActivePendingFilePath(sessionManager: SessionManager): string | undefined {
@@ -207,7 +208,9 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.commands.registerCommand("claudegate.acceptAll", async () => {
         const session = sessionManager.getSession();
         const pending = session
-          ? Object.entries(session.files).filter(([, e]) => e.reviewStatus === "pending")
+          ? Object.entries(session.files).filter(
+              ([fp, e]) => e.reviewStatus === "pending" && isInWorkspace(fp)
+            )
           : [];
         sessionManager.acceptAll();
         await Promise.all(pending.map(([fp]) => closeDiffEditor(fp)));
@@ -224,7 +227,9 @@ export function activate(context: vscode.ExtensionContext): void {
         if (answer === "Revert All") {
           const session = sessionManager.getSession();
           const files = session
-            ? Object.entries(session.files).filter(([, e]) => e.reviewStatus === "pending")
+            ? Object.entries(session.files).filter(
+                ([fp, e]) => e.reviewStatus === "pending" && isInWorkspace(fp)
+              )
             : [];
           sessionManager.rejectAll();
           await Promise.all(files.map(([fp]) => closeDiffEditor(fp)));
@@ -267,7 +272,8 @@ export function activate(context: vscode.ExtensionContext): void {
         rejected: 0,
       };
       if (session) {
-        for (const { reviewStatus } of Object.values(session.files)) {
+        for (const [filePath, { reviewStatus }] of Object.entries(session.files)) {
+          if (!isInWorkspace(filePath)) continue;
           counts[reviewStatus]++;
         }
       }

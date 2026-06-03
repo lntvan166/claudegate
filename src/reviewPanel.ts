@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import * as path from "path";
 import { SessionManager, ReviewStatus } from "./sessionManager";
 import { openDiff } from "./diffProvider";
+import { isInWorkspace } from "./workspaceScope";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -30,12 +31,6 @@ function relativeDir(filePath: string): string {
   }
   const parts = path.dirname(filePath).split(path.sep);
   return parts.slice(-2).join("/");
-}
-
-function isInWorkspace(filePath: string): boolean {
-  const folders = vscode.workspace.workspaceFolders;
-  if (!folders || folders.length === 0) return true;
-  return folders.some((f) => filePath.startsWith(f.uri.fsPath + path.sep));
 }
 
 // ─── Folder item (tree mode) ──────────────────────────────────────────────────

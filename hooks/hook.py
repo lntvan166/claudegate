@@ -20,7 +20,7 @@ SESSIONS_DIR   = os.path.join(CLAUDEGATE_DIR, "sessions")
 WORKSPACE_ROOTS_FILE = os.path.join(CLAUDEGATE_DIR, "workspace-roots.json")
 
 
-def workspace_root_for_file(file_path: str, cwd: str) -> str:
+def workspace_root_for_file(file_path: str, cwd: str) -> str | None:
     """Match the VS Code extension session hash — use workspace folder, not Claude cwd."""
     abs_file = os.path.normcase(os.path.abspath(file_path))
     roots: list[str] = []
@@ -42,7 +42,7 @@ def workspace_root_for_file(file_path: str, cwd: str) -> str:
     if best is not None:
         return best
 
-    return os.path.normcase(os.path.abspath(cwd))
+    return None
 
 
 def workspace_session_file(workspace_root: str) -> str:
@@ -101,7 +101,10 @@ def main() -> None:
     if not os.path.isabs(file_path):
         file_path = os.path.normpath(os.path.join(cwd, file_path))
 
-    session_file = workspace_session_file(workspace_root_for_file(file_path, cwd))
+    workspace_root = workspace_root_for_file(file_path, cwd)
+    if workspace_root is None:
+        sys.exit(0)
+    session_file = workspace_session_file(workspace_root)
 
     try:
         with open(file_path, "r", encoding="utf-8") as f:

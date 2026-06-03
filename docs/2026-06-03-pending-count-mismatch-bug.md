@@ -1,7 +1,7 @@
 # Bug: Pending count disagrees with pending tree (shows 2, only 1 visible)
 
 **Date:** 2026-06-03
-**Status:** Designed — see `docs/superpowers/specs/2026-06-03-pending-count-mismatch-design.md`
+**Status:** Fixed in v1.1.11 — see `docs/superpowers/specs/2026-06-03-pending-count-mismatch-design.md`
 **Severity:** Medium — a "ghost" pending file inflates the count and can never be cleared from the UI.
 
 ---

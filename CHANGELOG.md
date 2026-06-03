@@ -7,6 +7,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.1.11] — 2026-06-03
+
+### Fixed
+
+- **Pending badge/status-bar count could exceed the Pending tree** — when the session contained paths outside the workspace (e.g. `~/.claude/...` memory files filed via hook `cwd` fallback), counts and bulk actions included them but the tree did not. Counts, `acceptAll` / `rejectAll`, and `getPendingCount` now use the same workspace filter as the tree; stale out-of-workspace entries are pruned on session load.
+- **Hook captured files with no matching VS Code workspace root** — `workspace_root_for_file` no longer falls back to Claude's `cwd`; those edits are skipped. Re-run **Setup Hook** after upgrading to deploy the updated `hook.py`.
+
+---
+
 ## [1.1.10] — 2026-06-01
 
 ### Fixed
