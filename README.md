@@ -97,6 +97,8 @@ Example `settings.json`:
 }
 ```
 
+You can manage these from the **Settings** pane in the Claude Gate sidebar — toggle the file watcher, add/remove exclude patterns, and check hook status without editing `settings.json` by hand.
+
 ---
 
 ## Requirements
