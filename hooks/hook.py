@@ -124,10 +124,8 @@ def main() -> None:
             session["status"] = "active"
         save_session(session, session_file)
 
-    elif existing["reviewStatus"] == "pending" and existing.get("originalContent") is None and original_content is not None:
-        # DocumentTracker may have recorded this file first without a snapshot.
-        existing["originalContent"] = original_content
-        save_session(session, session_file)
+    # A pending entry is left untouched: its originalContent is the frozen
+    # review baseline and must never advance while the file awaits review.
 
     elif existing["reviewStatus"] in ("accepted", "rejected"):
         existing["originalContent"] = original_content
