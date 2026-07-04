@@ -20,3 +20,14 @@ export function setExcludeMatcher(m: ExcludeMatcher): void {
 export function isExcluded(filePath: string): boolean {
   return _excludeMatcher?.isExcluded(filePath) ?? false;
 }
+
+let _protectedMatcher: ExcludeMatcher | null = null;
+
+export function setProtectedMatcher(m: ExcludeMatcher): void {
+  _protectedMatcher = m;
+}
+
+/** True if filePath matches an active claudegate.protected glob (sensitive file). */
+export function isProtected(filePath: string): boolean {
+  return _protectedMatcher?.isExcluded(filePath) ?? false;
+}

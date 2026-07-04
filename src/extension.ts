@@ -16,7 +16,7 @@ import { ClaudeGateContentProvider, SCHEME } from "./diffProvider";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
 import { DocumentTracker } from "./documentTracker";
 import { persistWorkspaceRoots } from "./workspaceRoots";
-import { isInWorkspace, isExcluded, setExcludeMatcher } from "./workspaceScope";
+import { isInWorkspace, isExcluded, setExcludeMatcher, isProtected, setProtectedMatcher } from "./workspaceScope";
 import { ExcludeMatcher } from "./excludeMatcher";
 
 
@@ -89,6 +89,14 @@ export function activate(context: vscode.ExtensionContext): void {
       );
     loadExclude();
     setExcludeMatcher(excludeMatcher);
+    const protectedMatcher = new ExcludeMatcher();
+    const loadProtected = () =>
+      protectedMatcher.reload(
+        vscode.workspace.getConfiguration("claudegate").get<Record<string, boolean>>("protected"),
+        workspacePath
+      );
+    loadProtected();
+    setProtectedMatcher(protectedMatcher);
     const sessionManager = new SessionManager(log, workspacePath);
     const hookInstaller  = new HookInstaller(context, log);
     void hookInstaller.syncHookIfNeeded().then(() => {
@@ -450,8 +458,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
     context.subscriptions.push(
       vscode.workspace.onDidChangeConfiguration((e) => {
-        if (!e.affectsConfiguration("claudegate.exclude")) return;
-        loadExclude();
+        const exclChanged = e.affectsConfiguration("claudegate.exclude");
+        const protChanged = e.affectsConfiguration("claudegate.protected");
+        if (!exclChanged && !protChanged) return;
+        if (exclChanged) loadExclude();
+        if (protChanged) loadProtected();
         // Re-render trees and recompute counts/badges without a session change.
         pendingProvider.refresh();
         acceptedProvider.refresh();
