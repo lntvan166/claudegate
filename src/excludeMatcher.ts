@@ -1,6 +1,19 @@
 // Glob exclusion for ClaudeGate. Kept free of `vscode` imports so it can be
 // bundled and run under plain Node for unit tests.
 
+// Shipped as the default VALUE of claudegate.exclude (editable by users).
+export const DEFAULT_EXCLUDES: string[] = [
+  "**/package-lock.json", "**/yarn.lock", "**/pnpm-lock.yaml", "**/npm-shrinkwrap.json",
+  "**/bun.lockb", "**/Cargo.lock", "**/poetry.lock", "**/Pipfile.lock", "**/Gemfile.lock",
+  "**/composer.lock", "**/go.sum", "**/*.min.js", "**/*.min.css", "**/*.map", "**/node_modules/**",
+];
+
+// Shipped as the default VALUE of claudegate.protected (editable by users).
+export const DEFAULT_PROTECTED: string[] = [
+  "**/.env", "**/.env.*", "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx",
+  "**/id_rsa", "**/id_ed25519", "**/.npmrc", "**/credentials",
+];
+
 // Translate a glob to an anchored RegExp.
 //   **  → any characters, including path separators (matches across segments)
 //   *   → any characters except the path separator (within one segment)

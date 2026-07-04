@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { globToRegExp, ExcludeMatcher } from "./excludeMatcher";
+import { globToRegExp, ExcludeMatcher, DEFAULT_EXCLUDES, DEFAULT_PROTECTED } from "./excludeMatcher";
 
 function run(name: string, fn: () => void): void {
   try {
@@ -75,6 +75,34 @@ run("ExcludeMatcher **/dir folder pattern excludes contents at any depth", () =>
   m.reload({ "**/dist": true }, "/repo");
   assert.equal(m.isExcluded("/repo/pkg/dist/bundle.js"), true);
   assert.equal(m.isExcluded("/repo/pkg/src/main.ts"), false);
+});
+
+run("default excludes match lock/minified/map/node_modules, not source", () => {
+  const m = new ExcludeMatcher();
+  m.reload(Object.fromEntries(DEFAULT_EXCLUDES.map((g) => [g, true])), "/repo");
+  assert.equal(m.isExcluded("/repo/pkg/package-lock.json"), true);
+  assert.equal(m.isExcluded("/repo/a/b.min.js"), true);
+  assert.equal(m.isExcluded("/repo/dist/app.js.map"), true);
+  assert.equal(m.isExcluded("/repo/node_modules/foo/index.js"), true);
+  assert.equal(m.isExcluded("/repo/src/main.ts"), false);
+});
+
+run("a user false entry deactivates a default", () => {
+  const m = new ExcludeMatcher();
+  const map = Object.fromEntries(DEFAULT_EXCLUDES.map((g) => [g, true]));
+  map["**/go.sum"] = false;
+  m.reload(map, "/repo");
+  assert.equal(m.isExcluded("/repo/go.sum"), false);
+  assert.equal(m.isExcluded("/repo/yarn.lock"), true);
+});
+
+run("default protected globs match secrets, not normal files", () => {
+  const m = new ExcludeMatcher();
+  m.reload(Object.fromEntries(DEFAULT_PROTECTED.map((g) => [g, true])), "/repo");
+  assert.equal(m.isExcluded("/repo/.env"), true);
+  assert.equal(m.isExcluded("/repo/config/.env.local"), true);
+  assert.equal(m.isExcluded("/repo/keys/server.pem"), true);
+  assert.equal(m.isExcluded("/repo/README.md"), false);
 });
 
 console.log("done");

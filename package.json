@@ -366,9 +366,25 @@
         },
         "claudegate.exclude": {
           "type": "object",
-          "default": {},
+          "default": {
+            "**/package-lock.json": true, "**/yarn.lock": true, "**/pnpm-lock.yaml": true,
+            "**/npm-shrinkwrap.json": true, "**/bun.lockb": true, "**/Cargo.lock": true,
+            "**/poetry.lock": true, "**/Pipfile.lock": true, "**/Gemfile.lock": true,
+            "**/composer.lock": true, "**/go.sum": true, "**/*.min.js": true,
+            "**/*.min.css": true, "**/*.map": true, "**/node_modules/**": true
+          },
           "additionalProperties": { "type": "boolean" },
-          "markdownDescription": "Glob patterns whose matching files are hidden from ClaudeGate review (shaped like `search.exclude`). Matching files are skipped by the file watcher and hidden from the panel, counts, and badges even if captured by the CLI hook — nothing is deleted. Use `**/`-prefixed globs to match at any depth (`**/dist/**`), or name a folder to exclude everything inside it (`.superpowers`). Example: `{ \"**/dist/**\": true, \"**/*.min.js\": true, \".superpowers\": true }`."
+          "markdownDescription": "Glob patterns (shaped like `search.exclude`) whose matching files are hidden from ClaudeGate review. Ships with sensible defaults (lock files, minified assets, source maps, `node_modules`) — remove or deactivate any with `\"<glob>\": false`. Skipped by the watcher and hidden from panel/counts/badges even if the CLI hook captured them; nothing is deleted. Use `**/`-prefixed globs or a folder name."
+        },
+        "claudegate.protected": {
+          "type": "object",
+          "default": {
+            "**/.env": true, "**/.env.*": true, "**/*.pem": true, "**/*.key": true,
+            "**/*.p12": true, "**/*.pfx": true, "**/id_rsa": true, "**/id_ed25519": true,
+            "**/.npmrc": true, "**/credentials": true
+          },
+          "additionalProperties": { "type": "boolean" },
+          "markdownDescription": "Glob patterns for **sensitive** files (secrets, keys, credentials). Matching files are **not hidden** — they are flagged with a warning and sorted to the top of the review so their changes get scrutiny. Ships with defaults; edit or deactivate any with `\"<glob>\": false`."
         },
         "claudegate.autoAdvance": {
           "type": "boolean",
