@@ -327,7 +327,8 @@
         { "command": "claudegate.viewAsTree",                 "when": "false" },
         { "command": "claudegate.viewAsList",                 "when": "false" },
         { "command": "claudegate.revertAcceptedAll",          "when": "false" },
-        { "command": "claudegate.reapplyAll",                 "when": "false" }
+        { "command": "claudegate.reapplyAll",                 "when": "false" },
+        { "command": "claudegate.removeExcludePattern",       "when": "false" }
       ]
     },
     "configuration": {
