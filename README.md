@@ -98,7 +98,8 @@ The hook captures a file's original content **once per session** — subsequent 
 | Setting | Default | Description |
 |---|---|---|
 | `claudegate.fileWatcher.enabled` | `false` | Claude Code edits (terminal **and** in-editor) are captured by the `PreToolUse` hook, so this is **off by default**. Enable it only if you use a **non-Claude** agent (Cursor Composer, Codex) — the watcher can't attribute edits and may surface manual/formatter/git changes as false items. |
-| `claudegate.exclude` | `{}` | Glob patterns (shaped like VS Code's `search.exclude`) whose matching files are hidden from review. Matching files are skipped by the watcher and hidden from the panel, counts, and badges even if the CLI hook captured them — nothing is deleted. Use `**/`-prefixed globs to match at any depth, or name a folder to exclude everything inside it. |
+| `claudegate.exclude` | sensible defaults (lock files, minified, maps, node_modules) | Glob patterns (shaped like VS Code's `search.exclude`) whose matching files are hidden from review. Matching files are skipped by the watcher and hidden from the panel, counts, and badges even if the CLI hook captured them — nothing is deleted. Use `**/`-prefixed globs to match at any depth, or name a folder to exclude everything inside it. Ship with editable defaults; deactivate any with `"<glob>": false`. |
+| `claudegate.protected` | secrets defaults | Glob patterns for **sensitive** files (`.env`, keys, credentials). Matching files aren't hidden — they're **flagged and sorted to the top** of review so their changes get scrutiny. Edit/deactivate like `claudegate.exclude`. |
 | `claudegate.groupBySession` | `false` | Group the review panels by the Claude Code **session** that produced each change — helpful when several sessions run in one workspace. Toggle it from the Settings pane too. Re-run **Setup Hook** so the hook records session ids. |
 
 Example `settings.json`:
