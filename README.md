@@ -86,6 +86,7 @@ The hook captures a file's original content **once per session** — subsequent 
 |---|---|---|
 | `claudegate.fileWatcher.enabled` | `true` | Capture Claude Code **GUI-extension** edits by watching the filesystem. Turn this **off** if you only use the **terminal CLI** — the `PreToolUse` hook is more accurate, and the watcher can surface manual edits, formatter/codegen output, and git operations as false review items. |
 | `claudegate.exclude` | `{}` | Glob patterns (shaped like VS Code's `search.exclude`) whose matching files are hidden from review. Matching files are skipped by the watcher and hidden from the panel, counts, and badges even if the CLI hook captured them — nothing is deleted. Use `**/`-prefixed globs to match at any depth, or name a folder to exclude everything inside it. |
+| `claudegate.groupBySession` | `false` | Group the review panels by the Claude Code **session** that produced each change — helpful when several sessions run in one workspace. Toggle it from the Settings pane too. Re-run **Setup Hook** so the hook records session ids. |
 
 Example `settings.json`:
 

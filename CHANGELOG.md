@@ -17,6 +17,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **Keyboard review** — `Cmd+Enter` accept / `Cmd+Backspace` reject the focused diff, with auto-advance to the next pending file (`claudegate.autoAdvance`, default on).
 - **Change counts** — the diff tab title and pending-row tooltip show `+A -B` line counts.
 - **Row file actions** — right-click a file in the panel for Open File, Open to the Side, Reveal in Explorer, Copy Path / Relative Path, and Add to Claude Chat (when the Claude Context extension is installed).
+- **Group by session** — an optional `claudegate.groupBySession` setting (and Settings-pane toggle) groups the review panels by the Claude Code session that made each change, for when several sessions run in one workspace. The hook now records each change's `session_id`; files captured before this update or by the GUI watcher show under "Unknown session". Re-run **Setup Hook** to start recording session ids.
 
 ### Changed
 - **Accept now checkpoints the baseline.** Approving a file makes its current content the new diff baseline, so the next Claude edit is compared against the approved version instead of the original.
