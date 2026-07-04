@@ -3,7 +3,7 @@ import * as path from "path";
 import * as fs from "fs";
 import { SessionManager, ReviewStatus, Session, FileEntry } from "./sessionManager";
 import { openDiff } from "./diffProvider";
-import { isInWorkspace, isExcluded } from "./workspaceScope";
+import { isInWorkspace, isExcluded, isProtected } from "./workspaceScope";
 import { countChanges, formatChangeCount } from "./changeCount";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -94,6 +94,12 @@ export class FileReviewItem extends vscode.TreeItem {
       title:     "Open Diff",
       arguments: [filePath, sessionManager],
     };
+    if (isProtected(filePath)) {
+      this.iconPath = new vscode.ThemeIcon("warning", new vscode.ThemeColor("list.warningForeground"));
+      this.tooltip = new vscode.MarkdownString(
+        `⚠ **Protected — sensitive file; review carefully**\n\n**${path.basename(filePath)}**\n\n${filePath}\n\nStatus: *${reviewStatus}*`
+      );
+    }
   }
 }
 
@@ -150,7 +156,11 @@ export class FilteredTreeProvider
       if (grouped) return this.sessionGroups(session);
       const files = this.filteredFiles(session);
       if (this.viewMode === "list") {
-        return files.map((fp) => new FileReviewItem(fp, this.status, this.sessionManager));
+        const ordered = [...files].sort(
+          (a, b) =>
+            (Number(isProtected(b)) - Number(isProtected(a))) || a.localeCompare(b)
+        );
+        return ordered.map((fp) => new FileReviewItem(fp, this.status, this.sessionManager));
       }
       return this.directChildren(files, getWorkspaceRoot(files), this.status, false);
     }
@@ -161,7 +171,11 @@ export class FilteredTreeProvider
         matchesSession(session.files[fp], element.sessionId)
       );
       if (this.viewMode === "list") {
-        return files.map((fp) => new FileReviewItem(fp, this.status, this.sessionManager));
+        const ordered = [...files].sort(
+          (a, b) =>
+            (Number(isProtected(b)) - Number(isProtected(a))) || a.localeCompare(b)
+        );
+        return ordered.map((fp) => new FileReviewItem(fp, this.status, this.sessionManager));
       }
       return this.directChildren(files, getWorkspaceRoot(files), this.status, false, element.sessionId);
     }
@@ -277,7 +291,11 @@ export class FilteredTreeProvider
     }
 
     folders.sort((a, b) => a.folderPath.localeCompare(b.folderPath));
-    files.sort((a, b) => a.filePath.localeCompare(b.filePath));
+    files.sort(
+      (a, b) =>
+        (Number(isProtected(b.filePath)) - Number(isProtected(a.filePath))) ||
+        a.filePath.localeCompare(b.filePath)
+    );
     return [...folders, ...files];
   }
 }

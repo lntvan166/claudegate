@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { SessionManager } from "./sessionManager";
-import { isExcluded } from "./workspaceScope";
+import { isExcluded, isProtected } from "./workspaceScope";
 
 const COLORS: Record<string, vscode.ThemeColor> = {
   pending: new vscode.ThemeColor("gitDecoration.modifiedResourceForeground"),
@@ -34,6 +34,15 @@ export class ClaudeGateDecorationProvider
     const entry = session?.files[uri.fsPath];
     if (!entry) return undefined;
     if (isExcluded(uri.fsPath)) return undefined;
+
+    if (entry.reviewStatus === "pending" && isProtected(uri.fsPath)) {
+      return {
+        badge: "⚠",
+        color: new vscode.ThemeColor("list.warningForeground"),
+        tooltip: "Claude Gate: protected — sensitive file, review carefully",
+        propagate: false,
+      };
+    }
 
     const s = entry.reviewStatus;
     return {
