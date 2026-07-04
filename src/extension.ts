@@ -221,7 +221,7 @@ export function activate(context: vscode.ExtensionContext): void {
         const session = sessionManager.getSession();
         const pending = session
           ? Object.entries(session.files).filter(
-              ([fp, e]) => e.reviewStatus === "pending" && isInWorkspace(fp)
+              ([fp, e]) => e.reviewStatus === "pending" && isInWorkspace(fp) && !isExcluded(fp)
             )
           : [];
         sessionManager.acceptAll();
@@ -240,7 +240,7 @@ export function activate(context: vscode.ExtensionContext): void {
           const session = sessionManager.getSession();
           const files = session
             ? Object.entries(session.files).filter(
-                ([fp, e]) => e.reviewStatus === "pending" && isInWorkspace(fp)
+                ([fp, e]) => e.reviewStatus === "pending" && isInWorkspace(fp) && !isExcluded(fp)
               )
             : [];
           sessionManager.rejectAll();

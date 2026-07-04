@@ -165,7 +165,7 @@ export class SessionManager {
     const prefix = folderPath + path.sep;
     let count = 0;
     for (const [fp, entry] of Object.entries(this.session.files)) {
-      if (fp.startsWith(prefix) && entry.reviewStatus === "pending") {
+      if (fp.startsWith(prefix) && entry.reviewStatus === "pending" && !isExcluded(fp)) {
         const current = this.readFileOrNull(fp);
         if (current !== null) entry.originalContent = current;
         else this.log.appendLine(`[WARN] Accept folder: could not read ${fp}; baseline unchanged`);
@@ -222,7 +222,7 @@ export class SessionManager {
     let count = 0;
 
     for (const [fp, entry] of Object.entries(this.session.files)) {
-      if (!fp.startsWith(prefix) || entry.reviewStatus !== "pending") continue;
+      if (!fp.startsWith(prefix) || entry.reviewStatus !== "pending" || isExcluded(fp)) continue;
       let savedClaudeContent: string | null;
       try {
         savedClaudeContent = fs.readFileSync(fp, "utf-8");
