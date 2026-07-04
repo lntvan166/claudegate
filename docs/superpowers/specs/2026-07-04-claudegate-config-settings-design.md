@@ -147,6 +147,6 @@ Add an **Extension Settings** section documenting both settings with examples, a
 
 ## Release
 
-- Minor version bump (new settings): `1.2.0` → `1.3.0`.
-- CHANGELOG **Added**: `claudegate.fileWatcher.enabled` and `claudegate.exclude` settings; README/description docs.
+- **No version bump.** 1.2.0 has not shipped yet, so this work folds into the existing unreleased `1.2.0` (package.json stays `1.2.0`).
+- Extend the existing `## [1.2.0]` CHANGELOG entry with an **Added** section: `claudegate.fileWatcher.enabled` and `claudegate.exclude` settings; README/description docs. Do not create a new version heading.
 - No hook changes → no Setup Hook re-run required.
