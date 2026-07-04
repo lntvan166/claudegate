@@ -300,8 +300,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
       vscode.commands.registerCommand("claudegate.addExcludePattern", async () => {
         const input = await vscode.window.showInputBox({
-          prompt: "Glob to exclude from ClaudeGate review",
-          placeHolder: "**/*.pb.go",
+          prompt: "Glob or folder to exclude — e.g. **/dist/**, **/*.min.js, **/*.log, or a folder like .superpowers",
+          placeHolder: "**/dist/**",
           validateInput: (v) => (v.trim().length === 0 ? "Enter a non-empty glob" : undefined),
         });
         if (!input) return;

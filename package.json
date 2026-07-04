@@ -343,7 +343,7 @@
           "type": "object",
           "default": {},
           "additionalProperties": { "type": "boolean" },
-          "markdownDescription": "Glob patterns whose matching files are hidden from ClaudeGate review (shaped like `search.exclude`). Matching files are skipped by the file watcher and hidden from the panel, counts, and badges even if captured by the CLI hook — nothing is deleted. Use `**/`-prefixed patterns to match at any depth. Example: `{ \"**/*.pb.go\": true, \"**/dist/**\": true }`."
+          "markdownDescription": "Glob patterns whose matching files are hidden from ClaudeGate review (shaped like `search.exclude`). Matching files are skipped by the file watcher and hidden from the panel, counts, and badges even if captured by the CLI hook — nothing is deleted. Use `**/`-prefixed globs to match at any depth (`**/dist/**`), or name a folder to exclude everything inside it (`.superpowers`). Example: `{ \"**/dist/**\": true, \"**/*.min.js\": true, \".superpowers\": true }`."
         }
       }
     }

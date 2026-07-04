@@ -51,15 +51,29 @@ export class ExcludeMatcher {
     }
   }
 
-  // True if the file matches any active pattern, tested against both the
-  // absolute path and (when under the workspace root) the relative path.
+  // True if the file matches any active pattern. Tested against the absolute
+  // path, the workspace-relative path, AND each ancestor directory of the
+  // relative path — so a pattern naming a folder (e.g. ".superpowers/sdd" or
+  // "**/dist") excludes everything inside it, which is what users expect.
   isExcluded(filePath: string): boolean {
     if (this.patterns.length === 0) return false;
     const abs = filePath.replace(/\\/g, "/");
-    let rel = abs;
+    const candidates: string[] = [abs];
     if (this.root && abs.startsWith(this.root + "/")) {
-      rel = abs.slice(this.root.length + 1);
+      const rel = abs.slice(this.root.length + 1);
+      candidates.push(rel, ...ancestorDirs(rel));
     }
-    return this.patterns.some((re) => re.test(abs) || re.test(rel));
+    return this.patterns.some((re) => candidates.some((c) => re.test(c)));
   }
+}
+
+// Ancestor directory prefixes of a relative path (the path itself is tested
+// separately). "a/b/c.txt" -> ["a", "a/b"].
+function ancestorDirs(relPath: string): string[] {
+  const parts = relPath.split("/").filter(Boolean);
+  const out: string[] = [];
+  for (let i = 1; i < parts.length; i++) {
+    out.push(parts.slice(0, i).join("/"));
+  }
+  return out;
 }

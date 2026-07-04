@@ -62,4 +62,19 @@ run("ExcludeMatcher matches workspace-relative path via root", () => {
   assert.equal(m.isExcluded("/other/dist/a.js"), false);
 });
 
+run("ExcludeMatcher folder pattern excludes everything inside it", () => {
+  const m = new ExcludeMatcher();
+  m.reload({ ".superpowers/sdd": true }, "/repo");
+  assert.equal(m.isExcluded("/repo/.superpowers/sdd/task-1.md"), true);
+  assert.equal(m.isExcluded("/repo/.superpowers/sdd"), true); // the folder path itself
+  assert.equal(m.isExcluded("/repo/.superpowers/other.md"), false); // sibling not excluded
+});
+
+run("ExcludeMatcher **/dir folder pattern excludes contents at any depth", () => {
+  const m = new ExcludeMatcher();
+  m.reload({ "**/dist": true }, "/repo");
+  assert.equal(m.isExcluded("/repo/pkg/dist/bundle.js"), true);
+  assert.equal(m.isExcluded("/repo/pkg/src/main.ts"), false);
+});
+
 console.log("done");

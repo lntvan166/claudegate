@@ -81,7 +81,7 @@ The hook captures a file's original content **once per session** — subsequent 
 | Setting | Default | Description |
 |---|---|---|
 | `claudegate.fileWatcher.enabled` | `true` | Capture Claude Code **GUI-extension** edits by watching the filesystem. Turn this **off** if you only use the **terminal CLI** — the `PreToolUse` hook is more accurate, and the watcher can surface manual edits, formatter/codegen output, and git operations as false review items. |
-| `claudegate.exclude` | `{}` | Glob patterns (shaped like VS Code's `search.exclude`) whose matching files are hidden from review. Matching files are skipped by the watcher and hidden from the panel, counts, and badges even if the CLI hook captured them — nothing is deleted. Use `**/`-prefixed patterns to match at any depth. |
+| `claudegate.exclude` | `{}` | Glob patterns (shaped like VS Code's `search.exclude`) whose matching files are hidden from review. Matching files are skipped by the watcher and hidden from the panel, counts, and badges even if the CLI hook captured them — nothing is deleted. Use `**/`-prefixed globs to match at any depth, or name a folder to exclude everything inside it. |
 
 Example `settings.json`:
 
@@ -89,10 +89,11 @@ Example `settings.json`:
 {
   // Terminal-CLI user: rely on the hook only.
   "claudegate.fileWatcher.enabled": false,
-  // Hide generated files from review.
+  // Hide generated files and whole folders from review.
   "claudegate.exclude": {
-    "**/*.pb.go": true,
-    "**/dist/**": true
+    "**/dist/**": true,
+    "**/*.min.js": true,
+    ".superpowers": true
   }
 }
 ```
