@@ -118,6 +118,10 @@ export class SessionManager {
       return;
     }
 
+    // INVARIANT: a pending entry's originalContent is the frozen review
+    // baseline — never overwrite it here. It advances only on accept
+    // (checkpoint) or when a previously accepted/rejected file is re-edited.
+
     // If already pending, no-op
     if (entry.reviewStatus === "pending") {
       return;
@@ -137,6 +141,14 @@ export class SessionManager {
   acceptFile(filePath: string): void {
     const entry = this.session?.files[filePath];
     if (!entry || entry.reviewStatus !== "pending") return;
+    // Checkpoint: the approved content becomes the new baseline so the next
+    // Claude edit diffs from here, not the original.
+    const current = this.readFileOrNull(filePath);
+    if (current !== null) {
+      entry.originalContent = current;
+    } else {
+      this.log.appendLine(`[WARN] Accept: could not read ${filePath}; baseline unchanged`);
+    }
     entry.reviewStatus = "accepted";
     this.log.appendLine(`[INFO] ` + `Accepted: ${filePath}`);
     this.persist();
@@ -148,6 +160,9 @@ export class SessionManager {
     let count = 0;
     for (const [fp, entry] of Object.entries(this.session.files)) {
       if (fp.startsWith(prefix) && entry.reviewStatus === "pending") {
+        const current = this.readFileOrNull(fp);
+        if (current !== null) entry.originalContent = current;
+        else this.log.appendLine(`[WARN] Accept folder: could not read ${fp}; baseline unchanged`);
         entry.reviewStatus = "accepted";
         count++;
       }
@@ -395,6 +410,9 @@ export class SessionManager {
     let count = 0;
     for (const [filePath, entry] of Object.entries(this.session.files)) {
       if (entry.reviewStatus === "pending" && isInWorkspace(filePath)) {
+        const current = this.readFileOrNull(filePath);
+        if (current !== null) entry.originalContent = current;
+        else this.log.appendLine(`[WARN] Accept all: could not read ${filePath}; baseline unchanged`);
         entry.reviewStatus = "accepted";
         count++;
       }
@@ -545,6 +563,16 @@ export class SessionManager {
       }
     }
     if (removed > 0) this.persist();
+  }
+
+  // Read a file's current content, or null if it cannot be read. Used to
+  // checkpoint the review baseline at approve time.
+  private readFileOrNull(filePath: string): string | null {
+    try {
+      return fs.readFileSync(filePath, "utf-8");
+    } catch {
+      return null;
+    }
   }
 
   private persist(): void {
