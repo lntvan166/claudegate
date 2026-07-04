@@ -339,6 +339,10 @@ export function activate(context: vscode.ExtensionContext): void {
         // Provider auto-refreshes via its onDidChangeConfiguration listener.
       }),
 
+      vscode.commands.registerCommand("claudegate.enableFileWatcher", async () => {
+        await updateClaudegateConfig("fileWatcher.enabled", true);
+      }),
+
       vscode.commands.registerCommand("claudegate.toggleGroupBySession", async () => {
         const cur = vscode.workspace.getConfiguration("claudegate").get<boolean>("groupBySession", false);
         await updateClaudegateConfig("groupBySession", !cur);
@@ -503,6 +507,32 @@ export function activate(context: vscode.ExtensionContext): void {
         "Claude Gate has been updated to use per-workspace session files. " +
         "Please re-run 'Claude Gate: Setup Hook' to install the updated hook script."
       );
+    }
+
+    // One-time notice: the file watcher is now off by default because the hook
+    // covers all Claude Code (terminal + in-editor). Only surface it once the
+    // hook is registered — otherwise the "not registered" warning takes priority.
+    const watcherNoticeKey = "claudegate.watcherDefaultNoticeShown";
+    if (!context.globalState.get(watcherNoticeKey)) {
+      let hookRegistered = false;
+      try {
+        hookRegistered = hookInstaller.getStatus().registered;
+      } catch {
+        hookRegistered = false;
+      }
+      if (hookRegistered) {
+        void context.globalState.update(watcherNoticeKey, true);
+        void vscode.window
+          .showInformationMessage(
+            "Claude Gate captures Claude Code edits (terminal & in-editor) via the hook — the file watcher is off by default. Enable it only for non-Claude agents (Cursor Composer, Codex).",
+            "Enable file watcher"
+          )
+          .then((choice) => {
+            if (choice === "Enable file watcher") {
+              void vscode.commands.executeCommand("claudegate.enableFileWatcher");
+            }
+          });
+      }
     }
 
     refreshActiveFilePendingContext(sessionManager);

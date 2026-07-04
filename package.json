@@ -72,7 +72,7 @@
     "viewsWelcome": [
       {
         "view": "claudegate.pendingPanel",
-        "contents": "No pending files.\n\nRun Claude Code in your terminal to start tracking changes.\n\n[Setup Hook](command:claudegate.setupHook)"
+        "contents": "No changes captured yet.\n\nFor Claude Code, make sure the hook is set up.\n[Setup Hook](command:claudegate.setupHook)\n\nUsing a non-Claude agent (Cursor Composer, Codex), or still nothing showing?\n[Enable file watcher](command:claudegate.enableFileWatcher)"
       }
     ],
     "commands": [
@@ -191,6 +191,7 @@
         "title": "Claude Gate: Remove Exclude Pattern",
         "icon": "$(trash)"
       },
+      { "command": "claudegate.enableFileWatcher", "title": "Claude Gate: Enable File Watcher" },
       { "command": "claudegate.acceptCurrent", "title": "Claude Gate: Accept Current Diff" },
       { "command": "claudegate.rejectCurrent", "title": "Claude Gate: Reject Current Diff" },
       { "command": "claudegate.openFile",         "title": "Claude Gate: Open File" },
@@ -360,8 +361,8 @@
       "properties": {
         "claudegate.fileWatcher.enabled": {
           "type": "boolean",
-          "default": true,
-          "markdownDescription": "Capture Claude Code GUI-extension edits by watching the filesystem. Disable if you use only the terminal CLI (the PreToolUse hook) — the hook is more accurate, and the watcher can surface manual edits, formatter/codegen output, and git operations as false review items."
+          "default": false,
+          "markdownDescription": "Claude Code edits (terminal **and** in-editor) are captured by the `PreToolUse` hook, so this is off by default. Enable this filesystem watcher only if you use a **non-Claude** agent (e.g. Cursor Composer, Codex) that doesn't run Claude's hooks — it cannot attribute edits and may surface manual edits, formatter/codegen output, and git operations as false review items."
         },
         "claudegate.exclude": {
           "type": "object",
