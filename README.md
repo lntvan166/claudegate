@@ -46,6 +46,11 @@ Use `claude` in your terminal as usual. When Claude modifies files, Claude Gate 
 
 With a ClaudeGate diff focused, press **Cmd+Enter** to accept or **Cmd+Backspace** to reject the file; ClaudeGate then opens the next pending diff automatically (disable via `claudegate.autoAdvance`). Right-click any file row for Open File, Reveal in Explorer, Copy Path, and (with the Claude Context extension) Add to Claude Chat.
 
+### Not seeing changes captured?
+
+1. **Using Claude Code** (terminal or in-editor)? Make sure the hook is installed — run **`Claude Gate: Setup Hook`**. That covers all Claude Code edits.
+2. **Using a non-Claude agent** (Cursor Composer, Codex) or still nothing showing? Enable the filesystem watcher: set `claudegate.fileWatcher.enabled` to `true` (or click **Enable file watcher** in the empty panel / the Settings pane).
+
 ---
 
 ## Features
@@ -81,6 +86,8 @@ Claude Code (terminal CLI)          Claude Code (VS Code GUI extension)
              Claude Gate review panels
 ```
 
+The `PreToolUse` hook is the authoritative capture path for **all Claude Code — both the terminal CLI and the in-editor extension** (both run the same hook). The filesystem watcher is an optional fallback for **non-Claude** agents (Cursor Composer, Codex) and is off by default.
+
 The hook captures a file's original content **once per session** — subsequent Claude writes to the same file don't overwrite the snapshot, so you always diff against the true before-state.
 
 ---
@@ -89,7 +96,7 @@ The hook captures a file's original content **once per session** — subsequent 
 
 | Setting | Default | Description |
 |---|---|---|
-| `claudegate.fileWatcher.enabled` | `true` | Capture Claude Code **GUI-extension** edits by watching the filesystem. Turn this **off** if you only use the **terminal CLI** — the `PreToolUse` hook is more accurate, and the watcher can surface manual edits, formatter/codegen output, and git operations as false review items. |
+| `claudegate.fileWatcher.enabled` | `false` | Claude Code edits (terminal **and** in-editor) are captured by the `PreToolUse` hook, so this is **off by default**. Enable it only if you use a **non-Claude** agent (Cursor Composer, Codex) — the watcher can't attribute edits and may surface manual/formatter/git changes as false items. |
 | `claudegate.exclude` | `{}` | Glob patterns (shaped like VS Code's `search.exclude`) whose matching files are hidden from review. Matching files are skipped by the watcher and hidden from the panel, counts, and badges even if the CLI hook captured them — nothing is deleted. Use `**/`-prefixed globs to match at any depth, or name a folder to exclude everything inside it. |
 | `claudegate.groupBySession` | `false` | Group the review panels by the Claude Code **session** that produced each change — helpful when several sessions run in one workspace. Toggle it from the Settings pane too. Re-run **Setup Hook** so the hook records session ids. |
 

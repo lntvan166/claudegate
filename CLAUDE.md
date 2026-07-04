@@ -5,8 +5,8 @@
 ClaudeGate is a VS Code/Cursor extension that captures file changes made by Claude Code and presents them in a structured review panel. The user can accept or reject each change using VS Code's native diff editor.
 
 Two detection paths are supported:
-- **Terminal CLI** — a `PreToolUse` hook in `~/.claude/settings.json` fires before every write and snapshots the file before Claude changes it.
-- **VS Code/Cursor GUI extension** — a `DocumentTracker` watches VS Code document lifecycle events and the file system to capture changes made by the Claude Code GUI extension without any hook.
+- **PreToolUse hook (authoritative for all Claude Code).** The `~/.claude/settings.json` `PreToolUse` hook fires before every Claude write — for **both** the terminal CLI **and** the in-editor Claude Code extension (confirmed: both run the same hook, so a GUI edit is captured with correct original content and the in-editor session's `session_id`). This is the primary, attributed capture path.
+- **DocumentTracker (non-Claude fallback, off by default).** The filesystem watcher exists only to capture **non-Claude** agents (Cursor Composer, Codex) that don't run Claude's hooks; it cannot attribute edits, so it is disabled unless `claudegate.fileWatcher.enabled` is set.
 
 ---
 
@@ -160,6 +160,6 @@ The `.vscodeignore` file controls what gets packaged. vsce reads `.vscodeignore`
 
 - **File snapshot over git**: No git dependency — works in any directory, including non-git projects.
 - **Per-workspace session files** (`~/.claudegate/sessions/<hash>.json`): Multiple simultaneous Claude sessions in different projects stay fully isolated. The hash is `MD5(resolvedWorkspacePath)`, computed identically by `hook.py` and `SessionManager`.
-- **Two detection paths**: The hook is authoritative for the terminal CLI (fires synchronously before writes). The `DocumentTracker` fills the gap for the GUI extension using VS Code's own event system.
+- **Two detection paths**: The `PreToolUse` hook is authoritative for all Claude Code — terminal CLI and in-editor extension both run the same hook, firing synchronously before writes. The `DocumentTracker` is a non-Claude fallback for agents like Cursor Composer or Codex that don't run Claude's hooks; it cannot attribute edits, so it's disabled by default.
 - **Only pending files get a badge**: Accepted and rejected files are undecorated in the file explorer to avoid clashing with git's own `A`/`R` status indicators.
 - **Python for the hook**: Python 3 is pre-installed on macOS/Linux and handles JSON and file I/O without extra dependencies.

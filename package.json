@@ -1,8 +1,8 @@
 {
   "name": "claudegate",
   "displayName": "Claude Gate",
-  "description": "Review Claude Code's file changes in a native diff panel — accept or reject each edit. Works with the terminal CLI (via a PreToolUse hook) and the in-editor Claude extension (via a file watcher). Terminal-only users can set claudegate.fileWatcher.enabled to false for maximum accuracy.",
-  "version": "1.2.0",
+  "description": "Review Claude Code's file changes in a native diff panel — accept or reject each edit. The PreToolUse hook captures all Claude Code edits (terminal CLI and in-editor extension); the filesystem watcher is an optional fallback for non-Claude agents and is off by default.",
+  "version": "1.3.0",
   "publisher": "lntvan166",
   "icon": "media/icon.png",
   "engines": {

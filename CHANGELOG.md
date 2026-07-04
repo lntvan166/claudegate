@@ -7,6 +7,18 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.3.0] — 2026-07-05
+
+### Changed
+
+- **File watcher is now off by default.** The `PreToolUse` hook captures **all** Claude Code edits — terminal **and** in-editor (confirmed: the in-editor extension runs the same hook) — so the filesystem watcher, which can't attribute edits and surfaced manual/formatter/git noise, is no longer needed for Claude Code. Enable `claudegate.fileWatcher.enabled` only for non-Claude agents (Cursor Composer, Codex).
+
+### Added
+
+- **`Claude Gate: Enable File Watcher`** command, plus a one-time first-run notice and an empty-panel link, so non-Claude-agent users can turn the watcher on easily.
+
+---
+
 ## [1.2.0] — 2026-07-04
 
 ### Added
