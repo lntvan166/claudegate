@@ -41,6 +41,7 @@ Use `claude` in your terminal as usual. When Claude modifies files, Claude Gate 
 2. Click any pending file to open VS Code's native diff editor — original on the left, Claude's version on the right
 3. **✓ Accept** and **✕ Reject** inline links appear at the top of the diff — one click, done
 4. Accepted files move to the Accepted panel; rejected files are restored to their original content
+5. **Review All Pending** — click the multi-file diff button in the Pending panel title bar (or run `Claude Gate: Review All Pending`) to open every pending change in one scrollable multi-diff tab.
 
 ### Reviewing with the keyboard
 
