@@ -8,6 +8,12 @@ import { persistWorkspaceRoots } from "./workspaceRoots";
 
 type HookSyncAction = "none" | "installed" | "updated";
 
+export interface HookStatus {
+  scriptInstalled: boolean;
+  registered: boolean;
+  upToDate: boolean;
+}
+
 const HOOK_SYNC_NOTIFIED_KEY = "claudegate.hookSyncNotifiedForHash";
 const HOOK_SETTINGS_WARNED_KEY = "claudegate.hookSettingsWarned";
 
@@ -172,6 +178,30 @@ export class HookInstaller {
       .then((action) => {
         if (action === "Setup Hook") void this.setup();
       });
+  }
+
+  // Snapshot of hook install/registration state for the Settings panel.
+  // Fails safe (false) on any read error rather than throwing.
+  getStatus(): HookStatus {
+    const scriptInstalled = fs.existsSync(this.hookPyDest);
+
+    let registered = false;
+    try {
+      registered = fs.readFileSync(this.claudeSettingsPath, "utf-8").includes("claudegate");
+    } catch {
+      registered = false;
+    }
+
+    let upToDate = false;
+    if (scriptInstalled) {
+      try {
+        upToDate = this.installedHookHash() === this.bundledHookHash();
+      } catch {
+        upToDate = false;
+      }
+    }
+
+    return { scriptInstalled, registered, upToDate };
   }
 
   private installHookPy(): void {
