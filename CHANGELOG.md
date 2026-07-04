@@ -7,6 +7,20 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.2.0] — 2026-07-04
+
+### Changed
+- **Accept now checkpoints the baseline.** Approving a file makes its current content the new diff baseline, so the next Claude edit is compared against the approved version instead of the original.
+
+### Fixed
+- The review baseline is now frozen while a file is pending — a diff can no longer silently drop the original and show only the latest edit-to-edit change.
+- `git pull` / `merge` / `checkout` no longer create phantom "pending" entries: changes made while a git operation is detected are ignored regardless of file count.
+
+### Notes
+- Re-run **Setup Hook** (or let activate auto-sync run) to deploy the updated `hook.py`.
+
+---
+
 ## [1.1.12] — 2026-06-03
 
 ### Added
