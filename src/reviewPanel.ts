@@ -219,10 +219,13 @@ export function registerOpenDiff(
 }
 
 export async function closeDiffEditor(filePath: string): Promise<void> {
-  const prefix = `Claude Gate: ${path.basename(filePath)}`;
   for (const group of vscode.window.tabGroups.all) {
     for (const tab of group.tabs) {
-      if (tab.label.startsWith(prefix)) {
+      const input = tab.input;
+      if (
+        input instanceof vscode.TabInputTextDiff &&
+        (input.modified.fsPath === filePath || input.original.fsPath === filePath)
+      ) {
         await vscode.window.tabGroups.close(tab);
         return;
       }
