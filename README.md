@@ -51,7 +51,12 @@ With a ClaudeGate diff focused, press **Cmd+Enter** to accept or **Cmd+Backspace
 ## Features
 
 - **Automatic session tracking** — hooks fire before every Claude file write; no manual start/stop
-- **Three independent panels** — Pending, Accepted, and Rejected with per-panel collapse and view toggle
+- **Pending / Accepted / Rejected panels** plus a **Settings pane** — per-panel collapse and view toggle, with settings (watcher, exclude patterns, hook status) managed right in the sidebar
+- **Keyboard review** — `Cmd+Enter` accept / `Cmd+Backspace` reject the focused diff, then auto-advance to the next pending file
+- **Change counts** — `+A -B` line counts in the diff tab title and pending-row tooltips
+- **Exclude patterns** — `claudegate.exclude` globs (or a folder name) hide generated files from review, non-destructively
+- **Group by session** — optionally group the panels by the Claude session that made each change, for parallel sessions in one workspace
+- **Row file actions** — right-click for Open File, Reveal in Explorer, Copy Path, and Add to Claude Chat
 - **Accept/Reject CodeLens** — inline action links at the top of any pending file, in the diff view and the regular editor
 - **Folder-level actions** — accept or reject an entire directory at once (tree view mode)
 - **Undo your decisions** — re-apply Claude's changes from the Rejected panel; un-accept files back to Pending
