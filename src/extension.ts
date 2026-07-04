@@ -29,6 +29,7 @@ function getActivePendingFilePath(sessionManager: SessionManager): string | unde
     uri.scheme === "claudegate" ? uri.path   :
     undefined;
   if (!filePath) return undefined;
+  if (!isInWorkspace(filePath) || isExcluded(filePath)) return undefined;
   return sessionManager.getSession()?.files[filePath]?.reviewStatus === "pending"
     ? filePath
     : undefined;
