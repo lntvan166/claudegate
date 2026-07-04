@@ -1,8 +1,10 @@
 import * as vscode from "vscode";
 import * as path from "path";
+import * as fs from "fs";
 import { SessionManager, ReviewStatus } from "./sessionManager";
 import { openDiff } from "./diffProvider";
 import { isInWorkspace, isExcluded } from "./workspaceScope";
+import { countChanges, formatChangeCount } from "./changeCount";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -149,6 +151,29 @@ export class FilteredTreeProvider
     return [];
   }
 
+  // Lazily enrich a pending file row's tooltip with its change count (only on
+  // hover — no per-refresh cost). Non-pending rows keep their default tooltip.
+  resolveTreeItem(
+    item: vscode.TreeItem,
+    element: vscode.TreeItem
+  ): vscode.TreeItem {
+    if (element instanceof FileReviewItem && element.reviewStatus === "pending") {
+      const entry = this.sessionManager.getSession()?.files[element.filePath];
+      if (entry) {
+        try {
+          const current = fs.readFileSync(element.filePath, "utf-8");
+          const counts = countChanges(entry.originalContent ?? "", current);
+          item.tooltip = new vscode.MarkdownString(
+            `**${path.basename(element.filePath)}**\n\n${element.filePath}\n\nStatus: *pending* · ${formatChangeCount(counts)}`
+          );
+        } catch {
+          // Keep the existing tooltip on read failure.
+        }
+      }
+    }
+    return item;
+  }
+
   private directChildren(
     filePaths: string[],
     parentPath: string,
@@ -194,7 +219,7 @@ export function registerOpenDiff(
 }
 
 export async function closeDiffEditor(filePath: string): Promise<void> {
-  const prefix = `ClaudeGate: ${path.basename(filePath)}`;
+  const prefix = `Claude Gate: ${path.basename(filePath)}`;
   for (const group of vscode.window.tabGroups.all) {
     for (const tab of group.tabs) {
       if (tab.label.startsWith(prefix)) {
