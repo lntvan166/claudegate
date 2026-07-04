@@ -188,7 +188,13 @@
         "icon": "$(trash)"
       },
       { "command": "claudegate.acceptCurrent", "title": "Claude Gate: Accept Current Diff" },
-      { "command": "claudegate.rejectCurrent", "title": "Claude Gate: Reject Current Diff" }
+      { "command": "claudegate.rejectCurrent", "title": "Claude Gate: Reject Current Diff" },
+      { "command": "claudegate.openFile",         "title": "Claude Gate: Open File" },
+      { "command": "claudegate.openToSide",       "title": "Claude Gate: Open to the Side" },
+      { "command": "claudegate.revealInExplorer", "title": "Claude Gate: Reveal in Explorer" },
+      { "command": "claudegate.copyPath",         "title": "Claude Gate: Copy Path" },
+      { "command": "claudegate.copyRelativePath", "title": "Claude Gate: Copy Relative Path" },
+      { "command": "claudegate.addToClaudeChat",  "title": "Claude Gate: Add to Claude Chat" }
     ],
     "menus": {
       "editor/title": [
@@ -315,7 +321,13 @@
           "command": "claudegate.removeExcludePattern",
           "when": "view == claudegate.settingsPanel && viewItem == claudegate.excludePattern",
           "group": "inline"
-        }
+        },
+        { "command": "claudegate.openFile",         "when": "viewItem =~ /^claudegate\\.file\\./",                                      "group": "navigation@1" },
+        { "command": "claudegate.openToSide",       "when": "viewItem =~ /^claudegate\\.file\\./",                                      "group": "navigation@2" },
+        { "command": "claudegate.revealInExplorer", "when": "viewItem =~ /^claudegate\\.file\\./",                                      "group": "navigation@3" },
+        { "command": "claudegate.copyPath",         "when": "viewItem =~ /^claudegate\\.file\\./",                                      "group": "9_copy@1" },
+        { "command": "claudegate.copyRelativePath", "when": "viewItem =~ /^claudegate\\.file\\./",                                      "group": "9_copy@2" },
+        { "command": "claudegate.addToClaudeChat",  "when": "viewItem =~ /^claudegate\\.file\\./ && claudegate.claudeContextAvailable", "group": "z_claude@1" }
       ],
       "commandPalette": [
         { "command": "claudegate.acceptFile",                 "when": "false" },
@@ -330,7 +342,13 @@
         { "command": "claudegate.viewAsList",                 "when": "false" },
         { "command": "claudegate.revertAcceptedAll",          "when": "false" },
         { "command": "claudegate.reapplyAll",                 "when": "false" },
-        { "command": "claudegate.removeExcludePattern",       "when": "false" }
+        { "command": "claudegate.removeExcludePattern",       "when": "false" },
+        { "command": "claudegate.openFile",                   "when": "false" },
+        { "command": "claudegate.openToSide",                 "when": "false" },
+        { "command": "claudegate.revealInExplorer",           "when": "false" },
+        { "command": "claudegate.copyPath",                   "when": "false" },
+        { "command": "claudegate.copyRelativePath",           "when": "false" },
+        { "command": "claudegate.addToClaudeChat",            "when": "false" }
       ]
     },
     "configuration": {

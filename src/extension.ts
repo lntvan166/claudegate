@@ -51,6 +51,12 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(log);
     log.appendLine("[INFO] Claude Gate activating…");
 
+    vscode.commands.executeCommand(
+      "setContext",
+      "claudegate.claudeContextAvailable",
+      !!vscode.extensions.getExtension("lntvan166.claude-context")
+    );
+
     const updateClaudegateConfig = async (key: string, value: unknown): Promise<void> => {
       const target =
         (vscode.workspace.workspaceFolders?.length ?? 0) > 0
@@ -362,7 +368,39 @@ export function activate(context: vscode.ExtensionContext): void {
           delete map[glob];
           await updateClaudegateConfig("exclude", map);
         }
-      )
+      ),
+
+      vscode.commands.registerCommand("claudegate.openFile", (item: FileReviewItem) => {
+        if (!item?.filePath) return;
+        void vscode.commands.executeCommand("vscode.open", vscode.Uri.file(item.filePath));
+      }),
+      vscode.commands.registerCommand("claudegate.openToSide", (item: FileReviewItem) => {
+        if (!item?.filePath) return;
+        void vscode.commands.executeCommand("vscode.open", vscode.Uri.file(item.filePath), {
+          viewColumn: vscode.ViewColumn.Beside,
+        });
+      }),
+      vscode.commands.registerCommand("claudegate.revealInExplorer", (item: FileReviewItem) => {
+        if (!item?.filePath) return;
+        void vscode.commands.executeCommand("revealInExplorer", vscode.Uri.file(item.filePath));
+      }),
+      vscode.commands.registerCommand("claudegate.copyPath", (item: FileReviewItem) => {
+        if (!item?.filePath) return;
+        void vscode.env.clipboard.writeText(item.filePath);
+      }),
+      vscode.commands.registerCommand("claudegate.copyRelativePath", (item: FileReviewItem) => {
+        if (!item?.filePath) return;
+        void vscode.env.clipboard.writeText(vscode.workspace.asRelativePath(item.filePath));
+      }),
+      vscode.commands.registerCommand("claudegate.addToClaudeChat", async (item: FileReviewItem) => {
+        if (!item?.filePath) return;
+        const uri = vscode.Uri.file(item.filePath);
+        try {
+          await vscode.commands.executeCommand("claude-context.addFile", uri, [uri]);
+        } catch {
+          vscode.window.showWarningMessage("Claude Gate: 'Claude Context' extension not available.");
+        }
+      })
     );
 
     registerOpenDiff(context, sessionManager);
