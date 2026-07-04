@@ -186,7 +186,9 @@
         "command": "claudegate.removeExcludePattern",
         "title": "Claude Gate: Remove Exclude Pattern",
         "icon": "$(trash)"
-      }
+      },
+      { "command": "claudegate.acceptCurrent", "title": "Claude Gate: Accept Current Diff" },
+      { "command": "claudegate.rejectCurrent", "title": "Claude Gate: Reject Current Diff" }
     ],
     "menus": {
       "editor/title": [
@@ -344,9 +346,18 @@
           "default": {},
           "additionalProperties": { "type": "boolean" },
           "markdownDescription": "Glob patterns whose matching files are hidden from ClaudeGate review (shaped like `search.exclude`). Matching files are skipped by the file watcher and hidden from the panel, counts, and badges even if captured by the CLI hook — nothing is deleted. Use `**/`-prefixed globs to match at any depth (`**/dist/**`), or name a folder to exclude everything inside it (`.superpowers`). Example: `{ \"**/dist/**\": true, \"**/*.min.js\": true, \".superpowers\": true }`."
+        },
+        "claudegate.autoAdvance": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "After accepting or rejecting from the diff view via keyboard (Cmd+Enter / Cmd+Backspace), automatically open the next pending file's diff."
         }
       }
-    }
+    },
+    "keybindings": [
+      { "command": "claudegate.acceptCurrent", "key": "ctrl+enter",           "mac": "cmd+enter",     "when": "claudegate.activeFileIsPending" },
+      { "command": "claudegate.rejectCurrent", "key": "ctrl+shift+backspace", "mac": "cmd+backspace", "when": "claudegate.activeFileIsPending" }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run bundle",

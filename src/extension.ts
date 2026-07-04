@@ -134,6 +134,21 @@ export function activate(context: vscode.ExtensionContext): void {
     });
     context.subscriptions.push(settingsView);
 
+    const openNextPending = async (): Promise<void> => {
+      const session = sessionManager.getSession();
+      const next = session
+        ? Object.entries(session.files)
+            .filter(([fp, e]) => e.reviewStatus === "pending" && isInWorkspace(fp) && !isExcluded(fp))
+            .map(([fp]) => fp)
+            .sort((a, b) => a.localeCompare(b))[0]
+        : undefined;
+      if (next) {
+        await vscode.commands.executeCommand("claudegate.openDiff", next);
+      } else {
+        vscode.window.showInformationMessage("Claude Gate: all caught up ✓");
+      }
+    };
+
     // ── Commands ──────────────────────────────────────────────────────────
     context.subscriptions.push(
       vscode.commands.registerCommand("claudegate.setupHook", async () => {
@@ -172,6 +187,25 @@ export function activate(context: vscode.ExtensionContext): void {
           }
         }
       ),
+
+      vscode.commands.registerCommand("claudegate.acceptCurrent", async () => {
+        const fp = getActivePendingFilePath(sessionManager);
+        if (!fp) return;
+        sessionManager.acceptFile(fp);
+        await closeDiffEditor(fp);
+        if (vscode.workspace.getConfiguration("claudegate").get<boolean>("autoAdvance", true)) {
+          await openNextPending();
+        }
+      }),
+      vscode.commands.registerCommand("claudegate.rejectCurrent", async () => {
+        const fp = getActivePendingFilePath(sessionManager);
+        if (!fp) return;
+        sessionManager.rejectFile(fp);
+        await closeDiffEditor(fp);
+        if (vscode.workspace.getConfiguration("claudegate").get<boolean>("autoAdvance", true)) {
+          await openNextPending();
+        }
+      }),
 
       // ── Pending folder actions ──
       vscode.commands.registerCommand(
