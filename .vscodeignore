@@ -31,6 +31,10 @@ tsconfig*.json
 .prettierrc*
 .eslintignore
 
+# Hook tests (dev-only, not shipped to marketplace users)
+hooks/tests/**
+**/__pycache__/**
+
 # Misc
 *.vsix
 test.txt
