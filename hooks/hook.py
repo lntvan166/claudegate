@@ -97,6 +97,8 @@ def main() -> None:
         sys.exit(0)
 
     cwd = hook_input.get("cwd", os.getcwd())
+    session_id = hook_input.get("session_id")
+    captured_at = datetime.now(timezone.utc).isoformat()
 
     if not os.path.isabs(file_path):
         file_path = os.path.normpath(os.path.join(cwd, file_path))
@@ -119,6 +121,8 @@ def main() -> None:
         session["files"][file_path] = {
             "originalContent": original_content,
             "reviewStatus": "pending",
+            "sessionId": session_id,
+            "capturedAt": captured_at,
         }
         if session.get("status") == "reviewed":
             session["status"] = "active"
@@ -130,6 +134,8 @@ def main() -> None:
     elif existing["reviewStatus"] in ("accepted", "rejected"):
         existing["originalContent"] = original_content
         existing["reviewStatus"] = "pending"
+        existing["sessionId"] = session_id
+        existing["capturedAt"] = captured_at
         session["status"] = "active"
         save_session(session, session_file)
 

@@ -32,12 +32,15 @@ class HookBaselineTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.home, ignore_errors=True)
 
-    def run_hook(self):
-        payload = json.dumps({
+    def run_hook(self, session_id=None):
+        payload_obj = {
             "tool_name": "Edit",
             "cwd": self.root,
             "tool_input": {"file_path": self.file},
-        })
+        }
+        if session_id is not None:
+            payload_obj["session_id"] = session_id
+        payload = json.dumps(payload_obj)
         env = dict(os.environ, HOME=self.home)
         subprocess.run(
             [sys.executable, HOOK],
@@ -84,6 +87,14 @@ class HookBaselineTest(unittest.TestCase):
         entry = self.read_entry()
         self.assertEqual(entry["originalContent"], "v1")
         self.assertEqual(entry["reviewStatus"], "pending")
+
+    def test_captures_session_id_and_timestamp(self):
+        with open(self.file, "w") as f:
+            f.write("v0")
+        self.run_hook(session_id="s-123")
+        entry = self.read_entry()
+        self.assertEqual(entry["sessionId"], "s-123")
+        self.assertTrue(entry.get("capturedAt"))
 
 
 if __name__ == "__main__":
