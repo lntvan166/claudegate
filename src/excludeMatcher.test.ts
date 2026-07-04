@@ -1,4 +1,5 @@
 import assert from "node:assert";
+import { readFileSync } from "node:fs";
 import { globToRegExp, ExcludeMatcher, DEFAULT_EXCLUDES, DEFAULT_PROTECTED } from "./excludeMatcher";
 
 function run(name: string, fn: () => void): void {
@@ -103,6 +104,15 @@ run("default protected globs match secrets, not normal files", () => {
   assert.equal(m.isExcluded("/repo/config/.env.local"), true);
   assert.equal(m.isExcluded("/repo/keys/server.pem"), true);
   assert.equal(m.isExcluded("/repo/README.md"), false);
+});
+
+run("package.json default maps match the DEFAULT_ constants (no drift)", () => {
+  const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+  const props = pkg.contributes.configuration.properties;
+  const exclKeys = Object.keys(props["claudegate.exclude"].default);
+  const protKeys = Object.keys(props["claudegate.protected"].default);
+  assert.deepEqual(exclKeys.slice().sort(), DEFAULT_EXCLUDES.slice().sort());
+  assert.deepEqual(protKeys.slice().sort(), DEFAULT_PROTECTED.slice().sort());
 });
 
 console.log("done");
