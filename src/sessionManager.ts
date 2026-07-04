@@ -12,6 +12,8 @@ export interface FileEntry {
   originalContent: string | null;
   claudeContent?: string | null; // saved at reject time so the action can be undone
   reviewStatus: ReviewStatus;
+  sessionId?: string;  // Claude session_id that produced this change (hook path only)
+  capturedAt?: string; // ISO timestamp of first capture
 }
 
 export interface Session {

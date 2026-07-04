@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
-import { SessionManager, ReviewStatus } from "./sessionManager";
+import { SessionManager, ReviewStatus, Session, FileEntry } from "./sessionManager";
 import { openDiff } from "./diffProvider";
 import { isInWorkspace, isExcluded } from "./workspaceScope";
 import { countChanges, formatChangeCount } from "./changeCount";
@@ -35,17 +35,38 @@ function relativeDir(filePath: string): string {
   return parts.slice(-2).join("/");
 }
 
+// A file belongs to a session bucket: null = the "unknown" bucket (no session id).
+function matchesSession(entry: FileEntry, sessionId: string | null): boolean {
+  return sessionId === null ? !entry.sessionId : entry.sessionId === sessionId;
+}
+
 // ─── Folder item (tree mode) ──────────────────────────────────────────────────
 
 export class FolderItem extends vscode.TreeItem {
   constructor(
     public readonly folderPath: string,
-    public readonly groupStatus: ReviewStatus
+    public readonly groupStatus: ReviewStatus,
+    public readonly sessionId?: string | null
   ) {
     super(path.basename(folderPath), vscode.TreeItemCollapsibleState.Expanded);
     this.resourceUri  = vscode.Uri.file(folderPath);
     this.tooltip      = folderPath;
     this.contextValue = `claudegate.folder.${groupStatus}`;
+  }
+}
+
+// ─── Session group item (group-by-session mode) ───────────────────────────────
+
+export class SessionItem extends vscode.TreeItem {
+  constructor(
+    public readonly sessionId: string | null,
+    label: string,
+    fileCount: number
+  ) {
+    super(label, vscode.TreeItemCollapsibleState.Expanded);
+    this.description  = `${fileCount} file${fileCount === 1 ? "" : "s"}`;
+    this.contextValue = "claudegate.session";
+    this.iconPath     = new vscode.ThemeIcon(sessionId ? "history" : "question");
   }
 }
 
@@ -120,32 +141,39 @@ export class FilteredTreeProvider
     const session = this.sessionManager.getSession();
     if (!session) return [];
 
-    // Root: files/folders directly (no group header)
-    if (!element) {
-      const files = Object.entries(session.files)
-        .filter(([fp, e]) => e.reviewStatus === this.status && isInWorkspace(fp) && !isExcluded(fp))
-        .map(([fp]) => fp);
+    const grouped = vscode.workspace
+      .getConfiguration("claudegate")
+      .get<boolean>("groupBySession", false);
 
+    // Root
+    if (!element) {
+      if (grouped) return this.sessionGroups(session);
+      const files = this.filteredFiles(session);
       if (this.viewMode === "list") {
-        return files.map(
-          (fp) => new FileReviewItem(fp, this.status, this.sessionManager)
-        );
+        return files.map((fp) => new FileReviewItem(fp, this.status, this.sessionManager));
       }
-      const root = getWorkspaceRoot(files);
-      return this.directChildren(files, root, this.status, false);
+      return this.directChildren(files, getWorkspaceRoot(files), this.status, false);
+    }
+
+    // Session group children
+    if (element instanceof SessionItem) {
+      const files = this.filteredFiles(session).filter((fp) =>
+        matchesSession(session.files[fp], element.sessionId)
+      );
+      if (this.viewMode === "list") {
+        return files.map((fp) => new FileReviewItem(fp, this.status, this.sessionManager));
+      }
+      return this.directChildren(files, getWorkspaceRoot(files), this.status, false, element.sessionId);
     }
 
     // Folder children (tree mode)
     if (element instanceof FolderItem) {
-      const filesUnder = Object.entries(session.files)
-        .filter(
-          ([fp, e]) =>
-            e.reviewStatus === this.status &&
-            fp.startsWith(element.folderPath + path.sep) &&
-            isInWorkspace(fp) && !isExcluded(fp)
-        )
-        .map(([fp]) => fp);
-      return this.directChildren(filesUnder, element.folderPath, this.status, false);
+      const filesUnder = this.filteredFiles(session).filter(
+        (fp) =>
+          fp.startsWith(element.folderPath + path.sep) &&
+          (element.sessionId === undefined || matchesSession(session.files[fp], element.sessionId))
+      );
+      return this.directChildren(filesUnder, element.folderPath, this.status, false, element.sessionId);
     }
 
     return [];
@@ -174,11 +202,61 @@ export class FilteredTreeProvider
     return item;
   }
 
+  private filteredFiles(session: Session): string[] {
+    return Object.entries(session.files)
+      .filter(([fp, e]) => e.reviewStatus === this.status && isInWorkspace(fp) && !isExcluded(fp))
+      .map(([fp]) => fp);
+  }
+
+  // Build one SessionItem per distinct session (known sessions ordered by
+  // earliest capturedAt → ordinal N; displayed most-recent-first; unknown last).
+  private sessionGroups(session: Session): vscode.TreeItem[] {
+    const UNKNOWN = "__unknown__";
+    const buckets = new Map<
+      string,
+      { key: string | null; files: string[]; earliest: string; label: string }
+    >();
+    for (const fp of this.filteredFiles(session)) {
+      const e = session.files[fp];
+      const key = e.sessionId ?? null;
+      const mapKey = key ?? UNKNOWN;
+      const cap = e.capturedAt ?? "";
+      const b = buckets.get(mapKey);
+      if (b) {
+        b.files.push(fp);
+        if (cap && (b.earliest === "" || cap < b.earliest)) b.earliest = cap;
+      } else {
+        buckets.set(mapKey, { key, files: [fp], earliest: cap, label: "" });
+      }
+    }
+
+    const known = [...buckets.values()]
+      .filter((b) => b.key !== null)
+      .sort((a, b) => (a.earliest || "~").localeCompare(b.earliest || "~"));
+
+    const items: SessionItem[] = [];
+    known.forEach((b, i) => {
+      const n = i + 1;
+      const time = b.earliest
+        ? new Date(b.earliest).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+        : "";
+      b.label = time ? `Session ${n} · ${time}` : `Session ${n}`;
+    });
+    // most-recent (largest ordinal) on top
+    for (const b of [...known].reverse()) {
+      items.push(new SessionItem(b.key, b.label, b.files.length));
+    }
+    const unknown = buckets.get(UNKNOWN);
+    if (unknown) items.push(new SessionItem(null, "Unknown session", unknown.files.length));
+    return items;
+  }
+
   private directChildren(
     filePaths: string[],
     parentPath: string,
     status: ReviewStatus,
-    showFilePath: boolean
+    showFilePath: boolean,
+    sessionId?: string | null
   ): vscode.TreeItem[] {
     const seenFolders = new Set<string>();
     const folders: FolderItem[]     = [];
@@ -193,7 +271,7 @@ export class FilteredTreeProvider
         const folderPath = path.join(parentPath, parts[0]);
         if (!seenFolders.has(folderPath)) {
           seenFolders.add(folderPath);
-          folders.push(new FolderItem(folderPath, status));
+          folders.push(new FolderItem(folderPath, status, sessionId));
         }
       }
     }
