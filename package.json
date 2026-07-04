@@ -62,6 +62,10 @@
           "id": "claudegate.rejectedPanel",
           "name": "Rejected",
           "when": "claudegate.rejectedCount > 0"
+        },
+        {
+          "id": "claudegate.settingsPanel",
+          "name": "Settings"
         }
       ]
     },

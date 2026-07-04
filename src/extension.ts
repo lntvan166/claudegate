@@ -11,6 +11,7 @@ import {
   closeDiffEditor,
 } from "./reviewPanel";
 import { HookInstaller } from "./hookInstaller";
+import { SettingsTreeProvider } from "./settingsPanel";
 import { ClaudeGateContentProvider, SCHEME } from "./diffProvider";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
 import { DocumentTracker } from "./documentTracker";
@@ -112,11 +113,18 @@ export function activate(context: vscode.ExtensionContext): void {
     });
     context.subscriptions.push(pendingView, acceptedView, rejectedView);
 
+    const settingsProvider = new SettingsTreeProvider(hookInstaller, context.subscriptions);
+    const settingsView = vscode.window.createTreeView("claudegate.settingsPanel", {
+      treeDataProvider: settingsProvider,
+    });
+    context.subscriptions.push(settingsView);
+
     // ── Commands ──────────────────────────────────────────────────────────
     context.subscriptions.push(
-      vscode.commands.registerCommand("claudegate.setupHook", () =>
-        hookInstaller.setup()
-      ),
+      vscode.commands.registerCommand("claudegate.setupHook", async () => {
+        await hookInstaller.setup();
+        settingsProvider.refresh();
+      }),
 
       vscode.commands.registerCommand("claudegate.clearSession", () =>
         sessionManager.clearSession()
