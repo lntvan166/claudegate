@@ -314,7 +314,8 @@
     "compile": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --platform=node --sourcemap",
     "watch": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --platform=node --sourcemap --watch",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src --ext ts"
+    "lint": "eslint src --ext ts",
+    "test:unit": "esbuild src/excludeMatcher.test.ts --bundle --platform=node --format=cjs --outfile=out/excludeMatcher.test.cjs && node out/excludeMatcher.test.cjs"
   },
   "devDependencies": {
     "@types/diff": "^8.0.0",
