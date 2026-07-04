@@ -59,7 +59,7 @@ export class SettingsTreeProvider implements vscode.TreeDataProvider<SettingsIte
       case "watcher": {
         const enabled = vscode.workspace
           .getConfiguration("claudegate")
-          .get<boolean>("fileWatcher.enabled", true);
+          .get<boolean>("fileWatcher.enabled", false);
         const ti = new vscode.TreeItem("File Watcher");
         ti.description = enabled ? "On" : "Off";
         ti.iconPath = new vscode.ThemeIcon(enabled ? "eye" : "eye-closed");

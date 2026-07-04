@@ -74,16 +74,17 @@ With a ClaudeGate diff focused, press **Cmd+Enter** to accept or **Cmd+Backspace
 ## How It Works
 
 ```
-Claude Code (terminal CLI)          Claude Code (VS Code GUI extension)
-        │                                        │
-  PreToolUse hook fires                 DocumentTracker watches
-  hook.py snapshots original          file system for changes
-        │                                        │
-        └──────────────┬─────────────────────────┘
-                       ▼
-        ~/.claudegate/sessions/<workspace>.json
-                       │
-             Claude Gate review panels
+Claude Code (terminal CLI)   Claude Code (in-editor ext)      Non-Claude agents
+         │                            │                       (Cursor, Codex)
+         └──────── PreToolUse hook ───┘                             │
+              hook.py snapshots the original            DocumentTracker (opt-in,
+                          │                              off by default) FS watch
+                          │                                         │
+                          └──────────────────┬──────────────────────┘
+                                             ▼
+                          ~/.claudegate/sessions/<workspace>.json
+                                             │
+                                    Claude Gate review panels
 ```
 
 The `PreToolUse` hook is the authoritative capture path for **all Claude Code — both the terminal CLI and the in-editor extension** (both run the same hook). The filesystem watcher is an optional fallback for **non-Claude** agents (Cursor Composer, Codex) and is off by default.

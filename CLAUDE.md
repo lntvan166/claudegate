@@ -13,21 +13,17 @@ Two detection paths are supported:
 ## Architecture
 
 ```
-Claude Code (terminal CLI)            Claude Code (VS Code GUI extension)
-        │                                          │
-  PreToolUse hook fires                  DocumentTracker watches
-  hook.py snapshots original           onDidOpenTextDocument + FS watcher
-        │                                          │
-        └──────────────┬────────────────────────────┘
-                       ▼
-      ~/.claudegate/sessions/<workspace-hash>.json   ← shared state per workspace
-                       │
-        src/sessionManager.ts  ← reads/writes session file, accept/reject logic
-        src/reviewPanel.ts     ← TreeView sidebar (Pending / Accepted / Rejected)
-        src/diffProvider.ts    ← claudegate: URI scheme, opens native diff editor
-        src/decorationProvider.ts ← file explorer badges for pending files
-        src/hookInstaller.ts   ← Setup Hook command
-        src/extension.ts       ← entry point, wires everything together
+Claude Code (terminal CLI)   Claude Code (in-editor ext)      Non-Claude agents
+         │                            │                       (Cursor, Codex)
+         └──────── PreToolUse hook ───┘                             │
+              hook.py snapshots the original            DocumentTracker (opt-in,
+                          │                              off by default) FS watch
+                          │                                         │
+                          └──────────────────┬──────────────────────┘
+                                             ▼
+                          ~/.claudegate/sessions/<workspace>.json
+                                             │
+                                    Claude Gate review panels
 ```
 
 ---

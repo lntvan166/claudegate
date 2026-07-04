@@ -334,7 +334,7 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.commands.registerCommand("claudegate.toggleFileWatcher", async () => {
         const cur = vscode.workspace
           .getConfiguration("claudegate")
-          .get<boolean>("fileWatcher.enabled", true);
+          .get<boolean>("fileWatcher.enabled", false);
         await updateClaudegateConfig("fileWatcher.enabled", !cur);
         // Provider auto-refreshes via its onDidChangeConfiguration listener.
       }),
@@ -464,7 +464,7 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push({ dispose: () => sessionManager.stopWatching() });
 
     const isWatcherEnabled = () =>
-      vscode.workspace.getConfiguration("claudegate").get<boolean>("fileWatcher.enabled", true);
+      vscode.workspace.getConfiguration("claudegate").get<boolean>("fileWatcher.enabled", false);
 
     if (isWatcherEnabled()) {
       documentTracker.start();
