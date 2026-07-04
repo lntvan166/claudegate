@@ -15,6 +15,7 @@ import { SettingsTreeProvider, SettingsItem } from "./settingsPanel";
 import { ClaudeGateContentProvider, SCHEME, originalUri } from "./diffProvider";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
 import { DocumentTracker } from "./documentTracker";
+import { GutterDecorator } from "./gutterDecorations";
 import { persistWorkspaceRoots } from "./workspaceRoots";
 import { isInWorkspace, isExcluded, setExcludeMatcher, isProtected, setProtectedMatcher } from "./workspaceScope";
 import { ExcludeMatcher, DEFAULT_EXCLUDES } from "./excludeMatcher";
@@ -524,6 +525,10 @@ export function activate(context: vscode.ExtensionContext): void {
       log.appendLine("[INFO] File watcher disabled (claudegate.fileWatcher.enabled=false); using CLI hook only.");
     }
     context.subscriptions.push({ dispose: () => documentTracker.stop() });
+
+    const gutterDecorator = new GutterDecorator(sessionManager, context, log);
+    gutterDecorator.start();
+    context.subscriptions.push({ dispose: () => gutterDecorator.stop() });
 
     context.subscriptions.push(
       vscode.workspace.onDidChangeConfiguration((e) => {

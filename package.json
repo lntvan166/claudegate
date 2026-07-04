@@ -401,6 +401,11 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "Group the review panels by the Claude Code session that produced each change (useful when several sessions run in one workspace). Requires re-running **Setup Hook** so the hook records session ids. Files captured before the update, or by the GUI file watcher, appear under \"Unknown session\"."
+        },
+        "claudegate.gutterDecorations.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show Claude's changed lines (vs the frozen baseline) as gutter marks and overview-ruler ticks in the editor while a file is pending review. Turn off to hide them."
         }
       }
     },
