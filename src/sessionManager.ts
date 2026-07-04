@@ -326,7 +326,7 @@ export class SessionManager {
     let count = 0;
 
     for (const [fp, entry] of Object.entries(this.session.files)) {
-      if (entry.reviewStatus !== "rejected") continue;
+      if (entry.reviewStatus !== "rejected" || isExcluded(fp)) continue;
       if (entry.claudeContent === undefined) {
         this.log.appendLine(`[WARN] reapplyAll skipped ${fp}: no claudeContent`);
         continue;
@@ -363,7 +363,7 @@ export class SessionManager {
     let count = 0;
 
     for (const [fp, entry] of Object.entries(this.session.files)) {
-      if (!fp.startsWith(prefix) || entry.reviewStatus !== "rejected") continue;
+      if (!fp.startsWith(prefix) || entry.reviewStatus !== "rejected" || isExcluded(fp)) continue;
       if (entry.claudeContent === undefined) {
         this.log.appendLine(`[WARN] reapplyFolder skipped ${fp}: no claudeContent`);
         continue;

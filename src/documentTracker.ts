@@ -50,6 +50,7 @@ export class DocumentTracker {
   ) {}
 
   start(): void {
+    if (this.disposables.length) return;
     for (const doc of vscode.workspace.textDocuments) {
       this.snapshotDocument(doc);
     }
