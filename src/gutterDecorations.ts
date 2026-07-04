@@ -54,13 +54,11 @@ export class GutterDecorator {
     this.deleted.dispose();
   }
 
-  private scheduleForDoc(doc: vscode.TextDocument): void {
+  private scheduleForDoc(_doc: vscode.TextDocument): void {
     if (this.debounce !== undefined) clearTimeout(this.debounce);
     this.debounce = setTimeout(() => {
       this.debounce = undefined;
-      for (const ed of vscode.window.visibleTextEditors) {
-        if (ed.document === doc) this.refresh(ed);
-      }
+      this.refreshAllVisible();
     }, DEBOUNCE_MS);
   }
 
