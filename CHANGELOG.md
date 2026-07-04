@@ -14,11 +14,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **`claudegate.fileWatcher.enabled` setting** (default `true`) — turn off the GUI file watcher so terminal-CLI users rely only on the more-accurate `PreToolUse` hook. Applies live (no reload).
 - **`claudegate.exclude` setting** — `search.exclude`-style glob map to hide files (e.g. generated `**/*.pb.go`) from the review panel, counts, badges, and the watcher. Non-destructive and applies live.
 - **Settings pane** in the Claude Gate sidebar — toggle the file watcher, view/add/remove exclude patterns, and see hook status / run Setup Hook, all in one place.
+- **Keyboard review** — `Cmd+Enter` accept / `Cmd+Backspace` reject the focused diff, with auto-advance to the next pending file (`claudegate.autoAdvance`, default on).
+- **Change counts** — the diff tab title and pending-row tooltip show `+A -B` line counts.
+- **Row file actions** — right-click a file in the panel for Open File, Open to the Side, Reveal in Explorer, Copy Path / Relative Path, and Add to Claude Chat (when the Claude Context extension is installed).
 
 ### Changed
 - **Accept now checkpoints the baseline.** Approving a file makes its current content the new diff baseline, so the next Claude edit is compared against the approved version instead of the original.
 
 ### Fixed
+- `closeDiffEditor` matched the wrong tab-title prefix, so open diff tabs were never closed on accept/reject; the diff tab now closes correctly.
 - The review baseline is now frozen while a file is pending — a diff can no longer silently drop the original and show only the latest edit-to-edit change.
 - `git pull` / `merge` / `checkout` no longer create phantom "pending" entries: changes made while a git operation is detected are ignored regardless of file count.
 

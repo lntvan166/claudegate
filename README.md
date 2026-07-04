@@ -42,6 +42,10 @@ Use `claude` in your terminal as usual. When Claude modifies files, Claude Gate 
 3. **✓ Accept** and **✕ Reject** inline links appear at the top of the diff — one click, done
 4. Accepted files move to the Accepted panel; rejected files are restored to their original content
 
+### Reviewing with the keyboard
+
+With a ClaudeGate diff focused, press **Cmd+Enter** to accept or **Cmd+Backspace** to reject the file; ClaudeGate then opens the next pending diff automatically (disable via `claudegate.autoAdvance`). Right-click any file row for Open File, Reveal in Explorer, Copy Path, and (with the Claude Context extension) Add to Claude Chat.
+
 ---
 
 ## Features
