@@ -207,6 +207,10 @@ export class DocumentTracker {
       return false; // no repo
     }
 
+    // index.lock existence is treated as an active op with no time bound: a
+    // held lock means git is mid-operation. Tradeoff: a stale lock left by a
+    // crashed git process keeps capture suppressed until it is removed — but a
+    // stale lock also breaks git itself, so the user will notice and clear it.
     try {
       if (fs.existsSync(path.join(gitDir, "index.lock"))) return true;
     } catch { /* ignore */ }

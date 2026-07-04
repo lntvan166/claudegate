@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,9 @@ class HookBaselineTest(unittest.TestCase):
             json.dump([self.root], f)
         self.file = os.path.join(self.root, "a.txt")
         self.session_file = session_file_for(self.claudegate, self.root)
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
 
     def run_hook(self):
         payload = json.dumps({
