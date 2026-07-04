@@ -199,7 +199,8 @@
       { "command": "claudegate.revealInExplorer", "title": "Claude Gate: Reveal in Explorer" },
       { "command": "claudegate.copyPath",         "title": "Claude Gate: Copy Path" },
       { "command": "claudegate.copyRelativePath", "title": "Claude Gate: Copy Relative Path" },
-      { "command": "claudegate.addToClaudeChat",  "title": "Claude Gate: Add to Claude Chat" }
+      { "command": "claudegate.addToClaudeChat",  "title": "Claude Gate: Add to Claude Chat" },
+      { "command": "claudegate.reviewAllPending", "title": "Claude Gate: Review All Pending", "icon": "$(diff-multiple)" }
     ],
     "menus": {
       "editor/title": [
@@ -259,6 +260,11 @@
           "command": "claudegate.clearSession",
           "when": "view == claudegate.pendingPanel",
           "group": "navigation@4"
+        },
+        {
+          "command": "claudegate.reviewAllPending",
+          "when": "view == claudegate.pendingPanel",
+          "group": "navigation@5"
         },
         {
           "command": "claudegate.revertAcceptedAll",

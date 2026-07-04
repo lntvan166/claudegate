@@ -12,7 +12,7 @@ import {
 } from "./reviewPanel";
 import { HookInstaller } from "./hookInstaller";
 import { SettingsTreeProvider, SettingsItem } from "./settingsPanel";
-import { ClaudeGateContentProvider, SCHEME } from "./diffProvider";
+import { ClaudeGateContentProvider, SCHEME, originalUri } from "./diffProvider";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
 import { DocumentTracker } from "./documentTracker";
 import { persistWorkspaceRoots } from "./workspaceRoots";
@@ -425,7 +425,41 @@ export function activate(context: vscode.ExtensionContext): void {
         } catch {
           vscode.window.showWarningMessage("Claude Gate: 'Claude Context' extension not available.");
         }
-      })
+      }),
+
+      vscode.commands.registerCommand("claudegate.reviewAllPending", async () => {
+        const session = sessionManager.getSession();
+        const paths = session
+          ? Object.entries(session.files)
+              .filter(([fp, e]) => e.reviewStatus === "pending" && isInWorkspace(fp) && !isExcluded(fp))
+              .map(([fp]) => fp)
+              .sort(
+                (a, b) =>
+                  (Number(isProtected(b)) - Number(isProtected(a))) || a.localeCompare(b)
+              )
+          : [];
+        if (paths.length === 0) {
+          vscode.window.showInformationMessage("Claude Gate: no pending changes to review.");
+          return;
+        }
+        const resourceList = paths.map((fp) => [
+          vscode.Uri.file(fp),
+          originalUri(fp),
+          vscode.Uri.file(fp),
+        ]);
+        try {
+          await vscode.commands.executeCommand(
+            "vscode.changes",
+            `Claude Gate: Pending (${paths.length})`,
+            resourceList
+          );
+        } catch (err) {
+          log.appendLine(`[WARN] reviewAllPending: vscode.changes failed: ${(err as Error).message}`);
+          vscode.window.showWarningMessage(
+            "Claude Gate: the multi-file diff view isn't available in this VS Code version."
+          );
+        }
+      }),
     );
 
     registerOpenDiff(context, sessionManager);
