@@ -296,8 +296,28 @@ export function activate(context: vscode.ExtensionContext): void {
     sessionManager.startWatching();
     context.subscriptions.push({ dispose: () => sessionManager.stopWatching() });
 
-    documentTracker.start();
+    const isWatcherEnabled = () =>
+      vscode.workspace.getConfiguration("claudegate").get<boolean>("fileWatcher.enabled", true);
+
+    if (isWatcherEnabled()) {
+      documentTracker.start();
+    } else {
+      log.appendLine("[INFO] File watcher disabled (claudegate.fileWatcher.enabled=false); using CLI hook only.");
+    }
     context.subscriptions.push({ dispose: () => documentTracker.stop() });
+
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (!e.affectsConfiguration("claudegate.fileWatcher.enabled")) return;
+        if (isWatcherEnabled()) {
+          documentTracker.start();
+          log.appendLine("[INFO] File watcher enabled.");
+        } else {
+          documentTracker.stop();
+          log.appendLine("[INFO] File watcher disabled.");
+        }
+      })
+    );
 
     // One-time migration notice: v1.0 used a single ~/.claudegate/session.json;
     // v1.1+ uses per-workspace files. Warn users with an existing old file so

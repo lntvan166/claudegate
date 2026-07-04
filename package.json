@@ -306,6 +306,16 @@
         { "command": "claudegate.revertAcceptedAll",          "when": "false" },
         { "command": "claudegate.reapplyAll",                 "when": "false" }
       ]
+    },
+    "configuration": {
+      "title": "Claude Gate",
+      "properties": {
+        "claudegate.fileWatcher.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Capture Claude Code GUI-extension edits by watching the filesystem. Disable if you use only the terminal CLI (the PreToolUse hook) — the hook is more accurate, and the watcher can surface manual edits, formatter/codegen output, and git operations as false review items."
+        }
+      }
     }
   },
   "scripts": {
