@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as crypto from "crypto";
-import { isInWorkspace } from "./workspaceScope";
+import { isInWorkspace, isExcluded } from "./workspaceScope";
 
 export type ReviewStatus = "pending" | "accepted" | "rejected";
 export type SessionStatus = "active" | "reviewed";
@@ -84,10 +84,16 @@ export class SessionManager {
     return this.session;
   }
 
+  // Re-fire the current session to consumers (used when a display filter,
+  // e.g. claudegate.exclude, changes without the session itself changing).
+  notifyChanged(): void {
+    this._onSessionChange.fire(this.session);
+  }
+
   getPendingCount(): number {
     if (!this.session) return 0;
     return Object.entries(this.session.files).filter(
-      ([fp, f]) => f.reviewStatus === "pending" && isInWorkspace(fp)
+      ([fp, f]) => f.reviewStatus === "pending" && isInWorkspace(fp) && !isExcluded(fp)
     ).length;
   }
 
@@ -409,7 +415,7 @@ export class SessionManager {
     if (!this.session) return;
     let count = 0;
     for (const [filePath, entry] of Object.entries(this.session.files)) {
-      if (entry.reviewStatus === "pending" && isInWorkspace(filePath)) {
+      if (entry.reviewStatus === "pending" && isInWorkspace(filePath) && !isExcluded(filePath)) {
         const current = this.readFileOrNull(filePath);
         if (current !== null) entry.originalContent = current;
         else this.log.appendLine(`[WARN] Accept all: could not read ${filePath}; baseline unchanged`);
@@ -433,7 +439,7 @@ export class SessionManager {
     const errors: string[] = [];
 
     for (const [filePath, entry] of Object.entries(this.session.files)) {
-      if (entry.reviewStatus !== "pending" || !isInWorkspace(filePath)) continue;
+      if (entry.reviewStatus !== "pending" || !isInWorkspace(filePath) || isExcluded(filePath)) continue;
       let savedClaudeContent: string | null;
       try {
         savedClaudeContent = fs.readFileSync(filePath, "utf-8");

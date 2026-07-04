@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import * as path from "path";
 import { SessionManager, ReviewStatus } from "./sessionManager";
 import { openDiff } from "./diffProvider";
-import { isInWorkspace } from "./workspaceScope";
+import { isInWorkspace, isExcluded } from "./workspaceScope";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -121,7 +121,7 @@ export class FilteredTreeProvider
     // Root: files/folders directly (no group header)
     if (!element) {
       const files = Object.entries(session.files)
-        .filter(([fp, e]) => e.reviewStatus === this.status && isInWorkspace(fp))
+        .filter(([fp, e]) => e.reviewStatus === this.status && isInWorkspace(fp) && !isExcluded(fp))
         .map(([fp]) => fp);
 
       if (this.viewMode === "list") {
@@ -140,7 +140,7 @@ export class FilteredTreeProvider
           ([fp, e]) =>
             e.reviewStatus === this.status &&
             fp.startsWith(element.folderPath + path.sep) &&
-            isInWorkspace(fp)
+            isInWorkspace(fp) && !isExcluded(fp)
         )
         .map(([fp]) => fp);
       return this.directChildren(filesUnder, element.folderPath, this.status, false);

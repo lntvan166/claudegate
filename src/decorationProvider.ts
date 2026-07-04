@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { SessionManager } from "./sessionManager";
+import { isExcluded } from "./workspaceScope";
 
 const COLORS: Record<string, vscode.ThemeColor> = {
   pending: new vscode.ThemeColor("gitDecoration.modifiedResourceForeground"),
@@ -32,6 +33,7 @@ export class ClaudeGateDecorationProvider
     const session = this.sessionManager.getSession();
     const entry = session?.files[uri.fsPath];
     if (!entry) return undefined;
+    if (isExcluded(uri.fsPath)) return undefined;
 
     const s = entry.reviewStatus;
     return {

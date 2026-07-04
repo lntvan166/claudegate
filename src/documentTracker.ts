@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
 import { SessionManager } from "./sessionManager";
+import { isExcluded } from "./workspaceScope";
 
 // Directory segments that are never Claude-authored — skip any path containing these.
 const IGNORED_DIRS = new Set([
@@ -109,6 +110,7 @@ export class DocumentTracker {
       const filePath = uri.fsPath;
       if (!this.isInWorkspace(filePath)) continue;
       if (this.isIgnoredPath(filePath)) continue;
+      if (isExcluded(filePath)) continue;
       try { if (fs.statSync(filePath).isDirectory()) continue; } catch { continue; }
       if (session?.files[filePath]) continue;
 

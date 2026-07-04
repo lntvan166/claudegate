@@ -15,7 +15,8 @@ import { ClaudeGateContentProvider, SCHEME } from "./diffProvider";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
 import { DocumentTracker } from "./documentTracker";
 import { persistWorkspaceRoots } from "./workspaceRoots";
-import { isInWorkspace } from "./workspaceScope";
+import { isInWorkspace, isExcluded, setExcludeMatcher } from "./workspaceScope";
+import { ExcludeMatcher } from "./excludeMatcher";
 
 
 function getActivePendingFilePath(sessionManager: SessionManager): string | undefined {
@@ -57,6 +58,14 @@ export function activate(context: vscode.ExtensionContext): void {
     );
 
     const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const excludeMatcher = new ExcludeMatcher();
+    const loadExclude = () =>
+      excludeMatcher.reload(
+        vscode.workspace.getConfiguration("claudegate").get<Record<string, boolean>>("exclude"),
+        workspacePath
+      );
+    loadExclude();
+    setExcludeMatcher(excludeMatcher);
     const sessionManager = new SessionManager(log, workspacePath);
     const hookInstaller  = new HookInstaller(context, log);
     void hookInstaller.syncHookIfNeeded().then(() => {
@@ -276,7 +285,7 @@ export function activate(context: vscode.ExtensionContext): void {
       };
       if (session) {
         for (const [filePath, { reviewStatus }] of Object.entries(session.files)) {
-          if (!isInWorkspace(filePath)) continue;
+          if (!isInWorkspace(filePath) || isExcluded(filePath)) continue;
           counts[reviewStatus]++;
         }
       }
@@ -292,6 +301,18 @@ export function activate(context: vscode.ExtensionContext): void {
         ? new vscode.ThemeColor("statusBarItem.warningBackground")
         : undefined;
     });
+
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (!e.affectsConfiguration("claudegate.exclude")) return;
+        loadExclude();
+        // Re-render trees and recompute counts/badges without a session change.
+        pendingProvider.refresh();
+        acceptedProvider.refresh();
+        rejectedProvider.refresh();
+        sessionManager.notifyChanged();
+      })
+    );
 
     sessionManager.startWatching();
     context.subscriptions.push({ dispose: () => sessionManager.stopWatching() });

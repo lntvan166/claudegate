@@ -314,6 +314,12 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Capture Claude Code GUI-extension edits by watching the filesystem. Disable if you use only the terminal CLI (the PreToolUse hook) — the hook is more accurate, and the watcher can surface manual edits, formatter/codegen output, and git operations as false review items."
+        },
+        "claudegate.exclude": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": { "type": "boolean" },
+          "markdownDescription": "Glob patterns whose matching files are hidden from ClaudeGate review (shaped like `search.exclude`). Matching files are skipped by the file watcher and hidden from the panel, counts, and badges even if captured by the CLI hook — nothing is deleted. Use `**/`-prefixed patterns to match at any depth. Example: `{ \"**/*.pb.go\": true, \"**/dist/**\": true }`."
         }
       }
     }
