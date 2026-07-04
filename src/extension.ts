@@ -17,7 +17,7 @@ import { ClaudeGateDecorationProvider } from "./decorationProvider";
 import { DocumentTracker } from "./documentTracker";
 import { persistWorkspaceRoots } from "./workspaceRoots";
 import { isInWorkspace, isExcluded, setExcludeMatcher, isProtected, setProtectedMatcher } from "./workspaceScope";
-import { ExcludeMatcher } from "./excludeMatcher";
+import { ExcludeMatcher, DEFAULT_EXCLUDES } from "./excludeMatcher";
 
 
 function getActivePendingFilePath(sessionManager: SessionManager): string | undefined {
@@ -71,6 +71,13 @@ export function activate(context: vscode.ExtensionContext): void {
           `Claude Gate: could not update ${key} — ${(err as Error).message}`
         );
       }
+    };
+
+    const userExcludeMap = (): Record<string, boolean> => {
+      const info = vscode.workspace.getConfiguration("claudegate").inspect<Record<string, boolean>>("exclude");
+      const hasFolder = (vscode.workspace.workspaceFolders?.length ?? 0) > 0;
+      const own = hasFolder ? info?.workspaceValue : info?.globalValue;
+      return { ...(own ?? {}) };
     };
 
     vscode.commands.executeCommand("setContext", "claudegate.viewMode", "tree");
@@ -364,9 +371,7 @@ export function activate(context: vscode.ExtensionContext): void {
         });
         if (!input) return;
         const glob = input.trim();
-        const map = {
-          ...vscode.workspace.getConfiguration("claudegate").get<Record<string, boolean>>("exclude", {}),
-        };
+        const map = userExcludeMap();
         if (map[glob] === true) {
           vscode.window.showInformationMessage(`Claude Gate: "${glob}" is already excluded.`);
           return;
@@ -380,10 +385,12 @@ export function activate(context: vscode.ExtensionContext): void {
         async (item: SettingsItem) => {
           const glob = item?.pattern;
           if (!glob) return;
-          const map = {
-            ...vscode.workspace.getConfiguration("claudegate").get<Record<string, boolean>>("exclude", {}),
-          };
-          delete map[glob];
+          const map = userExcludeMap();
+          if (DEFAULT_EXCLUDES.includes(glob)) {
+            map[glob] = false; // can't delete a shipped default — deactivate it
+          } else {
+            delete map[glob];
+          }
           await updateClaudegateConfig("exclude", map);
         }
       ),

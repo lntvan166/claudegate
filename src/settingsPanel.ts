@@ -79,10 +79,7 @@ export class SettingsTreeProvider implements vscode.TreeDataProvider<SettingsIte
         return ti;
       }
       case "excludeHeader": {
-        const ti = new vscode.TreeItem(
-          "Exclude Patterns",
-          vscode.TreeItemCollapsibleState.Expanded
-        );
+        const ti = new vscode.TreeItem("Exclude Patterns", vscode.TreeItemCollapsibleState.Collapsed);
         ti.description = String(this.activePatterns().length);
         ti.iconPath = new vscode.ThemeIcon("filter");
         return ti;
