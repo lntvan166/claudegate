@@ -3,6 +3,7 @@ import { HookInstaller } from "./hookInstaller";
 
 type SettingsKind =
   | "watcher"
+  | "groupBySession"
   | "excludeHeader"
   | "excludePattern"
   | "excludeAdd"
@@ -25,7 +26,8 @@ export class SettingsTreeProvider implements vscode.TreeDataProvider<SettingsIte
       vscode.workspace.onDidChangeConfiguration((e) => {
         if (
           e.affectsConfiguration("claudegate.exclude") ||
-          e.affectsConfiguration("claudegate.fileWatcher.enabled")
+          e.affectsConfiguration("claudegate.fileWatcher.enabled") ||
+          e.affectsConfiguration("claudegate.groupBySession")
         ) {
           this.refresh();
         }
@@ -39,7 +41,7 @@ export class SettingsTreeProvider implements vscode.TreeDataProvider<SettingsIte
 
   getChildren(element?: SettingsItem): SettingsItem[] {
     if (!element) {
-      return [{ kind: "watcher" }, { kind: "excludeHeader" }, { kind: "hook" }];
+      return [{ kind: "watcher" }, { kind: "groupBySession" }, { kind: "excludeHeader" }, { kind: "hook" }];
     }
     if (element.kind === "excludeHeader") {
       const rows: SettingsItem[] = this.activePatterns().map((p) => ({
@@ -63,6 +65,17 @@ export class SettingsTreeProvider implements vscode.TreeDataProvider<SettingsIte
         ti.iconPath = new vscode.ThemeIcon(enabled ? "eye" : "eye-closed");
         ti.tooltip = `Click to turn the GUI file watcher ${enabled ? "off" : "on"}`;
         ti.command = { command: "claudegate.toggleFileWatcher", title: "Toggle File Watcher" };
+        return ti;
+      }
+      case "groupBySession": {
+        const on = vscode.workspace
+          .getConfiguration("claudegate")
+          .get<boolean>("groupBySession", false);
+        const ti = new vscode.TreeItem("Group by Session");
+        ti.description = on ? "On" : "Off";
+        ti.iconPath = new vscode.ThemeIcon(on ? "list-tree" : "list-flat");
+        ti.tooltip = `Click to turn session grouping ${on ? "off" : "on"}`;
+        ti.command = { command: "claudegate.toggleGroupBySession", title: "Toggle Group by Session" };
         return ti;
       }
       case "excludeHeader": {

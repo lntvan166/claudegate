@@ -338,6 +338,11 @@ export function activate(context: vscode.ExtensionContext): void {
         // Provider auto-refreshes via its onDidChangeConfiguration listener.
       }),
 
+      vscode.commands.registerCommand("claudegate.toggleGroupBySession", async () => {
+        const cur = vscode.workspace.getConfiguration("claudegate").get<boolean>("groupBySession", false);
+        await updateClaudegateConfig("groupBySession", !cur);
+      }),
+
       vscode.commands.registerCommand("claudegate.addExcludePattern", async () => {
         const input = await vscode.window.showInputBox({
           prompt: "Glob or folder to exclude — e.g. **/dist/**, **/*.min.js, **/*.log, or a folder like .superpowers",
@@ -473,6 +478,16 @@ export function activate(context: vscode.ExtensionContext): void {
           documentTracker.stop();
           log.appendLine("[INFO] File watcher disabled.");
         }
+      })
+    );
+
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (!e.affectsConfiguration("claudegate.groupBySession")) return;
+        pendingProvider.refresh();
+        acceptedProvider.refresh();
+        rejectedProvider.refresh();
+        settingsProvider.refresh();
       })
     );
 

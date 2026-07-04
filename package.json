@@ -178,6 +178,10 @@
         "title": "Claude Gate: Toggle File Watcher"
       },
       {
+        "command": "claudegate.toggleGroupBySession",
+        "title": "Claude Gate: Toggle Group by Session"
+      },
+      {
         "command": "claudegate.addExcludePattern",
         "title": "Claude Gate: Add Exclude Pattern",
         "icon": "$(add)"
@@ -369,6 +373,11 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "After accepting or rejecting from the diff view via keyboard (Cmd+Enter / Cmd+Backspace), automatically open the next pending file's diff."
+        },
+        "claudegate.groupBySession": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Group the review panels by the Claude Code session that produced each change (useful when several sessions run in one workspace). Requires re-running **Setup Hook** so the hook records session ids. Files captured before the update, or by the GUI file watcher, appear under \"Unknown session\"."
         }
       }
     },
