@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import * as path from "path";
 import { diffLines } from "diff";
 import { SessionManager } from "./sessionManager";
+import { countChanges, formatChangeCount } from "./changeCount";
 
 export const SCHEME = "claudegate";
 
@@ -69,10 +70,20 @@ export async function openDiff(
   }
 
   const currentUri = vscode.Uri.file(filePath);
+
+  // Change-size suffix for the title (best-effort; empty on read failure).
+  let suffix = "";
+  try {
+    const currentText = (await vscode.workspace.openTextDocument(filePath)).getText();
+    suffix = ` · ${formatChangeCount(countChanges(entry.originalContent ?? "", currentText))}`;
+  } catch {
+    suffix = "";
+  }
+
   const title =
     entry.originalContent === null
-      ? `Claude Gate: ${label}  (new file)`
-      : `Claude Gate: ${label}  (original ↔ current)`;
+      ? `Claude Gate: ${label}  (new file${suffix})`
+      : `Claude Gate: ${label}  (original ↔ current${suffix})`;
 
   await vscode.commands.executeCommand("vscode.diff", beforeUri, currentUri, title);
 
