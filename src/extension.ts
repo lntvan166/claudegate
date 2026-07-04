@@ -11,7 +11,7 @@ import {
   closeDiffEditor,
 } from "./reviewPanel";
 import { HookInstaller } from "./hookInstaller";
-import { SettingsTreeProvider } from "./settingsPanel";
+import { SettingsTreeProvider, SettingsItem } from "./settingsPanel";
 import { ClaudeGateContentProvider, SCHEME } from "./diffProvider";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
 import { DocumentTracker } from "./documentTracker";
@@ -50,6 +50,21 @@ export function activate(context: vscode.ExtensionContext): void {
     const log = vscode.window.createOutputChannel("Claude Gate");
     context.subscriptions.push(log);
     log.appendLine("[INFO] Claude Gate activating…");
+
+    const updateClaudegateConfig = async (key: string, value: unknown): Promise<void> => {
+      const target =
+        (vscode.workspace.workspaceFolders?.length ?? 0) > 0
+          ? vscode.ConfigurationTarget.Workspace
+          : vscode.ConfigurationTarget.Global;
+      try {
+        await vscode.workspace.getConfiguration("claudegate").update(key, value, target);
+      } catch (err) {
+        log.appendLine(`[ERROR] Failed to update claudegate.${key}: ${(err as Error).message}`);
+        vscode.window.showErrorMessage(
+          `Claude Gate: could not update ${key} — ${(err as Error).message}`
+        );
+      }
+    };
 
     vscode.commands.executeCommand("setContext", "claudegate.viewMode", "tree");
 
@@ -272,7 +287,48 @@ export function activate(context: vscode.ExtensionContext): void {
         acceptedProvider.setViewMode("list");
         rejectedProvider.setViewMode("list");
         vscode.commands.executeCommand("setContext", "claudegate.viewMode", "list");
-      })
+      }),
+
+      // ── Settings panel actions ──
+      vscode.commands.registerCommand("claudegate.toggleFileWatcher", async () => {
+        const cur = vscode.workspace
+          .getConfiguration("claudegate")
+          .get<boolean>("fileWatcher.enabled", true);
+        await updateClaudegateConfig("fileWatcher.enabled", !cur);
+        // Provider auto-refreshes via its onDidChangeConfiguration listener.
+      }),
+
+      vscode.commands.registerCommand("claudegate.addExcludePattern", async () => {
+        const input = await vscode.window.showInputBox({
+          prompt: "Glob to exclude from ClaudeGate review",
+          placeHolder: "**/*.pb.go",
+          validateInput: (v) => (v.trim().length === 0 ? "Enter a non-empty glob" : undefined),
+        });
+        if (!input) return;
+        const glob = input.trim();
+        const map = {
+          ...vscode.workspace.getConfiguration("claudegate").get<Record<string, boolean>>("exclude", {}),
+        };
+        if (map[glob] === true) {
+          vscode.window.showInformationMessage(`Claude Gate: "${glob}" is already excluded.`);
+          return;
+        }
+        map[glob] = true;
+        await updateClaudegateConfig("exclude", map);
+      }),
+
+      vscode.commands.registerCommand(
+        "claudegate.removeExcludePattern",
+        async (item: SettingsItem) => {
+          const glob = item?.pattern;
+          if (!glob) return;
+          const map = {
+            ...vscode.workspace.getConfiguration("claudegate").get<Record<string, boolean>>("exclude", {}),
+          };
+          delete map[glob];
+          await updateClaudegateConfig("exclude", map);
+        }
+      )
     );
 
     registerOpenDiff(context, sessionManager);

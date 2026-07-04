@@ -172,6 +172,20 @@
         "command": "claudegate.rejectFolder",
         "title": "Reject Folder",
         "icon": "$(x)"
+      },
+      {
+        "command": "claudegate.toggleFileWatcher",
+        "title": "Claude Gate: Toggle File Watcher"
+      },
+      {
+        "command": "claudegate.addExcludePattern",
+        "title": "Claude Gate: Add Exclude Pattern",
+        "icon": "$(add)"
+      },
+      {
+        "command": "claudegate.removeExcludePattern",
+        "title": "Claude Gate: Remove Exclude Pattern",
+        "icon": "$(trash)"
       }
     ],
     "menus": {
@@ -294,6 +308,11 @@
           "command": "claudegate.reapplyFolder",
           "when": "view == claudegate.rejectedPanel && viewItem == claudegate.folder.rejected",
           "group": "inline@1"
+        },
+        {
+          "command": "claudegate.removeExcludePattern",
+          "when": "view == claudegate.settingsPanel && viewItem == claudegate.excludePattern",
+          "group": "inline"
         }
       ],
       "commandPalette": [
