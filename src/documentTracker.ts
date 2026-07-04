@@ -18,6 +18,11 @@ const IGNORED_SUFFIXES = [".git", ".orig", ".tmp", "~"];
 const BULK_FILE_THRESHOLD = 8;
 const FS_BATCH_DEBOUNCE_MS = 300;
 
+// A git pull/merge/checkout/rebase touches .git telltales; suppress capture
+// for a short window after any of them change, regardless of file count.
+const GIT_OP_WINDOW_MS = 3000;
+const GIT_TELLTALES = ["HEAD", "ORIG_HEAD", "MERGE_HEAD", "FETCH_HEAD", "index"];
+
 interface FsEvent {
   uri: vscode.Uri;
   isCreate: boolean;
@@ -130,6 +135,16 @@ export class DocumentTracker {
 
     if (candidates.length === 0) return;
 
+    if (this.isGitOperationActive()) {
+      for (const c of candidates) {
+        this.refreshSnapshot(c.filePath, c.currentContent);
+      }
+      this.log.appendLine(
+        `[INFO] DocumentTracker: ignored git operation (${candidates.length} file(s))`
+      );
+      return;
+    }
+
     const allNewCreatesWithoutSnapshot = candidates.every(
       (c) => c.isCreate && !c.hasSnapshot
     );
@@ -178,6 +193,32 @@ export class DocumentTracker {
       this.snapshots.delete(filePath);
       this.log.appendLine(`[INFO] DocumentTracker: removed deleted file ${path.basename(filePath)}`);
     }
+  }
+
+  // True if a git operation appears to be in progress or just completed.
+  // Fails open (returns false) on any error so normal capture is unaffected.
+  private isGitOperationActive(): boolean {
+    if (!this.workspacePath) return false;
+    const gitDir = path.join(this.workspacePath, ".git");
+    try {
+      // Worktrees/submodules use a .git *file*; skip detection for those.
+      if (!fs.statSync(gitDir).isDirectory()) return false;
+    } catch {
+      return false; // no repo
+    }
+
+    try {
+      if (fs.existsSync(path.join(gitDir, "index.lock"))) return true;
+    } catch { /* ignore */ }
+
+    const now = Date.now();
+    for (const name of GIT_TELLTALES) {
+      try {
+        const { mtimeMs } = fs.statSync(path.join(gitDir, name));
+        if (now - mtimeMs < GIT_OP_WINDOW_MS) return true;
+      } catch { /* missing telltale is fine */ }
+    }
+    return false;
   }
 
   private isInWorkspace(filePath: string): boolean {
