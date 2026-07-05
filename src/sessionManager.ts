@@ -182,7 +182,7 @@ export class SessionManager {
     const after = this.readFileOrNull(filePath); // Claude's discarded version
     try {
       if (entry.originalContent === null) fs.unlinkSync(filePath);
-      else this.atomicWrite(filePath, entry.originalContent);
+      else this.atomicWrite(filePath, entry.originalContent, true);
     } catch (err) {
       this.log.appendLine(`[ERROR] reject ${filePath}: ${(err as Error).message}`);
       vscode.window.showErrorMessage(
@@ -209,7 +209,7 @@ export class SessionManager {
       const after = this.readFileOrNull(fp);
       try {
         if (entry.originalContent === null) fs.unlinkSync(fp);
-        else this.atomicWrite(fp, entry.originalContent);
+        else this.atomicWrite(fp, entry.originalContent, true);
       } catch (err) {
         errors.push(`${path.basename(fp)}: ${(err as Error).message}`);
         this.log.appendLine(`[ERROR] rejectFolder failed for ${fp}: ${(err as Error).message}`);
@@ -248,7 +248,7 @@ export class SessionManager {
       const after = this.readFileOrNull(fp);
       try {
         if (entry.originalContent === null) fs.unlinkSync(fp);
-        else this.atomicWrite(fp, entry.originalContent);
+        else this.atomicWrite(fp, entry.originalContent, true);
       } catch (err) {
         errors.push(`${path.basename(fp)}: ${(err as Error).message}`);
         this.log.appendLine(`[ERROR] rejectAll failed for ${fp}: ${(err as Error).message}`);
@@ -330,7 +330,7 @@ export class SessionManager {
     if (!rec) return null;
     if (rec.after == null) return `Claude's version of "${path.basename(filePath)}" was not saved`;
     try {
-      this.atomicWrite(filePath, rec.after);
+      this.atomicWrite(filePath, rec.after, true);
     } catch (err) {
       return (err as Error).message;
     }
@@ -527,12 +527,26 @@ export class SessionManager {
     this._onSessionChange.fire(this.session);
   }
 
-  private atomicWrite(filePath: string, content: string): void {
-    const tmp = `${filePath}.${crypto.randomBytes(6).toString("hex")}.tmp`;
+  // Write via a temp file + rename so an interrupted write can't corrupt the
+  // target. When restoring a user's working file (preserveExisting=true), follow
+  // symlinks (write through to the target, as writeFileSync did) and preserve the
+  // existing file's mode (e.g. the executable bit) — the session file, which we
+  // own, passes preserveExisting=false to avoid the extra stats.
+  private atomicWrite(filePath: string, content: string, preserveExisting = false): void {
+    let target = filePath;
+    let mode: number | undefined;
+    if (preserveExisting) {
+      try {
+        if (fs.lstatSync(filePath).isSymbolicLink()) target = fs.realpathSync(filePath);
+      } catch { /* target doesn't exist yet — treat as a new file */ }
+      try { mode = fs.statSync(target).mode; } catch { /* new file — default mode */ }
+    }
+    const tmp = `${target}.${crypto.randomBytes(6).toString("hex")}.tmp`;
     try {
-      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.writeFileSync(tmp, content, "utf-8");
-      fs.renameSync(tmp, filePath);
+      if (mode !== undefined) fs.chmodSync(tmp, mode);
+      fs.renameSync(tmp, target);
     } catch (err) {
       try { fs.unlinkSync(tmp); } catch { /* ignore cleanup error */ }
       throw err;
