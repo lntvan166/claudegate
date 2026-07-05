@@ -7,6 +7,20 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.3.1] — 2026-07-05
+
+### Fixed
+
+- **Rejecting an unreadable file could delete it.** The hook recorded a file it couldn't read (e.g. a permissions error) as a new (null-baseline) file, so rejecting it deleted the real file. Such files are now skipped instead of captured; a `null` baseline now reliably means "the file did not exist."
+- **Working-file restores are now atomic.** Rejecting (restore to baseline) and re-applying write your files via a temp-file + rename, so an interrupted write can no longer leave a half-written file.
+- **Concurrent writes no longer drop changes.** The hook and the extension both write the session file; the extension now re-reads and merges any changes the hook made since it loaded (guarded by a cheap modification-time check), so a hook capture or an accept/reject decision isn't lost during a race.
+
+### Notes
+
+- Re-run **Claude Gate: Setup Hook** (or let activate auto-sync run) to deploy the updated `hook.py`.
+
+---
+
 ## [1.3.0] — 2026-07-05
 
 ### Changed
