@@ -469,24 +469,27 @@ export function activate(context: vscode.ExtensionContext): void {
         async (uri: vscode.Uri, hunkIndex: number) => {
           const entry = sessionManager.getSession()?.files[uri.fsPath];
           if (entry?.reviewStatus !== "pending") return;
-          const doc = await vscode.workspace.openTextDocument(uri);
-          const baseline = entry.originalContent ?? "";
-          const newText = revertHunkText(baseline, doc.getText(), hunkIndex);
-          if (newText === baseline) {
-            // Last remaining change reverted → fully back to baseline. rejectFile
-            // saves current-on-disk as claudeContent (Re-apply still works) and
-            // restores the baseline / deletes a new file.
-            sessionManager.rejectFile(uri.fsPath);
-            return;
-          }
           try {
+            const doc = await vscode.workspace.openTextDocument(uri);
+            const baseline = entry.originalContent ?? "";
+            const newText = revertHunkText(baseline, doc.getText(), hunkIndex);
+            if (newText === baseline) {
+              // Last remaining change reverted → fully back to baseline. rejectFile
+              // saves current-on-disk as claudeContent (Re-apply still works) and
+              // restores the baseline / deletes a new file.
+              sessionManager.rejectFile(uri.fsPath);
+              return;
+            }
             const edit = new vscode.WorkspaceEdit();
             const fullRange = new vscode.Range(
               doc.positionAt(0),
               doc.positionAt(doc.getText().length)
             );
             edit.replace(uri, fullRange, newText);
-            await vscode.workspace.applyEdit(edit);
+            const applied = await vscode.workspace.applyEdit(edit);
+            if (!applied) {
+              throw new Error("the document changed underneath the edit");
+            }
             await doc.save();
             sessionManager.notifyChanged();
           } catch (err) {
