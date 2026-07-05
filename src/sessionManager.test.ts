@@ -6,6 +6,7 @@ import * as crypto from "crypto";
 import { SessionManager } from "./sessionManager";
 import { ExcludeMatcher } from "./excludeMatcher";
 import { setExcludeMatcher } from "./workspaceScope";
+import { workspace as stubWorkspace } from "./test-stubs/vscode";
 
 const fakeLog = { appendLine() {} } as any;
 
@@ -269,6 +270,63 @@ function readSession(sp: string): any {
   setExcludeMatcher(new ExcludeMatcher()); // reset shared state for any later block
   sm.stopWatching();
   console.log("ok - excluded files are not counted as pending");
+}
+
+
+// ── Pending-panel scope + real-change detection ───────────────────────────
+// getPendingCount uses the same isInWorkspace && !isExcluded filter as the
+// Pending panel's row list, so these lock the panel's display logic.
+
+// hasRealPendingChange distinguishes a real change from a no-op / untracked.
+{
+  const { ws } = newEnv();
+  const real = path.join(ws, "real.ts");   fs.writeFileSync(real, "NEW");
+  const noop = path.join(ws, "noop.ts");   fs.writeFileSync(noop, "SAME");
+  const made = path.join(ws, "made.ts");   fs.writeFileSync(made, "hi");
+  const sm = new SessionManager(fakeLog, ws); sm.startWatching();
+  sm.trackFileChange(real, "OLD");   // baseline != disk → real
+  sm.trackFileChange(noop, "SAME");  // baseline == disk → no-op
+  sm.trackFileChange(made, null);    // new file, present on disk → real
+  assert.equal(sm.hasRealPendingChange(real), true, "modified file is a real change");
+  assert.equal(sm.hasRealPendingChange(noop), false, "baseline == disk is a no-op");
+  assert.equal(sm.hasRealPendingChange(made), true, "created file (exists) is a real change");
+  assert.equal(sm.hasRealPendingChange(path.join(ws, "nope.ts")), false, "untracked file is not pending");
+  sm.stopWatching();
+  console.log("ok - hasRealPendingChange distinguishes real / no-op / untracked");
+}
+
+// Pending scope: out-of-workspace entries are pruned on load and never counted;
+// excluded files stay in files{} but are not counted; only in-workspace,
+// non-excluded files count toward the Pending panel.
+{
+  const { ws, sp } = newEnv();
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "cg-out-"));
+  const inFp = path.join(ws, "in.ts");
+  const outFp = path.join(outside, "out.ts");
+  const lockFp = path.join(ws, "package-lock.json");
+  for (const f of [inFp, outFp, lockFp]) fs.writeFileSync(f, "x2");
+  fs.mkdirSync(path.dirname(sp), { recursive: true });
+  fs.writeFileSync(sp, JSON.stringify({
+    sessionId: "t", status: "active", accepted: [], rejected: {},
+    files: {
+      [inFp]: { originalContent: "x1", reviewStatus: "pending" },
+      [outFp]: { originalContent: "x1", reviewStatus: "pending" },
+      [lockFp]: { originalContent: "x1", reviewStatus: "pending" },
+    },
+  }));
+  const matcher = new ExcludeMatcher(); matcher.reload({ "**/package-lock.json": true }, ws);
+  setExcludeMatcher(matcher);
+  stubWorkspace.workspaceFolders = [{ uri: { fsPath: ws } }];
+  const sm = new SessionManager(fakeLog, ws); sm.startWatching(); // load → prune out-of-workspace
+  const files = sm.getSession()!.files;
+  assert.equal(files[outFp], undefined, "out-of-workspace entry pruned on load");
+  assert.ok(files[inFp], "in-workspace entry kept");
+  assert.ok(files[lockFp], "excluded entry kept in files (only filtered from the count)");
+  assert.equal(sm.getPendingCount(), 1, "only the in-workspace, non-excluded file is counted");
+  stubWorkspace.workspaceFolders = undefined;   // reset shared stub state
+  setExcludeMatcher(new ExcludeMatcher());       // reset shared matcher
+  sm.stopWatching();
+  console.log("ok - pending scope: out-of-workspace pruned, excluded uncounted");
 }
 
 console.log("done");
