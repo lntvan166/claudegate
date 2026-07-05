@@ -87,4 +87,30 @@ function readSession(sp: string): any {
   console.log("ok - merge-on-write preserves concurrent hook capture");
 }
 
+// reject matrix for null baselines: confident-new deletes; uncertain leaves.
+{
+  const { ws, sp } = newEnv();
+  const del = path.join(ws, "created.ts");
+  fs.writeFileSync(del, "hi");
+  const sm = new SessionManager(fakeLog, ws);
+  sm.startWatching();
+  sm.trackFileChange(del, null, true);   // confident new (hook path)
+  sm.rejectFile(del);
+  assert.ok(!fs.existsSync(del), "confident-new reject deletes the file");
+  sm.stopWatching();
+
+  const { ws: ws2, sp: sp2 } = newEnv();
+  const keep = path.join(ws2, "maybe-real.ts");
+  fs.writeFileSync(keep, "user data");
+  const sm2 = new SessionManager(fakeLog, ws2);
+  sm2.startWatching();
+  sm2.trackFileChange(keep, null);       // uncertain (watcher path, newFile=false)
+  sm2.rejectFile(keep);
+  assert.ok(fs.existsSync(keep), "uncertain-new reject leaves the file on disk");
+  assert.equal(fs.readFileSync(keep, "utf-8"), "user data", "file content untouched");
+  assert.ok(readSession(sp2).rejected[keep], "still recorded as rejected");
+  sm2.stopWatching();
+  console.log("ok - reject deletes only confident-new files");
+}
+
 console.log("done");

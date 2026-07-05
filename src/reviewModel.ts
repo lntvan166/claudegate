@@ -4,6 +4,7 @@
 export interface FileEntry {
   originalContent: string | null; // frozen "before" baseline (null = Claude created the file)
   reviewStatus: "pending";        // files{} holds only pending changes now
+  newFile?: boolean;   // true ⇒ confident the file did not exist ⇒ reject may delete it
   sessionId?: string;
   capturedAt?: string;
 }
@@ -136,6 +137,7 @@ export function migrateSession(raw: any): Session {
       session.files[path] = {
         originalContent: e?.originalContent ?? null,
         reviewStatus: "pending",
+        newFile: e?.newFile,
         sessionId: e?.sessionId,
         capturedAt: e?.capturedAt,
       };
