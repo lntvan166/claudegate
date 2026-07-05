@@ -35,6 +35,10 @@ tsconfig*.json
 hooks/tests/**
 **/__pycache__/**
 
+# Manual test aids (dev-only, not shipped to marketplace users)
+MANUAL-TEST-1.3.0.md
+manual-test-seed.py
+
 # Misc
 *.vsix
 test.txt
