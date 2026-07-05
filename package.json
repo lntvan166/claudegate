@@ -406,6 +406,11 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Show Claude's changed lines (vs the frozen baseline) as gutter marks and overview-ruler ticks in the editor while a file is pending review. Turn off to hide them."
+        },
+        "claudegate.hunkCodeLens.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show a \"Revert this change\" CodeLens above each of Claude's hunks in a pending file, so you can undo an individual hunk (reverting just those lines to the baseline). Turn off to hide the lenses."
         }
       }
     },
