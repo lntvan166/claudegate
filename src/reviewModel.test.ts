@@ -1,7 +1,7 @@
 import * as assert from "assert";
 import {
   hasRealChange, shouldPruneNoOp, acceptEntry, rejectEntry, migrateSession,
-  makeRecordId, Session, FileEntry,
+  makeRecordId, Session, FileEntry, mergeFreshCaptures,
 } from "./reviewModel";
 
 function base(): Session {
@@ -134,6 +134,54 @@ console.log("ok - makeRecordId");
   // new file not yet written, still young → keep (write pending)
   assert.equal(shouldPruneNoOp(pend(null, iso(now - 100)), null, now, GRACE), false, "young unwritten new file kept");
   console.log("ok - shouldPruneNoOp (per-entry grace; burst-safe reconcile)");
+}
+
+// mergeFreshCaptures: reconcile concurrent hook captures at persist time.
+{
+  const T = 1_000_000;
+  const pend = (oc: string | null, capturedAt?: string): FileEntry =>
+    ({ originalContent: oc, reviewStatus: "pending", capturedAt });
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const sess = (files: Record<string, FileEntry>, accepted = [] as any[]): Session =>
+    ({ sessionId: "s", status: "active", files, accepted, rejected: {} });
+
+  // fresh disk capture (capturedAt > lastLoaded), absent from mine → merged
+  {
+    const mine = sess({});
+    const disk = sess({ "/b": pend("B", iso(T + 100)) });
+    mergeFreshCaptures(mine, disk, T);
+    assert.ok(mine.files["/b"], "fresh capture merged in");
+  }
+  // stale/removed (capturedAt <= lastLoaded), absent from mine → NOT merged
+  {
+    const mine = sess({});
+    const disk = sess({ "/a": pend("A", iso(T - 100)) });
+    mergeFreshCaptures(mine, disk, T);
+    assert.equal(mine.files["/a"], undefined, "stale/removed entry not re-added");
+  }
+  // path already in mine.files → mine kept (not overwritten)
+  {
+    const mine = sess({ "/f": pend("MINE", iso(T + 100)) });
+    const disk = sess({ "/f": pend("DISK", iso(T + 200)) });
+    mergeFreshCaptures(mine, disk, T);
+    assert.equal(mine.files["/f"].originalContent, "MINE", "existing entry kept");
+  }
+  // coexistence: fresh capture whose path is in mine.accepted → merged as pending
+  {
+    const mine = sess({}, [{ id: "t::/f", path: "/f", before: "A", after: "B", decidedAt: "t" }]);
+    const disk = sess({ "/f": pend("B", iso(T + 100)) });
+    mergeFreshCaptures(mine, disk, T);
+    assert.ok(mine.files["/f"], "re-captured accepted file re-appears as pending");
+    assert.equal(mine.accepted.length, 1, "accept record preserved");
+  }
+  // disk entry with no capturedAt → skipped (can't prove fresh)
+  {
+    const mine = sess({});
+    const disk = sess({ "/x": pend("X", undefined) });
+    mergeFreshCaptures(mine, disk, T);
+    assert.equal(mine.files["/x"], undefined, "no-capturedAt entry skipped");
+  }
+  console.log("ok - mergeFreshCaptures (dual-writer reconcile)");
 }
 
 console.log("done");

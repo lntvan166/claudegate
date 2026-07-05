@@ -161,6 +161,43 @@ class HookBaselineTest(unittest.TestCase):
         self.assertEqual(session["accepted"], [])
         self.assertEqual(session["rejected"], {})
 
+    def test_nonexistent_file_records_null(self):
+        # Hook fires before Claude creates the file → it does not exist yet.
+        self.assertFalse(os.path.exists(self.file))
+        self.run_hook()
+        self.assertIsNone(self.read_entry()["originalContent"])
+
+    def test_existing_unreadable_file_is_skipped(self):
+        # An existing file we cannot read must NOT be recorded as a null "new"
+        # file (that would let a reject delete it). It is skipped entirely.
+        with open(self.file, "w") as f:
+            f.write("secret")
+        os.chmod(self.file, 0)
+        try:
+            if os.access(self.file, os.R_OK):
+                self.skipTest("cannot make file unreadable (running as root?)")
+            self.run_hook()
+            files = {}
+            if os.path.exists(self.session_file):
+                with open(self.session_file) as f:
+                    files = json.load(f).get("files", {})
+            self.assertNotIn(self.file, files)
+        finally:
+            os.chmod(self.file, 0o644)
+
+    def test_existing_binary_file_is_skipped(self):
+        # A readable but non-UTF-8 (binary) file must not crash the hook (a
+        # non-zero PreToolUse exit could block Claude's edit) and must not be
+        # recorded — we can't baseline/restore it as text.
+        with open(self.file, "wb") as f:
+            f.write(b"\xff\xfe\x00\x01binary\x80")
+        self.run_hook()
+        files = {}
+        if os.path.exists(self.session_file):
+            with open(self.session_file) as f:
+                files = json.load(f).get("files", {})
+        self.assertNotIn(self.file, files)
+
 
 if __name__ == "__main__":
     unittest.main()
