@@ -58,6 +58,22 @@ export function shouldPruneNoOp(
   return age > graceMs; // settled no-op → prune; still-young no-op → keep (write may land)
 }
 
+// Merge hook-captured pending entries that landed on disk since we loaded, so a
+// concurrent hook write is not lost when the extension persists. Only files{}
+// is reconciled (the hook's sole territory); mine's accepted[]/rejected{} and
+// file removals are authoritative. "Fresh" = absent from mine.files AND
+// capturedAt newer than our last load. O(disk.files) — never walks accepted[].
+export function mergeFreshCaptures(mine: Session, disk: Session, lastLoadedAtMs: number): Session {
+  for (const [path, entry] of Object.entries(disk.files)) {
+    if (mine.files[path]) continue;          // we already know this path
+    if (!entry.capturedAt) continue;         // no timestamp → cannot prove fresh
+    if (Date.parse(entry.capturedAt) > lastLoadedAtMs) {
+      mine.files[path] = entry;              // a hook capture we missed → merge in
+    }
+  }
+  return mine;
+}
+
 export function acceptEntry(session: Session, path: string, after: string | null, decidedAt: string): void {
   const entry = session.files[path];
   if (!entry) return;
