@@ -116,8 +116,7 @@ def main() -> None:
 
     session = load_session(session_file) or new_session()
     existing = session["files"].get(file_path)
-
-    if existing is None:
+    if existing is None or existing.get("reviewStatus") != "pending":
         session["files"][file_path] = {
             "originalContent": original_content,
             "reviewStatus": "pending",
@@ -127,17 +126,7 @@ def main() -> None:
         if session.get("status") == "reviewed":
             session["status"] = "active"
         save_session(session, session_file)
-
-    # A pending entry is left untouched: its originalContent is the frozen
-    # review baseline and must never advance while the file awaits review.
-
-    elif existing["reviewStatus"] in ("accepted", "rejected"):
-        existing["originalContent"] = original_content
-        existing["reviewStatus"] = "pending"
-        existing["sessionId"] = session_id
-        existing["capturedAt"] = captured_at
-        session["status"] = "active"
-        save_session(session, session_file)
+    # else: an existing pending entry keeps its frozen baseline (no-op)
 
 
 if __name__ == "__main__":
