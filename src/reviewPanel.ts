@@ -295,8 +295,14 @@ export class FilteredTreeProvider
   }
 
   private filteredFiles(session: Session): string[] {
+    // Show every pending entry by its session state. Do NOT gate on live disk
+    // content here: the hook records an entry *before* Claude writes (so its
+    // baseline momentarily equals disk), and the panel only re-renders on
+    // session-file changes — a live-disk gate would hide the row and never
+    // re-show it after the write lands. Settled no-op entries are pruned by the
+    // grace-delayed reconcile instead.
     return Object.keys(session.files).filter(
-      (fp) => isInWorkspace(fp) && !isExcluded(fp) && this.sessionManager.hasRealPendingChange(fp)
+      (fp) => isInWorkspace(fp) && !isExcluded(fp)
     );
   }
 

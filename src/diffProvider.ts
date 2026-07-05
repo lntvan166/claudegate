@@ -21,8 +21,8 @@ export class ClaudeGateContentProvider
         this._onDidChange.fire(originalUri(fp));
       }
       for (const r of [...session.accepted, ...Object.values(session.rejected)]) {
-        this._onDidChange.fire(recordUri(r.id, "before"));
-        this._onDidChange.fire(recordUri(r.id, "after"));
+        this._onDidChange.fire(recordUri(r.path, r.id, "before"));
+        this._onDidChange.fire(recordUri(r.path, r.id, "after"));
       }
     });
   }
@@ -31,11 +31,13 @@ export class ClaudeGateContentProvider
     const session = this.sessionManager.getSession();
     if (!session) return "";
 
-    if (uri.path === "record") {
-      const params = new URLSearchParams(uri.query);
-      const id = params.get("id") ?? "";
+    // Record URIs carry the real file path (so the editor infers the language
+    // for syntax highlighting) plus a `rec` query identifying the record.
+    const params = new URLSearchParams(uri.query);
+    const recId = params.get("rec");
+    if (recId) {
       const side = params.get("side");
-      const rec = [...session.accepted, ...Object.values(session.rejected)].find((r) => r.id === id);
+      const rec = [...session.accepted, ...Object.values(session.rejected)].find((r) => r.id === recId);
       if (!rec) return "";
       return (side === "after" ? rec.after : rec.before) ?? "";
     }
@@ -46,8 +48,14 @@ export class ClaudeGateContentProvider
   }
 }
 
-export function recordUri(id: string, side: "before" | "after"): vscode.Uri {
-  return vscode.Uri.parse(`${SCHEME}:record?id=${encodeURIComponent(id)}&side=${side}`);
+// The URI keeps the real file path (with its extension) so the diff editor
+// applies the correct language/syntax highlighting; `rec` disambiguates records
+// from the pending `originalUri` (which has no query) and from each other.
+export function recordUri(filePath: string, id: string, side: "before" | "after"): vscode.Uri {
+  return vscode.Uri.file(filePath).with({
+    scheme: SCHEME,
+    query: `rec=${encodeURIComponent(id)}&side=${side}`,
+  });
 }
 
 export function originalUri(filePath: string): vscode.Uri {
@@ -106,7 +114,7 @@ export async function openReviewRecord(id: string, sessionManager: SessionManage
   const label = path.basename(rec.path);
   const suffix = ` · ${formatChangeCount(countChanges(rec.before ?? "", rec.after ?? ""))}`;
   await vscode.commands.executeCommand(
-    "vscode.diff", recordUri(rec.id, "before"), recordUri(rec.id, "after"),
+    "vscode.diff", recordUri(rec.path, rec.id, "before"), recordUri(rec.path, rec.id, "after"),
     `Claude Gate: ${label}  (${decision}${suffix})`
   );
 }

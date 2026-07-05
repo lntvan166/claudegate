@@ -91,8 +91,10 @@ export class SessionManager {
 
   getPendingCount(): number {
     if (!this.session) return 0;
+    // Count every pending entry (matches what the panel shows); settled no-op
+    // entries are pruned by the grace-delayed reconcile, not filtered here.
     return Object.keys(this.session.files).filter(
-      (fp) => isInWorkspace(fp) && !isExcluded(fp) && this.hasRealPendingChange(fp)
+      (fp) => isInWorkspace(fp) && !isExcluded(fp)
     ).length;
   }
 
@@ -434,10 +436,15 @@ export class SessionManager {
     if (!this.session) return;
     let removed = 0;
     for (const [filePath, entry] of Object.entries(this.session.files)) {
-      if (entry.originalContent === null && !fs.existsSync(filePath)) {
+      // Runs after RECONCILE_GRACE_MS, i.e. once Claude's write has had time to
+      // land. A pending entry that still shows no real change (baseline equals
+      // disk, or a "new file" whose path never appeared) is a no-op/failed edit
+      // — prune it. There is nothing to review, and its frozen baseline equals
+      // the current content, so no change is lost; a later real edit re-tracks.
+      if (!hasRealChange(entry.originalContent, this.readFileOrNull(filePath))) {
         delete this.session.files[filePath];
         removed++;
-        this.log.appendLine(`[INFO] Pruned vanished new file: ${filePath}`);
+        this.log.appendLine(`[INFO] Pruned no-op pending entry: ${filePath}`);
       }
     }
     if (removed > 0) this.persist();

@@ -503,7 +503,9 @@ export function activate(context: vscode.ExtensionContext): void {
       let rejected = 0;
       if (session) {
         for (const fp of Object.keys(session.files)) {
-          if (isInWorkspace(fp) && !isExcluded(fp) && sessionManager.hasRealPendingChange(fp)) pending++;
+          // Count every pending entry (matches the Pending panel); settled
+          // no-op entries are pruned by the reconcile, not filtered here.
+          if (isInWorkspace(fp) && !isExcluded(fp)) pending++;
         }
         accepted = session.accepted.filter((r) => isInWorkspace(r.path) && !isExcluded(r.path)).length;
         rejected = Object.values(session.rejected).filter((r) => isInWorkspace(r.path) && !isExcluded(r.path)).length;
