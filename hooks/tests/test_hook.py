@@ -185,6 +185,19 @@ class HookBaselineTest(unittest.TestCase):
         finally:
             os.chmod(self.file, 0o644)
 
+    def test_existing_binary_file_is_skipped(self):
+        # A readable but non-UTF-8 (binary) file must not crash the hook (a
+        # non-zero PreToolUse exit could block Claude's edit) and must not be
+        # recorded — we can't baseline/restore it as text.
+        with open(self.file, "wb") as f:
+            f.write(b"\xff\xfe\x00\x01binary\x80")
+        self.run_hook()
+        files = {}
+        if os.path.exists(self.session_file):
+            with open(self.session_file) as f:
+                files = json.load(f).get("files", {})
+        self.assertNotIn(self.file, files)
+
 
 if __name__ == "__main__":
     unittest.main()
