@@ -406,6 +406,11 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Show Claude's changed lines (vs the frozen baseline) as gutter marks and overview-ruler ticks in the editor while a file is pending review. Turn off to hide them."
+        },
+        "claudegate.hunkCodeLens.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show a \"Revert this change\" CodeLens above each of Claude's hunks in a pending file, so you can undo an individual hunk (reverting just those lines to the baseline). Turn off to hide the lenses."
         }
       }
     },
@@ -421,7 +426,7 @@
     "watch": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --platform=node --sourcemap --watch",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext ts",
-    "test:unit": "esbuild src/excludeMatcher.test.ts --bundle --platform=node --format=cjs --outfile=out/excludeMatcher.test.cjs && node out/excludeMatcher.test.cjs && esbuild src/changeCount.test.ts --bundle --platform=node --format=cjs --outfile=out/changeCount.test.cjs && node out/changeCount.test.cjs && esbuild src/lineDiff.test.ts --bundle --platform=node --format=cjs --outfile=out/lineDiff.test.cjs && node out/lineDiff.test.cjs"
+    "test:unit": "esbuild src/excludeMatcher.test.ts --bundle --platform=node --format=cjs --outfile=out/excludeMatcher.test.cjs && node out/excludeMatcher.test.cjs && esbuild src/changeCount.test.ts --bundle --platform=node --format=cjs --outfile=out/changeCount.test.cjs && node out/changeCount.test.cjs && esbuild src/lineDiff.test.ts --bundle --platform=node --format=cjs --outfile=out/lineDiff.test.cjs && node out/lineDiff.test.cjs && esbuild src/hunks.test.ts --bundle --platform=node --format=cjs --outfile=out/hunks.test.cjs && node out/hunks.test.cjs"
   },
   "devDependencies": {
     "@types/diff": "^8.0.0",

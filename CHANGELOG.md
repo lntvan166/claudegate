@@ -20,6 +20,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **Protected files** — `claudegate.protected` flags sensitive files (`.env`, keys, credentials) with a warning and sorts them to the top of review (never hidden), so their changes get extra scrutiny.
 - **Review All Pending** — a Pending-panel action (and `Claude Gate: Review All Pending` command) opens every pending change in VS Code's multi-file diff editor for one-pass review of multi-file refactors.
 - **Gutter change marks** — pending files show Claude's added/modified/deleted lines in the editor gutter and overview ruler (`claudegate.gutterDecorations.enabled`, on by default).
+- **Per-hunk revert** — a "Revert this change" CodeLens above each of Claude's hunks reverts just those lines to the baseline (undoable), leaving the file's other changes pending.
 
 ---
 

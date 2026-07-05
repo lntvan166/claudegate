@@ -16,6 +16,8 @@ import { ClaudeGateContentProvider, SCHEME, originalUri } from "./diffProvider";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
 import { DocumentTracker } from "./documentTracker";
 import { GutterDecorator } from "./gutterDecorations";
+import { HunkCodeLensProvider } from "./hunkCodeLens";
+import { revertHunkText } from "./hunks";
 import { persistWorkspaceRoots } from "./workspaceRoots";
 import { isInWorkspace, isExcluded, setExcludeMatcher, isProtected, setProtectedMatcher } from "./workspaceScope";
 import { ExcludeMatcher, DEFAULT_EXCLUDES } from "./excludeMatcher";
@@ -461,6 +463,43 @@ export function activate(context: vscode.ExtensionContext): void {
           );
         }
       }),
+
+      vscode.commands.registerCommand(
+        "claudegate.revertHunk",
+        async (uri: vscode.Uri, hunkIndex: number) => {
+          const entry = sessionManager.getSession()?.files[uri.fsPath];
+          if (entry?.reviewStatus !== "pending") return;
+          try {
+            const doc = await vscode.workspace.openTextDocument(uri);
+            const baseline = entry.originalContent ?? "";
+            const newText = revertHunkText(baseline, doc.getText(), hunkIndex);
+            if (newText === baseline) {
+              // Last remaining change reverted → fully back to baseline. rejectFile
+              // saves current-on-disk as claudeContent (Re-apply still works) and
+              // restores the baseline / deletes a new file.
+              sessionManager.rejectFile(uri.fsPath);
+              return;
+            }
+            const edit = new vscode.WorkspaceEdit();
+            const fullRange = new vscode.Range(
+              doc.positionAt(0),
+              doc.positionAt(doc.getText().length)
+            );
+            edit.replace(uri, fullRange, newText);
+            const applied = await vscode.workspace.applyEdit(edit);
+            if (!applied) {
+              throw new Error("the document changed underneath the edit");
+            }
+            await doc.save();
+            sessionManager.notifyChanged();
+          } catch (err) {
+            log.appendLine(`[ERROR] revertHunk failed for ${uri.fsPath}: ${(err as Error).message}`);
+            vscode.window.showErrorMessage(
+              `Claude Gate: could not revert hunk — ${(err as Error).message}`
+            );
+          }
+        }
+      ),
     );
 
     registerOpenDiff(context, sessionManager);
@@ -529,6 +568,13 @@ export function activate(context: vscode.ExtensionContext): void {
     const gutterDecorator = new GutterDecorator(sessionManager, context, log);
     gutterDecorator.start();
     context.subscriptions.push({ dispose: () => gutterDecorator.stop() });
+
+    context.subscriptions.push(
+      vscode.languages.registerCodeLensProvider(
+        { scheme: "file" },
+        new HunkCodeLensProvider(sessionManager, context.subscriptions)
+      )
+    );
 
     context.subscriptions.push(
       vscode.workspace.onDidChangeConfiguration((e) => {
