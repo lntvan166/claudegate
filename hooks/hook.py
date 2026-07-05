@@ -131,6 +131,7 @@ def main() -> None:
         session["files"][file_path] = {
             "originalContent": original_content,
             "reviewStatus": "pending",
+            "newFile": original_content is None,
             "sessionId": session_id,
             "capturedAt": captured_at,
         }

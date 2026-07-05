@@ -11,9 +11,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
-- **Rejecting an unreadable file could delete it.** The hook recorded a file it couldn't read (a permissions error, or a non-text/binary file) as a new (null-baseline) file, so rejecting it deleted the real file. On the hook path such files are now skipped instead of captured, so a `null` baseline means "the file did not exist" and reject can't delete a real file. (The opt-in, off-by-default file watcher for non-Claude agents doesn't yet apply this check.)
+- **Rejecting an unreadable file could delete it.** The hook recorded a file it couldn't read (a permissions error, or a non-text/binary file) as a new (null-baseline) file, so rejecting it deleted the real file. On the hook path such files are now skipped instead of captured, so a `null` baseline means "the file did not exist" and reject can't delete a real file. (Watcher-captured files are covered separately — see the reject-safety fix below.)
 - **Working-file restores are now atomic.** Rejecting (restore to baseline) and re-applying write your files via a temp-file + rename, so an interrupted write can no longer leave a half-written file.
 - **Concurrent writes no longer drop changes.** The hook and the extension both write the session file; the extension now re-reads and merges any changes the hook made since it loaded (guarded by a cheap modification-time check), so a hook capture or an accept/reject decision isn't lost during a race.
+- **The file watcher can no longer delete a real file on reject.** A file the watcher captured as "new" without a prior snapshot (e.g. an atomic save over an existing file) is no longer deleted when rejected — only files confidently known to be new (created via Claude's hook) are removed; uncertain ones are left on disk with a note.
+- **No more blank diffs.** Clicking a pending file that has no real change (a transient no-op) now shows a short note instead of an empty diff.
+
+### Internal
+
+- Added a GitHub Actions CI workflow (typecheck, compile, unit + hook tests) and a dependency-free integration-test harness for `SessionManager`.
 
 ### Notes
 

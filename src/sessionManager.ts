@@ -100,7 +100,7 @@ export class SessionManager {
     ).length;
   }
 
-  trackFileChange(filePath: string, originalContent: string | null): void {
+  trackFileChange(filePath: string, originalContent: string | null, newFile = false): void {
     // Create session if it doesn't exist (in memory; persist() will write it)
     if (!this.session) {
       this.session = {
@@ -119,6 +119,7 @@ export class SessionManager {
     this.session.files[filePath] = {
       originalContent,
       reviewStatus: "pending",
+      newFile,
     };
     // Reset session status from "reviewed" to "active" if needed
     if (this.session.status === "reviewed") {
@@ -176,13 +177,28 @@ export class SessionManager {
     this.persist();
   }
 
+  // The on-disk effect of rejecting one entry. Deletes only a confident-new
+  // file; an uncertain null-baseline file (watcher create-without-snapshot) is
+  // left on disk rather than risking deletion of a real file.
+  private applyReject(filePath: string, entry: FileEntry): "restored" | "deleted" | "left" {
+    if (entry.originalContent !== null) {
+      this.atomicWrite(filePath, entry.originalContent, true);
+      return "restored";
+    }
+    if (entry.newFile) {
+      fs.unlinkSync(filePath);
+      return "deleted";
+    }
+    return "left";
+  }
+
   rejectFile(filePath: string): void {
     const entry = this.session?.files[filePath];
     if (!entry) return;
     const after = this.readFileOrNull(filePath); // Claude's discarded version
+    let outcome: "restored" | "deleted" | "left";
     try {
-      if (entry.originalContent === null) fs.unlinkSync(filePath);
-      else this.atomicWrite(filePath, entry.originalContent, true);
+      outcome = this.applyReject(filePath, entry);
     } catch (err) {
       this.log.appendLine(`[ERROR] reject ${filePath}: ${(err as Error).message}`);
       vscode.window.showErrorMessage(
@@ -191,6 +207,11 @@ export class SessionManager {
       return;
     }
     rejectEntry(this.session!, filePath, after, new Date().toISOString());
+    if (outcome === "left") {
+      vscode.window.showInformationMessage(
+        `Claude Gate: left "${path.basename(filePath)}" on disk (created outside Claude Code — not auto-deleted).`
+      );
+    }
     this.log.appendLine(`[INFO] Rejected: ${filePath}`);
     this.persist();
   }
@@ -202,14 +223,14 @@ export class SessionManager {
     const decidedAt = new Date().toISOString();
     const errors: string[] = [];
     let count = 0;
+    let left = 0;
 
     for (const fp of Object.keys(s.files)) {
       if (!fp.startsWith(prefix) || isExcluded(fp) || !this.hasRealPendingChange(fp)) continue;
       const entry = s.files[fp];
       const after = this.readFileOrNull(fp);
       try {
-        if (entry.originalContent === null) fs.unlinkSync(fp);
-        else this.atomicWrite(fp, entry.originalContent, true);
+        if (this.applyReject(fp, entry) === "left") left++;
       } catch (err) {
         errors.push(`${path.basename(fp)}: ${(err as Error).message}`);
         this.log.appendLine(`[ERROR] rejectFolder failed for ${fp}: ${(err as Error).message}`);
@@ -227,6 +248,11 @@ export class SessionManager {
         `Claude Gate: Could not restore ${errors.length} file(s). Check Output panel for details.`
       );
     }
+    if (left > 0) {
+      vscode.window.showInformationMessage(
+        `Claude Gate: left ${left} file(s) created outside Claude Code on disk (not auto-deleted).`
+      );
+    }
   }
 
   // Known limitation: hook.py and the extension both read-modify-write the
@@ -241,14 +267,14 @@ export class SessionManager {
     const decidedAt = new Date().toISOString();
     const errors: string[] = [];
     let count = 0;
+    let left = 0;
 
     for (const fp of Object.keys(s.files)) {
       if (!isInWorkspace(fp) || isExcluded(fp) || !this.hasRealPendingChange(fp)) continue;
       const entry = s.files[fp];
       const after = this.readFileOrNull(fp);
       try {
-        if (entry.originalContent === null) fs.unlinkSync(fp);
-        else this.atomicWrite(fp, entry.originalContent, true);
+        if (this.applyReject(fp, entry) === "left") left++;
       } catch (err) {
         errors.push(`${path.basename(fp)}: ${(err as Error).message}`);
         this.log.appendLine(`[ERROR] rejectAll failed for ${fp}: ${(err as Error).message}`);
@@ -265,6 +291,11 @@ export class SessionManager {
     if (errors.length > 0) {
       vscode.window.showErrorMessage(
         `Claude Gate: Could not restore ${errors.length} file(s). Check Output panel for details.`
+      );
+    }
+    if (left > 0) {
+      vscode.window.showInformationMessage(
+        `Claude Gate: left ${left} file(s) created outside Claude Code on disk (not auto-deleted).`
       );
     }
   }

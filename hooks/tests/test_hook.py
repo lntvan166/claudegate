@@ -167,6 +167,17 @@ class HookBaselineTest(unittest.TestCase):
         self.run_hook()
         self.assertIsNone(self.read_entry()["originalContent"])
 
+    def test_nonexistent_file_marked_new(self):
+        self.assertFalse(os.path.exists(self.file))
+        self.run_hook()
+        self.assertTrue(self.read_entry()["newFile"])
+
+    def test_existing_file_not_marked_new(self):
+        with open(self.file, "w") as f:
+            f.write("v0")
+        self.run_hook()
+        self.assertFalse(self.read_entry().get("newFile", False))
+
     def test_existing_unreadable_file_is_skipped(self):
         # An existing file we cannot read must NOT be recorded as a null "new"
         # file (that would let a reject delete it). It is skipped entirely.
