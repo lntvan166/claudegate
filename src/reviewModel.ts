@@ -37,6 +37,27 @@ export function hasRealChange(originalContent: string | null, diskContent: strin
   return originalContent !== diskContent;
 }
 
+// Decide whether the reconcile should prune a pending entry as a settled no-op.
+//
+// The hook records an entry BEFORE Claude writes, so a brand-new entry is
+// momentarily a no-op (baseline === disk). Pruning must be PER-ENTRY age-based,
+// not on a shared timer: only drop a no-op once it has outlived its own grace
+// window, so a real edit whose write lands slightly late (e.g. in a multi-file
+// burst) is never pruned before it appears. A real change is always kept; an
+// entry with no `capturedAt` (e.g. the file-watcher path, created post-write) is
+// treated as already settled.
+export function shouldPruneNoOp(
+  entry: FileEntry,
+  diskContent: string | null,
+  nowMs: number,
+  graceMs: number
+): boolean {
+  if (hasRealChange(entry.originalContent, diskContent)) return false; // real → keep
+  const captured = entry.capturedAt ? Date.parse(entry.capturedAt) : NaN;
+  const age = Number.isNaN(captured) ? Infinity : nowMs - captured;
+  return age > graceMs; // settled no-op → prune; still-young no-op → keep (write may land)
+}
+
 export function acceptEntry(session: Session, path: string, after: string | null, decidedAt: string): void {
   const entry = session.files[path];
   if (!entry) return;

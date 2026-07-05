@@ -5,8 +5,8 @@ import * as os from "os";
 import * as crypto from "crypto";
 import { isInWorkspace, isExcluded } from "./workspaceScope";
 import {
-  Session, FileEntry, ReviewRecord, hasRealChange, acceptEntry, rejectEntry,
-  migrateSession,
+  Session, FileEntry, ReviewRecord, hasRealChange, shouldPruneNoOp, acceptEntry,
+  rejectEntry, migrateSession,
 } from "./reviewModel";
 export type { Session, FileEntry, ReviewRecord } from "./reviewModel";
 export type ReviewStatus = "pending" | "accepted" | "rejected"; // panel tab id
@@ -283,7 +283,7 @@ export class SessionManager {
     // Only reopen as pending if there is no pending entry already and this
     // record is still the file's on-disk state (it wasn't re-edited since).
     if (!s.files[rec.path] && this.readFileOrNull(rec.path) === rec.after) {
-      s.files[rec.path] = { originalContent: rec.before, reviewStatus: "pending", sessionId: rec.sessionId };
+      s.files[rec.path] = { originalContent: rec.before, reviewStatus: "pending", sessionId: rec.sessionId, capturedAt: new Date().toISOString() };
     }
   }
 
@@ -339,7 +339,7 @@ export class SessionManager {
       return;
     }
     delete s.rejected[filePath];
-    s.files[filePath] = { originalContent: rec.before, reviewStatus: "pending", sessionId: rec.sessionId };
+    s.files[filePath] = { originalContent: rec.before, reviewStatus: "pending", sessionId: rec.sessionId, capturedAt: new Date().toISOString() };
     this.log.appendLine(`[INFO] Re-applied: ${filePath}`);
     this.persist();
   }
@@ -428,26 +428,33 @@ export class SessionManager {
     if (!this.session || this.reconcileTimer) return;
     this.reconcileTimer = setTimeout(() => {
       this.reconcileTimer = null;
-      this.reconcileVanishedNewFiles();
+      this.reconcilePending();
     }, RECONCILE_GRACE_MS);
   }
 
-  private reconcileVanishedNewFiles(): void {
+  // Prune settled no-op / failed-edit pending entries. The decision is PER-ENTRY
+  // (see shouldPruneNoOp): a no-op still within its own grace window is kept and
+  // re-checked later, so a real edit whose write lands slightly late — e.g. a
+  // later file in a multi-file burst — is never pruned before it appears.
+  private reconcilePending(): void {
     if (!this.session) return;
+    const now = Date.now();
     let removed = 0;
+    let youngNoOp = false;
     for (const [filePath, entry] of Object.entries(this.session.files)) {
-      // Runs after RECONCILE_GRACE_MS, i.e. once Claude's write has had time to
-      // land. A pending entry that still shows no real change (baseline equals
-      // disk, or a "new file" whose path never appeared) is a no-op/failed edit
-      // — prune it. There is nothing to review, and its frozen baseline equals
-      // the current content, so no change is lost; a later real edit re-tracks.
-      if (!hasRealChange(entry.originalContent, this.readFileOrNull(filePath))) {
+      const disk = this.readFileOrNull(filePath);
+      if (shouldPruneNoOp(entry, disk, now, RECONCILE_GRACE_MS)) {
         delete this.session.files[filePath];
         removed++;
         this.log.appendLine(`[INFO] Pruned no-op pending entry: ${filePath}`);
+      } else if (!hasRealChange(entry.originalContent, disk)) {
+        youngNoOp = true; // no-op but still within grace — re-evaluate once it settles
       }
     }
     if (removed > 0) this.persist();
+    // Give still-young no-op entries their full per-entry grace instead of the
+    // shared timer's remaining time (closes the burst-coalescing hole).
+    if (youngNoOp) this.scheduleReconcile();
   }
 
   // Read a file's current content, or null if it cannot be read. Used to

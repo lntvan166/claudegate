@@ -1,6 +1,7 @@
 import * as assert from "assert";
 import {
-  hasRealChange, acceptEntry, rejectEntry, migrateSession, makeRecordId, Session,
+  hasRealChange, shouldPruneNoOp, acceptEntry, rejectEntry, migrateSession,
+  makeRecordId, Session, FileEntry,
 } from "./reviewModel";
 
 function base(): Session {
@@ -106,6 +107,33 @@ console.log("ok - makeRecordId");
   assert.ok(s.rejected["/f"], "prior rejected record is NOT lost");
   assert.ok(s.files["/f"], "re-edit re-enters files{} as pending");
   console.log("ok - re-edit of a rejected file coexists (Pending + Rejected)");
+}
+
+// SOUL PATH (C1 regression): the reconcile prune must be per-entry age-based so
+// a real edit whose write lands slightly late (a later file in a burst) is NEVER
+// pruned before it appears.
+{
+  const GRACE = 1500;
+  const now = 1_000_000;
+  const pend = (oc: string | null, capturedAt?: string): FileEntry =>
+    ({ originalContent: oc, reviewStatus: "pending", capturedAt });
+  const iso = (ms: number) => new Date(ms).toISOString();
+
+  // real change → never pruned, regardless of age
+  assert.equal(shouldPruneNoOp(pend("A", iso(now - 10 * GRACE)), "B", now, GRACE), false, "real change kept");
+  // no-op but YOUNG (write may still land) → keep — this is the C1 guard
+  assert.equal(shouldPruneNoOp(pend("A", iso(now - 100)), "A", now, GRACE), false, "young no-op kept (burst-safe)");
+  // no-op and SETTLED (past its own grace) → prune
+  assert.equal(shouldPruneNoOp(pend("A", iso(now - 2 * GRACE)), "A", now, GRACE), true, "settled no-op pruned");
+  // no-op with no capturedAt (file-watcher path, created post-write) → settled → prune
+  assert.equal(shouldPruneNoOp(pend("A", undefined), "A", now, GRACE), true, "no-op w/o capturedAt pruned");
+  // new file that now exists (even empty) → real change → keep
+  assert.equal(shouldPruneNoOp(pend(null, iso(now - 2 * GRACE)), "", now, GRACE), false, "created (empty) new file kept");
+  // new file that never appeared, settled → prune
+  assert.equal(shouldPruneNoOp(pend(null, iso(now - 2 * GRACE)), null, now, GRACE), true, "vanished new file pruned");
+  // new file not yet written, still young → keep (write pending)
+  assert.equal(shouldPruneNoOp(pend(null, iso(now - 100)), null, now, GRACE), false, "young unwritten new file kept");
+  console.log("ok - shouldPruneNoOp (per-entry grace; burst-safe reconcile)");
 }
 
 console.log("done");
