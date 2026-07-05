@@ -1,0 +1,108 @@
+// Pure, vscode-free state transitions for the review log. sessionManager adds
+// the disk I/O and calls these to mutate its in-memory Session.
+
+export interface FileEntry {
+  originalContent: string | null; // frozen "before" baseline (null = Claude created the file)
+  reviewStatus: "pending";        // files{} holds only pending changes now
+  sessionId?: string;
+  capturedAt?: string;
+}
+
+export interface ReviewRecord {
+  id: string;
+  path: string;
+  before: string | null; // baseline reviewed
+  after: string | null;  // accepted content, or the discarded Claude version
+  decidedAt: string;     // ISO timestamp
+  sessionId?: string;
+}
+
+export interface Session {
+  sessionId: string;
+  status: "active" | "reviewed";
+  files: Record<string, FileEntry>;
+  accepted: ReviewRecord[];
+  rejected: Record<string, ReviewRecord>;
+}
+
+export function makeRecordId(decidedAt: string, path: string): string {
+  return `${decidedAt}::${path}`;
+}
+
+// A pending entry is a real change unless its baseline already equals the
+// current disk content (no-op / failed edit). diskContent === null means the
+// file is absent on disk.
+export function hasRealChange(originalContent: string | null, diskContent: string | null): boolean {
+  if (originalContent === null) return diskContent !== null; // new file: real iff it exists
+  return originalContent !== diskContent;
+}
+
+export function acceptEntry(session: Session, path: string, after: string | null, decidedAt: string): void {
+  const entry = session.files[path];
+  if (!entry) return;
+  session.accepted.push({
+    id: makeRecordId(decidedAt, path),
+    path,
+    before: entry.originalContent,
+    after,
+    decidedAt,
+    sessionId: entry.sessionId,
+  });
+  delete session.files[path];
+}
+
+export function rejectEntry(session: Session, path: string, after: string | null, decidedAt: string): void {
+  const entry = session.files[path];
+  if (!entry) return;
+  session.rejected[path] = {
+    id: makeRecordId(decidedAt, path),
+    path,
+    before: entry.originalContent,
+    after,
+    decidedAt,
+    sessionId: entry.sessionId,
+  };
+  delete session.files[path];
+}
+
+// Convert a raw on-disk session (possibly legacy: accepted/rejected in files{})
+// into the current shape. Best-effort — sessions are transient.
+export function migrateSession(raw: any): Session {
+  const session: Session = {
+    sessionId: raw?.sessionId ?? new Date().toISOString(),
+    status: raw?.status === "reviewed" ? "reviewed" : "active",
+    files: {},
+    accepted: Array.isArray(raw?.accepted) ? raw.accepted : [],
+    rejected: raw?.rejected && typeof raw.rejected === "object" ? raw.rejected : {},
+  };
+  const files = raw?.files ?? {};
+  for (const [path, e] of Object.entries<any>(files)) {
+    const status = e?.reviewStatus;
+    if (status === "accepted") {
+      const decidedAt = e.capturedAt ?? session.sessionId;
+      session.accepted.push({
+        id: makeRecordId(decidedAt, path), path,
+        before: e.originalContent ?? null,
+        after: e.claudeContent ?? e.originalContent ?? null,
+        decidedAt, sessionId: e.sessionId,
+      });
+    } else if (status === "rejected") {
+      const decidedAt = e.capturedAt ?? session.sessionId;
+      session.rejected[path] = {
+        id: makeRecordId(decidedAt, path), path,
+        before: e.originalContent ?? null,
+        after: e.claudeContent ?? e.originalContent ?? null,
+        decidedAt, sessionId: e.sessionId,
+      };
+    } else {
+      // pending (or unknown → treat as pending)
+      session.files[path] = {
+        originalContent: e?.originalContent ?? null,
+        reviewStatus: "pending",
+        sessionId: e?.sessionId,
+        capturedAt: e?.capturedAt,
+      };
+    }
+  }
+  return session;
+}
