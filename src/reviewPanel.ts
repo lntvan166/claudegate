@@ -87,10 +87,9 @@ export class FileReviewItem extends vscode.TreeItem {
     this.tooltip      = new vscode.MarkdownString(
       `**${path.basename(filePath)}**\n\n${filePath}\n\nStatus: *${reviewStatus}*`
     );
-    this.contextValue =
-      reviewStatus === "pending"  ? "claudegate.file.pending"  :
-      reviewStatus === "rejected" ? "claudegate.file.rejected" :
-                                    "claudegate.file.accepted";
+    // FileReviewItem is only used for pending rows now (accepted/rejected use
+    // RecordReviewItem), so the context value is always the pending one.
+    this.contextValue = "claudegate.file.pending";
     this.command = {
       command:   "claudegate.openDiff",
       title:     "Open Diff",

@@ -268,7 +268,7 @@
         },
         {
           "command": "claudegate.revertAcceptedAll",
-          "when": "view == claudegate.acceptedPanel",
+          "when": "view == claudegate.acceptedPanel && claudegate.acceptedCount > 0",
           "group": "navigation@1"
         },
         {
@@ -278,7 +278,7 @@
         },
         {
           "command": "claudegate.reapplyAll",
-          "when": "view == claudegate.rejectedPanel",
+          "when": "view == claudegate.rejectedPanel && claudegate.rejectedCount > 0",
           "group": "navigation@1"
         },
         {

@@ -320,43 +320,67 @@ export class SessionManager {
 
   // ── Rejected store (latest-per-file): re-apply ──────────────────────────
 
-  reapplyRejected(filePath: string): void {
-    const s = this.session;
-    const rec = s?.rejected[filePath];
-    if (!s || !rec) return;
-    if (rec.after == null) {
-      vscode.window.showWarningMessage(
-        `Claude Gate: Cannot re-apply — Claude's version of "${path.basename(filePath)}" was not saved.`
-      );
-      return;
-    }
+  // Shared mutation for re-applying one rejected record; callers persist().
+  // Returns an error message on failure (no UI), or null on success.
+  private reapplyRejectedRecord(filePath: string): string | null {
+    const s = this.session!;
+    const rec = s.rejected[filePath];
+    if (!rec) return null;
+    if (rec.after == null) return `Claude's version of "${path.basename(filePath)}" was not saved`;
     try {
       fs.writeFileSync(filePath, rec.after, "utf-8");
     } catch (err) {
-      vscode.window.showErrorMessage(
-        `Claude Gate: Could not re-apply ${path.basename(filePath)} — ${(err as Error).message}`
-      );
-      return;
+      return (err as Error).message;
     }
     delete s.rejected[filePath];
     s.files[filePath] = { originalContent: rec.before, reviewStatus: "pending", sessionId: rec.sessionId, capturedAt: new Date().toISOString() };
     this.log.appendLine(`[INFO] Re-applied: ${filePath}`);
+    return null;
+  }
+
+  reapplyRejected(filePath: string): void {
+    if (!this.session?.rejected[filePath]) return;
+    const err = this.reapplyRejectedRecord(filePath);
+    if (err) {
+      vscode.window.showWarningMessage(`Claude Gate: Cannot re-apply ${path.basename(filePath)} — ${err}`);
+      return;
+    }
     this.persist();
+  }
+
+  private reapplyMany(paths: string[], label: string): void {
+    if (paths.length === 0) return;
+    const errors: string[] = [];
+    for (const fp of paths) {
+      const err = this.reapplyRejectedRecord(fp);
+      if (err) {
+        errors.push(`${path.basename(fp)}: ${err}`);
+        this.log.appendLine(`[ERROR] reapply ${fp}: ${err}`);
+      }
+    }
+    this.persist();
+    this.log.appendLine(`[INFO] ${label}: ${paths.length - errors.length}/${paths.length} file(s)`);
+    if (errors.length > 0) {
+      vscode.window.showErrorMessage(
+        `Claude Gate: Could not re-apply ${errors.length} file(s). Check the Output panel for details.`
+      );
+    }
   }
 
   reapplyAll(): void {
     const s = this.session;
     if (!s) return;
-    const paths = Object.keys(s.rejected).filter((fp) => !isExcluded(fp));
-    for (const fp of paths) this.reapplyRejected(fp);
+    this.reapplyMany(Object.keys(s.rejected).filter((fp) => !isExcluded(fp)), "Re-applied all");
   }
 
   reapplyFolder(folderPath: string): void {
     const s = this.session;
     if (!s) return;
     const prefix = folderPath + path.sep;
-    const paths = Object.keys(s.rejected).filter((fp) => fp.startsWith(prefix) && !isExcluded(fp));
-    for (const fp of paths) this.reapplyRejected(fp);
+    this.reapplyMany(
+      Object.keys(s.rejected).filter((fp) => fp.startsWith(prefix) && !isExcluded(fp)),
+      `Re-applied folder ${folderPath}`
+    );
   }
 
   // ── Clear ────────────────────────────────────────────────────────────────

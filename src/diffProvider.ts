@@ -42,7 +42,9 @@ export class ClaudeGateContentProvider
       return (side === "after" ? rec.after : rec.before) ?? "";
     }
 
-    const entry = session.files[uri.path];
+    // Look up by fsPath (the session key). On Windows uri.path is "/c:/…" while
+    // the key is "c:\…", so uri.path would miss; uri.fsPath matches on all OSes.
+    const entry = session.files[uri.fsPath];
     if (!entry) return "";
     return entry.originalContent ?? "// New file — no original content";
   }
