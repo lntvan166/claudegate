@@ -130,6 +130,7 @@ for rel, baseline, disk, sid in FILES:
     files_json[abs_path] = {                              # session = pre-edit baseline
         "originalContent": baseline,
         "reviewStatus": "pending",
+        "newFile": baseline is None,   # mirror the hook: confident-new ⇒ reject deletes
         "sessionId": sid,
         "capturedAt": "2026-07-05T10:00:00.000000+00:00",
     }

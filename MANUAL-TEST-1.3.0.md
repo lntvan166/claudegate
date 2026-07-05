@@ -102,3 +102,27 @@ This is the new model. Each panel means exactly what it says.
 ```bash
 python3 manual-test-seed.py --clean   # removes the workspace + its session file
 ```
+
+---
+
+## 1.3.1 additions (delete-safety + no blank diffs)
+
+Reload the window after installing `claudegate-1.3.1.vsix`, open `~/claudegate-manual-test`.
+
+### New-file reject deletes (confident-new)
+- [ ] Reject `src/newfeature.ts` (a new file, captured with `newFile:true` like the hook) → it moves to Rejected and is **deleted from disk**. Re-apply re-creates it. *(Automated: the reject delete-safety matrix covers this.)*
+
+### No blank diff on a no-op
+- [ ] Simulate a no-op/failed edit: `python3 manual-test-seed.py --noop-edit src/utils.ts` (fires the hook, writes nothing → a pending entry with baseline == disk).
+- [ ] Click that `utils.ts` row **promptly** → you get a **"Claude Gate: no changes to review in utils.ts."** info message instead of a blank diff. *(The entry is transient — the reconcile prunes it ~1.5s later, so click soon after.)*
+
+### Delete-safety for watcher-created files (automated-only)
+- The "a watcher-captured file of uncertain origin is **left on disk** on reject (not deleted)" path needs a non-Claude agent (Cursor Composer/Codex) with the file watcher enabled — it's hard to reproduce by hand. It is locked by the automated `sessionManager` integration tests (confident-new deletes / uncertain leaves; `newFile` survives reload).
+
+### Nothing else regressed
+- [ ] The 1.3.0 review-log checks above still hold: accept persists in the Accepted log; re-edit shows in Pending while Accepted keeps history; Accepted/Rejected rows are syntax-highlighted.
+
+## Reset
+```bash
+python3 manual-test-seed.py --clean && python3 manual-test-seed.py
+```
