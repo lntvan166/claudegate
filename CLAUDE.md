@@ -61,20 +61,20 @@ Per-workspace session file at `~/.claudegate/sessions/<md5(workspacePath)>.json`
   },
   "accepted": [
     {
-      "id": "uuid",
+      "id": "<decidedAt>::<path>",
       "path": "/absolute/path/to/file.ts",
       "before": "string | null",
-      "after": "string",
+      "after": "string | null",
       "decidedAt": "ISO 8601 timestamp",
       "sessionId": "string"
     }
   ],
   "rejected": {
     "/absolute/path/to/file.ts": {
-      "id": "uuid",
+      "id": "<decidedAt>::<path>",
       "path": "/absolute/path/to/file.ts",
       "before": "string | null",
-      "after": "string",
+      "after": "string | null",
       "decidedAt": "ISO 8601 timestamp",
       "sessionId": "string"
     }
@@ -122,8 +122,8 @@ Per-workspace session file at `~/.claudegate/sessions/<md5(workspacePath)>.json`
 
 **Hook behavior:**
 - `file_path` may be relative to `cwd`. The hook resolves it to an absolute path before storing.
-- If the file is **not in session** or **was accepted/rejected**, the hook creates a new pending entry with the current on-disk `originalContent`.
 - If the file is **already pending**, the hook leaves it untouched (preserves the frozen baseline).
+- Otherwise (no entry yet, or — for legacy/pre-migration sessions — a non-pending entry) the hook creates a fresh pending entry with the current on-disk `originalContent`. The hook only ever writes `files`; the extension owns `accepted`/`rejected`, and accept/reject remove the entry from `files`, so on a current-model session a re-edit simply finds no entry and creates a new pending one.
 
 ---
 
