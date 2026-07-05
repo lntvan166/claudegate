@@ -39,7 +39,8 @@ export class ClaudeGateDecorationProvider
     // already matches disk) — only badge genuinely pending changes.
     if (!this.sessionManager.hasRealPendingChange(uri.fsPath)) return undefined;
 
-    if (entry.reviewStatus === "pending" && isProtected(uri.fsPath)) {
+    // files{} is pending-only now, so entry.reviewStatus is always "pending".
+    if (isProtected(uri.fsPath)) {
       return {
         badge: "⚠",
         color: new vscode.ThemeColor("list.warningForeground"),

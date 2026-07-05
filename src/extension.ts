@@ -30,7 +30,8 @@ function getActivePendingFilePath(sessionManager: SessionManager): string | unde
     undefined;
   if (!filePath) return undefined;
   if (!isInWorkspace(filePath) || isExcluded(filePath)) return undefined;
-  return sessionManager.getSession()?.files[filePath]?.reviewStatus === "pending"
+  return sessionManager.getSession()?.files[filePath]?.reviewStatus === "pending" &&
+    sessionManager.hasRealPendingChange(filePath)
     ? filePath
     : undefined;
 }
@@ -160,7 +161,13 @@ export function activate(context: vscode.ExtensionContext): void {
       const session = sessionManager.getSession();
       const next = session
         ? Object.entries(session.files)
-            .filter(([fp, e]) => e.reviewStatus === "pending" && isInWorkspace(fp) && !isExcluded(fp))
+            .filter(
+              ([fp, e]) =>
+                e.reviewStatus === "pending" &&
+                isInWorkspace(fp) &&
+                !isExcluded(fp) &&
+                sessionManager.hasRealPendingChange(fp)
+            )
             .map(([fp]) => fp)
             .sort((a, b) => a.localeCompare(b))[0]
         : undefined;
@@ -429,7 +436,13 @@ export function activate(context: vscode.ExtensionContext): void {
         const session = sessionManager.getSession();
         const paths = session
           ? Object.entries(session.files)
-              .filter(([fp, e]) => e.reviewStatus === "pending" && isInWorkspace(fp) && !isExcluded(fp))
+              .filter(
+                ([fp, e]) =>
+                  e.reviewStatus === "pending" &&
+                  isInWorkspace(fp) &&
+                  !isExcluded(fp) &&
+                  sessionManager.hasRealPendingChange(fp)
+              )
               .map(([fp]) => fp)
               .sort(
                 (a, b) =>

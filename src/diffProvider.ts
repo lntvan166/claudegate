@@ -19,7 +19,6 @@ export class ClaudeGateContentProvider
       if (!session) return;
       for (const fp of Object.keys(session.files)) {
         this._onDidChange.fire(originalUri(fp));
-        this._onDidChange.fire(claudeUri(fp));
       }
       for (const r of [...session.accepted, ...Object.values(session.rejected)]) {
         this._onDidChange.fire(recordUri(r.id, "before"));
@@ -43,12 +42,6 @@ export class ClaudeGateContentProvider
 
     const entry = session.files[uri.path];
     if (!entry) return "";
-    if (uri.query === "side=claude") {
-      // files{} is pending-only now — there is no saved "after" snapshot to
-      // show here. Accepted/rejected records have their own "after" snapshot,
-      // served above via the record?id=…&side=… URI (see recordUri/openReviewRecord).
-      return "// Claude's version not available";
-    }
     return entry.originalContent ?? "// New file — no original content";
   }
 }
@@ -59,10 +52,6 @@ export function recordUri(id: string, side: "before" | "after"): vscode.Uri {
 
 export function originalUri(filePath: string): vscode.Uri {
   return vscode.Uri.file(filePath).with({ scheme: SCHEME });
-}
-
-export function claudeUri(filePath: string): vscode.Uri {
-  return vscode.Uri.file(filePath).with({ scheme: SCHEME, query: "side=claude" });
 }
 
 // ─── Open diff ───────────────────────────────────────────────────────────────

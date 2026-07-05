@@ -6,7 +6,7 @@ import * as crypto from "crypto";
 import { isInWorkspace, isExcluded } from "./workspaceScope";
 import {
   Session, FileEntry, ReviewRecord, hasRealChange, acceptEntry, rejectEntry,
-  migrateSession, makeRecordId,
+  migrateSession,
 } from "./reviewModel";
 export type { Session, FileEntry, ReviewRecord } from "./reviewModel";
 export type ReviewStatus = "pending" | "accepted" | "rejected"; // panel tab id
@@ -145,7 +145,7 @@ export class SessionManager {
     const decidedAt = new Date().toISOString();
     let count = 0;
     for (const fp of Object.keys(s.files)) {
-      if (!fp.startsWith(prefix) || isExcluded(fp)) continue;
+      if (!fp.startsWith(prefix) || isExcluded(fp) || !this.hasRealPendingChange(fp)) continue;
       const after = this.readFileOrNull(fp);
       if (after === null) this.log.appendLine(`[WARN] Accept folder: could not read ${fp}; accepted diff unavailable`);
       acceptEntry(s, fp, after, decidedAt);
@@ -162,7 +162,7 @@ export class SessionManager {
     const decidedAt = new Date().toISOString();
     let count = 0;
     for (const fp of Object.keys(s.files)) {
-      if (!isInWorkspace(fp) || isExcluded(fp)) continue;
+      if (!isInWorkspace(fp) || isExcluded(fp) || !this.hasRealPendingChange(fp)) continue;
       const after = this.readFileOrNull(fp);
       if (after === null) this.log.appendLine(`[WARN] Accept all: could not read ${fp}; accepted diff unavailable`);
       acceptEntry(s, fp, after, decidedAt);
@@ -200,7 +200,7 @@ export class SessionManager {
     let count = 0;
 
     for (const fp of Object.keys(s.files)) {
-      if (!fp.startsWith(prefix) || isExcluded(fp)) continue;
+      if (!fp.startsWith(prefix) || isExcluded(fp) || !this.hasRealPendingChange(fp)) continue;
       const entry = s.files[fp];
       const after = this.readFileOrNull(fp);
       try {
@@ -239,7 +239,7 @@ export class SessionManager {
     let count = 0;
 
     for (const fp of Object.keys(s.files)) {
-      if (!isInWorkspace(fp) || isExcluded(fp)) continue;
+      if (!isInWorkspace(fp) || isExcluded(fp) || !this.hasRealPendingChange(fp)) continue;
       const entry = s.files[fp];
       const after = this.readFileOrNull(fp);
       try {
