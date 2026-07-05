@@ -97,6 +97,7 @@ function readSession(sp: string): any {
   sm.trackFileChange(del, null, true);   // confident new (hook path)
   sm.rejectFile(del);
   assert.ok(!fs.existsSync(del), "confident-new reject deletes the file");
+  assert.ok(readSession(sp).rejected[del], "deleted file still recorded as rejected");
   sm.stopWatching();
 
   const { ws: ws2, sp: sp2 } = newEnv();
@@ -111,6 +112,42 @@ function readSession(sp: string): any {
   assert.ok(readSession(sp2).rejected[keep], "still recorded as rejected");
   sm2.stopWatching();
   console.log("ok - reject deletes only confident-new files");
+}
+
+// migrateSession must carry newFile through a disk reload (the real hook +
+// fs.watch path): a confident-new flag survives → reject deletes; a legacy
+// entry with no newFile → reject leaves the file (delete-safety).
+{
+  const { ws, sp } = newEnv();
+  const nf = path.join(ws, "created.ts");
+  fs.writeFileSync(nf, "content");
+  fs.mkdirSync(path.dirname(sp), { recursive: true });
+  fs.writeFileSync(sp, JSON.stringify({
+    sessionId: "t", status: "active",
+    files: { [nf]: { originalContent: null, reviewStatus: "pending", newFile: true, capturedAt: new Date().toISOString() } },
+    accepted: [], rejected: {},
+  }));
+  const sm = new SessionManager(fakeLog, ws);
+  sm.startWatching(); // loads via migrateSession (the fs.watch reload path)
+  sm.rejectFile(nf);
+  assert.ok(!fs.existsSync(nf), "newFile:true survives reload → reject deletes");
+  sm.stopWatching();
+
+  const { ws: ws2, sp: sp2 } = newEnv();
+  const legacy = path.join(ws2, "maybe-real.ts");
+  fs.writeFileSync(legacy, "user data");
+  fs.mkdirSync(path.dirname(sp2), { recursive: true });
+  fs.writeFileSync(sp2, JSON.stringify({
+    sessionId: "t", status: "active",
+    files: { [legacy]: { originalContent: null, reviewStatus: "pending", capturedAt: new Date().toISOString() } },
+    accepted: [], rejected: {},
+  }));
+  const sm2 = new SessionManager(fakeLog, ws2);
+  sm2.startWatching();
+  sm2.rejectFile(legacy);
+  assert.ok(fs.existsSync(legacy), "legacy null entry (no newFile) → reject leaves file");
+  sm2.stopWatching();
+  console.log("ok - migrateSession carries newFile through reload (delete-safety)");
 }
 
 console.log("done");

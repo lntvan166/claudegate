@@ -15,3 +15,9 @@ export const window = {
   showWarningMessage: (..._args: unknown[]): undefined => undefined,
   showInformationMessage: (..._args: unknown[]): undefined => undefined,
 };
+// No open folders → isInWorkspace() returns true, so a pre-populated session
+// loads without pruneOutOfWorkspaceEntries throwing (which would mask the
+// reload path under test).
+export const workspace = {
+  workspaceFolders: undefined as readonly { uri: { fsPath: string } }[] | undefined,
+};
