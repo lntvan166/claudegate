@@ -78,6 +78,16 @@ export async function openDiff(
   if (!session?.files[filePath]) return;
 
   const entry = session.files[filePath];
+
+  // A pending entry whose baseline already equals disk (a transient no-op, not
+  // yet pruned) would open a blank diff — show a note instead.
+  if (!sessionManager.hasRealPendingChange(filePath)) {
+    vscode.window.showInformationMessage(
+      `Claude Gate: no changes to review in ${path.basename(filePath)}.`
+    );
+    return;
+  }
+
   const label = path.basename(filePath);
   const beforeUri = originalUri(filePath);
   const beforeText = entry.originalContent ?? "";
