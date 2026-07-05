@@ -16,6 +16,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **Concurrent writes no longer drop changes.** The hook and the extension both write the session file; the extension now re-reads and merges any changes the hook made since it loaded (guarded by a cheap modification-time check), so a hook capture or an accept/reject decision isn't lost during a race.
 - **The file watcher can no longer delete a real file on reject.** A file the watcher captured as "new" without a prior snapshot (e.g. an atomic save over an existing file) is no longer deleted when rejected — only files confidently known to be new (created via Claude's hook) are removed; uncertain ones are left on disk with a note.
 - **No more blank diffs.** Clicking a pending file that has no real change (a transient no-op) now shows a short note instead of an empty diff.
+- **Review All Pending stays in sync.** Accepting or rejecting a file now refreshes the open multi-file diff to the remaining pending files (and closes it once none remain), instead of leaving a stale view with the resolved file still shown.
 
 ### Internal
 
