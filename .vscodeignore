@@ -2,9 +2,13 @@
 .vscode-test/**
 src/**
 out/test/**
+out/**/*.test.cjs
 out/**/*.map
 !out/extension.js
 node_modules/**
+
+# CI (dev-only, not shipped to marketplace users)
+.github/**
 
 # Dev tool data (not for marketplace users)
 .superpowers/**
