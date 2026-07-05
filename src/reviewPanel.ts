@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
-import { SessionManager, ReviewStatus, Session, FileEntry } from "./sessionManager";
+import { SessionManager, ReviewStatus, Session, FileEntry, ReviewRecord } from "./sessionManager";
 import { openDiff } from "./diffProvider";
 import { isInWorkspace, isExcluded, isProtected } from "./workspaceScope";
 import { countChanges, formatChangeCount } from "./changeCount";
@@ -35,9 +35,11 @@ function relativeDir(filePath: string): string {
   return parts.slice(-2).join("/");
 }
 
-// A file belongs to a session bucket: null = the "unknown" bucket (no session id).
-function matchesSession(entry: FileEntry, sessionId: string | null): boolean {
-  return sessionId === null ? !entry.sessionId : entry.sessionId === sessionId;
+// An item belongs to a session bucket: null = the "unknown" bucket (no session id).
+// Shared by pending files (FileEntry.sessionId) and accepted/rejected records
+// (ReviewRecord.sessionId).
+function matchesSession(itemSessionId: string | undefined, sessionId: string | null): boolean {
+  return sessionId === null ? !itemSessionId : itemSessionId === sessionId;
 }
 
 // ─── Folder item (tree mode) ──────────────────────────────────────────────────
@@ -103,6 +105,32 @@ export class FileReviewItem extends vscode.TreeItem {
   }
 }
 
+// ─── Record item (accepted/rejected log rows) ─────────────────────────────────
+
+export class RecordReviewItem extends vscode.TreeItem {
+  constructor(
+    public readonly record: ReviewRecord,
+    public readonly decision: "accepted" | "rejected",
+    showPath = true
+  ) {
+    super(path.basename(record.path), vscode.TreeItemCollapsibleState.None);
+    this.resourceUri = vscode.Uri.file(record.path);
+    this.description = showPath ? relativeDir(record.path) : undefined;
+    this.filePath = record.path;
+    this.recordId = record.id;
+    this.contextValue = decision === "accepted" ? "claudegate.file.accepted" : "claudegate.file.rejected";
+    this.tooltip = new vscode.MarkdownString(
+      `**${path.basename(record.path)}**\n\n${record.path}\n\n*${decision}* · ${new Date(record.decidedAt).toLocaleString()}`
+    );
+    this.command = { command: "claudegate.openReviewRecord", title: "Open Diff", arguments: [record.id] };
+    if (isProtected(record.path)) {
+      this.iconPath = new vscode.ThemeIcon("warning", new vscode.ThemeColor("list.warningForeground"));
+    }
+  }
+  filePath: string;
+  recordId: string;
+}
+
 // ─── Filtered tree provider ───────────────────────────────────────────────────
 
 export type ViewMode = "list" | "tree";
@@ -151,6 +179,8 @@ export class FilteredTreeProvider
       .getConfiguration("claudegate")
       .get<boolean>("groupBySession", false);
 
+    if (this.status !== "pending") return this.getRecordChildren(session, element, grouped);
+
     // Root
     if (!element) {
       if (grouped) return this.sessionGroups(session);
@@ -168,7 +198,7 @@ export class FilteredTreeProvider
     // Session group children
     if (element instanceof SessionItem) {
       const files = this.filteredFiles(session).filter((fp) =>
-        matchesSession(session.files[fp], element.sessionId)
+        matchesSession(session.files[fp].sessionId, element.sessionId)
       );
       if (this.viewMode === "list") {
         const ordered = [...files].sort(
@@ -185,9 +215,57 @@ export class FilteredTreeProvider
       const filesUnder = this.filteredFiles(session).filter(
         (fp) =>
           fp.startsWith(element.folderPath + path.sep) &&
-          (element.sessionId === undefined || matchesSession(session.files[fp], element.sessionId))
+          (element.sessionId === undefined || matchesSession(session.files[fp].sessionId, element.sessionId))
       );
       return this.directChildren(filesUnder, element.folderPath, this.status, false, element.sessionId);
+    }
+
+    return [];
+  }
+
+  // ── Accepted / Rejected: record-backed panels ─────────────────────────────
+  //
+  // Same tree/list/session-grouping shape as the pending panel above, but the
+  // leaves are ReviewRecord-backed RecordReviewItem rows sourced from
+  // session.accepted (append-only log, newest first) or session.rejected
+  // (latest-per-file map) instead of session.files.
+
+  private getRecordChildren(
+    session: Session,
+    element: vscode.TreeItem | undefined,
+    grouped: boolean
+  ): vscode.TreeItem[] {
+    const decision = this.status as "accepted" | "rejected";
+
+    // Root
+    if (!element) {
+      if (grouped) return this.recordSessionGroups(this.filteredRecords(session));
+      const records = this.filteredRecords(session);
+      if (this.viewMode === "list") {
+        return records.map((r) => new RecordReviewItem(r, decision));
+      }
+      return this.recordDirectChildren(records, getWorkspaceRoot(records.map((r) => r.path)), decision, false);
+    }
+
+    // Session group children
+    if (element instanceof SessionItem) {
+      const records = this.filteredRecords(session).filter((r) =>
+        matchesSession(r.sessionId, element.sessionId)
+      );
+      if (this.viewMode === "list") {
+        return records.map((r) => new RecordReviewItem(r, decision));
+      }
+      return this.recordDirectChildren(records, getWorkspaceRoot(records.map((r) => r.path)), decision, false, element.sessionId);
+    }
+
+    // Folder children (tree mode)
+    if (element instanceof FolderItem) {
+      const recordsUnder = this.filteredRecords(session).filter(
+        (r) =>
+          r.path.startsWith(element.folderPath + path.sep) &&
+          (element.sessionId === undefined || matchesSession(r.sessionId, element.sessionId))
+      );
+      return this.recordDirectChildren(recordsUnder, element.folderPath, decision, false, element.sessionId);
     }
 
     return [];
@@ -217,9 +295,17 @@ export class FilteredTreeProvider
   }
 
   private filteredFiles(session: Session): string[] {
-    return Object.entries(session.files)
-      .filter(([fp, e]) => e.reviewStatus === this.status && isInWorkspace(fp) && !isExcluded(fp))
-      .map(([fp]) => fp);
+    return Object.keys(session.files).filter(
+      (fp) => isInWorkspace(fp) && !isExcluded(fp) && this.sessionManager.hasRealPendingChange(fp)
+    );
+  }
+
+  // Accepted (newest first) / rejected (latest-per-file) records, scoped to
+  // the workspace and excludes — mirrors filteredFiles() above for records.
+  private filteredRecords(session: Session): ReviewRecord[] {
+    const records = this.status === "accepted" ? session.accepted : Object.values(session.rejected);
+    const inScope = records.filter((r) => isInWorkspace(r.path) && !isExcluded(r.path));
+    return this.status === "accepted" ? [...inScope].reverse() : inScope;
   }
 
   // Build one SessionItem per distinct session (known sessions ordered by
@@ -265,6 +351,48 @@ export class FilteredTreeProvider
     return items;
   }
 
+  // Same grouping as sessionGroups() above, keyed off ReviewRecord.sessionId /
+  // decidedAt instead of FileEntry.sessionId / capturedAt.
+  private recordSessionGroups(records: ReviewRecord[]): vscode.TreeItem[] {
+    const UNKNOWN = "__unknown__";
+    const buckets = new Map<
+      string,
+      { key: string | null; records: ReviewRecord[]; earliest: string; label: string }
+    >();
+    for (const r of records) {
+      const key = r.sessionId ?? null;
+      const mapKey = key ?? UNKNOWN;
+      const cap = r.decidedAt ?? "";
+      const b = buckets.get(mapKey);
+      if (b) {
+        b.records.push(r);
+        if (cap && (b.earliest === "" || cap < b.earliest)) b.earliest = cap;
+      } else {
+        buckets.set(mapKey, { key, records: [r], earliest: cap, label: "" });
+      }
+    }
+
+    const known = [...buckets.values()]
+      .filter((b) => b.key !== null)
+      .sort((a, b) => (a.earliest || "~").localeCompare(b.earliest || "~"));
+
+    const items: SessionItem[] = [];
+    known.forEach((b, i) => {
+      const n = i + 1;
+      const time = b.earliest
+        ? new Date(b.earliest).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+        : "";
+      b.label = time ? `Session ${n} · ${time}` : `Session ${n}`;
+    });
+    // most-recent (largest ordinal) on top
+    for (const b of [...known].reverse()) {
+      items.push(new SessionItem(b.key, b.label, b.records.length));
+    }
+    const unknown = buckets.get(UNKNOWN);
+    if (unknown) items.push(new SessionItem(null, "Unknown session", unknown.records.length));
+    return items;
+  }
+
   private directChildren(
     filePaths: string[],
     parentPath: string,
@@ -297,6 +425,41 @@ export class FilteredTreeProvider
         a.filePath.localeCompare(b.filePath)
     );
     return [...folders, ...files];
+  }
+
+  // Same directory-grouping shape as directChildren() above, but for
+  // ReviewRecord leaves (RecordReviewItem) instead of pending FileReviewItem
+  // rows. Leaves keep the caller's order (newest-first for accepted;
+  // insertion order for rejected) instead of the alphabetical + protected-
+  // first sort used for pending files, so the log ordering survives folder
+  // grouping.
+  private recordDirectChildren(
+    records: ReviewRecord[],
+    parentPath: string,
+    decision: "accepted" | "rejected",
+    showFilePath: boolean,
+    sessionId?: string | null
+  ): vscode.TreeItem[] {
+    const seenFolders = new Set<string>();
+    const folders: FolderItem[]       = [];
+    const leaves:  RecordReviewItem[] = [];
+
+    for (const r of records) {
+      const rel   = path.relative(parentPath, r.path);
+      const parts = rel.split(path.sep);
+      if (parts.length === 1) {
+        leaves.push(new RecordReviewItem(r, decision, showFilePath));
+      } else {
+        const folderPath = path.join(parentPath, parts[0]);
+        if (!seenFolders.has(folderPath)) {
+          seenFolders.add(folderPath);
+          folders.push(new FolderItem(folderPath, decision, sessionId));
+        }
+      }
+    }
+
+    folders.sort((a, b) => a.folderPath.localeCompare(b.folderPath));
+    return [...folders, ...leaves];
   }
 }
 

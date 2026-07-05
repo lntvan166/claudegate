@@ -21,22 +21,40 @@ export class ClaudeGateContentProvider
         this._onDidChange.fire(originalUri(fp));
         this._onDidChange.fire(claudeUri(fp));
       }
+      for (const r of [...session.accepted, ...Object.values(session.rejected)]) {
+        this._onDidChange.fire(recordUri(r.id, "before"));
+        this._onDidChange.fire(recordUri(r.id, "after"));
+      }
     });
   }
 
   provideTextDocumentContent(uri: vscode.Uri): string {
     const session = this.sessionManager.getSession();
     if (!session) return "";
+
+    if (uri.path === "record") {
+      const params = new URLSearchParams(uri.query);
+      const id = params.get("id") ?? "";
+      const side = params.get("side");
+      const rec = [...session.accepted, ...Object.values(session.rejected)].find((r) => r.id === id);
+      if (!rec) return "";
+      return (side === "after" ? rec.after : rec.before) ?? "";
+    }
+
     const entry = session.files[uri.path];
     if (!entry) return "";
     if (uri.query === "side=claude") {
       // files{} is pending-only now — there is no saved "after" snapshot to
-      // show here. Task 3 will repoint claudeUri (or an equivalent) at
-      // accepted[]/rejected{} records.
+      // show here. Accepted/rejected records have their own "after" snapshot,
+      // served above via the record?id=…&side=… URI (see recordUri/openReviewRecord).
       return "// Claude's version not available";
     }
     return entry.originalContent ?? "// New file — no original content";
   }
+}
+
+export function recordUri(id: string, side: "before" | "after"): vscode.Uri {
+  return vscode.Uri.parse(`${SCHEME}:record?id=${encodeURIComponent(id)}&side=${side}`);
 }
 
 export function originalUri(filePath: string): vscode.Uri {
@@ -50,8 +68,8 @@ export function claudeUri(filePath: string): vscode.Uri {
 // ─── Open diff ───────────────────────────────────────────────────────────────
 //
 // Pending → baseline (originalContent) ↔ current file on disk (the proposal).
-// files{} is pending-only now; accepted/rejected records are shown elsewhere
-// (Task 3 wires their own diff source from the accepted[]/rejected{} stores).
+// files{} is pending-only now; accepted/rejected records are shown via
+// openReviewRecord() below, diffing each record's own before/after snapshot.
 
 export async function openDiff(
   filePath: string,
@@ -86,6 +104,22 @@ export async function openDiff(
   if (entry.originalContent !== null) {
     revealFirstChange(beforeText, currentText);
   }
+}
+
+// ─── Open a record diff (Accepted / Rejected rows) ──────────────────────────
+
+export async function openReviewRecord(id: string, sessionManager: SessionManager): Promise<void> {
+  const session = sessionManager.getSession();
+  if (!session) return;
+  const rec = [...session.accepted, ...Object.values(session.rejected)].find((r) => r.id === id);
+  if (!rec) return;
+  const decision = session.accepted.includes(rec) ? "accepted" : "rejected";
+  const label = path.basename(rec.path);
+  const suffix = ` · ${formatChangeCount(countChanges(rec.before ?? "", rec.after ?? ""))}`;
+  await vscode.commands.executeCommand(
+    "vscode.diff", recordUri(rec.id, "before"), recordUri(rec.id, "after"),
+    `Claude Gate: ${label}  (${decision}${suffix})`
+  );
 }
 
 // Scroll the diff's right pane to the first changed line.

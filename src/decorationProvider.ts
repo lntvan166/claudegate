@@ -35,6 +35,10 @@ export class ClaudeGateDecorationProvider
     if (!entry) return undefined;
     if (isExcluded(uri.fsPath)) return undefined;
 
+    // files{} is pending-only now, but a pending entry may be a no-op (baseline
+    // already matches disk) — only badge genuinely pending changes.
+    if (!this.sessionManager.hasRealPendingChange(uri.fsPath)) return undefined;
+
     if (entry.reviewStatus === "pending" && isProtected(uri.fsPath)) {
       return {
         badge: "⚠",

@@ -12,7 +12,7 @@ import {
 } from "./reviewPanel";
 import { HookInstaller } from "./hookInstaller";
 import { SettingsTreeProvider, SettingsItem } from "./settingsPanel";
-import { ClaudeGateContentProvider, SCHEME, originalUri } from "./diffProvider";
+import { ClaudeGateContentProvider, SCHEME, originalUri, openReviewRecord } from "./diffProvider";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
 import { DocumentTracker } from "./documentTracker";
 import { persistWorkspaceRoots } from "./workspaceRoots";
@@ -470,6 +470,11 @@ export function activate(context: vscode.ExtensionContext): void {
     );
 
     registerOpenDiff(context, sessionManager);
+    context.subscriptions.push(
+      vscode.commands.registerCommand("claudegate.openReviewRecord", (id: string) =>
+        openReviewRecord(id, sessionManager)
+      )
+    );
 
     // ── Reactive updates ──────────────────────────────────────────────────
     context.subscriptions.push(
@@ -480,26 +485,25 @@ export function activate(context: vscode.ExtensionContext): void {
 
     sessionManager.onSessionChange((session) => {
       refreshActiveFilePendingContext(sessionManager);
-      const counts = {
-        pending:  0,
-        accepted: 0,
-        rejected: 0,
-      };
+      let pending = 0;
+      let accepted = 0;
+      let rejected = 0;
       if (session) {
-        for (const [filePath, { reviewStatus }] of Object.entries(session.files)) {
-          if (!isInWorkspace(filePath) || isExcluded(filePath)) continue;
-          counts[reviewStatus]++;
+        for (const fp of Object.keys(session.files)) {
+          if (isInWorkspace(fp) && !isExcluded(fp) && sessionManager.hasRealPendingChange(fp)) pending++;
         }
+        accepted = session.accepted.filter((r) => isInWorkspace(r.path) && !isExcluded(r.path)).length;
+        rejected = Object.values(session.rejected).filter((r) => isInWorkspace(r.path) && !isExcluded(r.path)).length;
       }
 
-      vscode.commands.executeCommand("setContext", "claudegate.acceptedCount", counts.accepted);
-      vscode.commands.executeCommand("setContext", "claudegate.rejectedCount", counts.rejected);
+      vscode.commands.executeCommand("setContext", "claudegate.acceptedCount", accepted);
+      vscode.commands.executeCommand("setContext", "claudegate.rejectedCount", rejected);
 
-      pendingView.badge = counts.pending > 0 ? { value: counts.pending, tooltip: `${counts.pending} pending file(s)` } : undefined;
+      pendingView.badge = pending > 0 ? { value: pending, tooltip: `${pending} pending file(s)` } : undefined;
 
-      badgeBar.text            = `$(shield) ${counts.pending}`;
-      badgeBar.tooltip         = `Claude Gate: ${counts.pending} pending file(s) — click to open review panel`;
-      badgeBar.backgroundColor = counts.pending > 0
+      badgeBar.text            = `$(shield) ${pending}`;
+      badgeBar.tooltip         = `Claude Gate: ${pending} pending file(s) — click to open review panel`;
+      badgeBar.backgroundColor = pending > 0
         ? new vscode.ThemeColor("statusBarItem.warningBackground")
         : undefined;
     });
