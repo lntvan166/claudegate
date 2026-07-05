@@ -260,11 +260,10 @@ export function activate(context: vscode.ExtensionContext): void {
       ),
 
       // ── Accepted file/folder actions ──
-      vscode.commands.registerCommand(
-        "claudegate.revertAccepted",
-        (item: FileReviewItem | { filePath: string }) =>
-          sessionManager.revertAccepted(item.filePath)
-      ),
+      vscode.commands.registerCommand("claudegate.revertAccepted", (item: any) => {
+        const id = typeof item === "string" ? item : item?.recordId;
+        if (id) sessionManager.revertAccepted(id);
+      }),
 
       vscode.commands.registerCommand(
         "claudegate.revertAcceptedFolder",
@@ -280,11 +279,10 @@ export function activate(context: vscode.ExtensionContext): void {
       ),
 
       // ── Rejected file/folder actions ──
-      vscode.commands.registerCommand(
-        "claudegate.reapplyFile",
-        (item: FileReviewItem | { filePath: string }) =>
-          sessionManager.reapplyFile(item.filePath)
-      ),
+      vscode.commands.registerCommand("claudegate.reapplyFile", (item: any) => {
+        const fp = typeof item === "string" ? item : item?.filePath;
+        if (fp) sessionManager.reapplyRejected(fp);
+      }),
 
       vscode.commands.registerCommand(
         "claudegate.reapplyFolder",

@@ -3,7 +3,6 @@ import * as path from "path";
 import { diffLines } from "diff";
 import { SessionManager } from "./sessionManager";
 import { countChanges, formatChangeCount } from "./changeCount";
-import { chooseRightSide } from "./diffPlan";
 
 export const SCHEME = "claudegate";
 
@@ -31,7 +30,10 @@ export class ClaudeGateContentProvider
     const entry = session.files[uri.path];
     if (!entry) return "";
     if (uri.query === "side=claude") {
-      return entry.claudeContent ?? "// Claude's version not available";
+      // files{} is pending-only now — there is no saved "after" snapshot to
+      // show here. Task 3 will repoint claudeUri (or an equivalent) at
+      // accepted[]/rejected{} records.
+      return "// Claude's version not available";
     }
     return entry.originalContent ?? "// New file — no original content";
   }
@@ -47,11 +49,9 @@ export function claudeUri(filePath: string): vscode.Uri {
 
 // ─── Open diff ───────────────────────────────────────────────────────────────
 //
-// Pending  → baseline (originalContent) ↔ current file on disk (the proposal).
-// Accepted → baseline ↔ claudeContent (what you accepted): the working file no
-//            longer differs, so diff the saved "after" snapshot instead.
-// Rejected → baseline ↔ claudeContent (what you threw away): the file was
-//            restored to baseline on disk, so again use the saved snapshot.
+// Pending → baseline (originalContent) ↔ current file on disk (the proposal).
+// files{} is pending-only now; accepted/rejected records are shown elsewhere
+// (Task 3 wires their own diff source from the accepted[]/rejected{} stores).
 
 export async function openDiff(
   filePath: string,
@@ -65,22 +65,7 @@ export async function openDiff(
   const beforeUri = originalUri(filePath);
   const beforeText = entry.originalContent ?? "";
 
-  // Reviewed files: show the saved before → after snapshot, independent of what
-  // is on disk now (accept left the "after" in place, reject reverted it).
-  if (chooseRightSide(entry.reviewStatus, entry.claudeContent != null) === "claude") {
-    const afterText = entry.claudeContent ?? "";
-    const verb = entry.reviewStatus === "accepted" ? "accepted" : "rejected";
-    const suffix = ` · ${formatChangeCount(countChanges(beforeText, afterText))}`;
-    const title =
-      entry.originalContent === null
-        ? `Claude Gate: ${label}  (${verb} — new file${suffix})`
-        : `Claude Gate: ${label}  (${verb}${suffix})`;
-    await vscode.commands.executeCommand("vscode.diff", beforeUri, claudeUri(filePath), title);
-    revealFirstChange(beforeText, afterText);
-    return;
-  }
-
-  // Pending (or a reviewed entry with no saved snapshot): baseline ↔ disk.
+  // Pending: baseline ↔ disk.
   const currentUri = vscode.Uri.file(filePath);
   let currentText = "";
   let suffix = "";

@@ -4,23 +4,12 @@ import * as path from "path";
 import * as os from "os";
 import * as crypto from "crypto";
 import { isInWorkspace, isExcluded } from "./workspaceScope";
-
-export type ReviewStatus = "pending" | "accepted" | "rejected";
-export type SessionStatus = "active" | "reviewed";
-
-export interface FileEntry {
-  originalContent: string | null;
-  claudeContent?: string | null; // saved at reject time so the action can be undone
-  reviewStatus: ReviewStatus;
-  sessionId?: string;  // Claude session_id that produced this change (hook path only)
-  capturedAt?: string; // ISO timestamp of first capture
-}
-
-export interface Session {
-  sessionId: string;
-  status: SessionStatus;
-  files: Record<string, FileEntry>;
-}
+import {
+  Session, FileEntry, ReviewRecord, hasRealChange, acceptEntry, rejectEntry,
+  migrateSession, makeRecordId,
+} from "./reviewModel";
+export type { Session, FileEntry, ReviewRecord } from "./reviewModel";
+export type ReviewStatus = "pending" | "accepted" | "rejected"; // panel tab id
 
 // A pending "new file" (originalContent === null) whose path has vanished was a
 // temp file Claude created and then removed — there is nothing left to review,
@@ -92,10 +81,18 @@ export class SessionManager {
     this._onSessionChange.fire(this.session);
   }
 
+  // A pending entry is a "real" change unless its baseline already equals the
+  // current disk content (a no-op edit, or an edit that was undone by hand).
+  hasRealPendingChange(filePath: string): boolean {
+    const entry = this.session?.files[filePath];
+    if (!entry) return false;
+    return hasRealChange(entry.originalContent, this.readFileOrNull(filePath));
+  }
+
   getPendingCount(): number {
     if (!this.session) return 0;
-    return Object.entries(this.session.files).filter(
-      ([fp, f]) => f.reviewStatus === "pending" && isInWorkspace(fp) && !isExcluded(fp)
+    return Object.keys(this.session.files).filter(
+      (fp) => isInWorkspace(fp) && !isExcluded(fp) && this.hasRealPendingChange(fp)
     ).length;
   }
 
@@ -106,150 +103,116 @@ export class SessionManager {
         sessionId: new Date().toISOString(),
         status: "active",
         files: {},
+        accepted: [],
+        rejected: {},
       };
     }
 
-    const entry = this.session.files[filePath];
+    // files{} is pending-only now: if the path is already tracked, its
+    // originalContent is the frozen review baseline — never overwrite it here.
+    if (this.session.files[filePath]) return;
 
-    // If file not yet in session, add it
-    if (!entry) {
-      this.session.files[filePath] = {
-        originalContent,
-        reviewStatus: "pending",
-      };
-      // Reset session status from "reviewed" to "active" if needed
-      if (this.session.status === "reviewed") {
-        this.session.status = "active";
-      }
-      this.log.appendLine(`[INFO] Tracking: ${filePath}`);
-      this.persist();
-      return;
-    }
-
-    // INVARIANT: a pending entry's originalContent is the frozen review
-    // baseline — never overwrite it here. It advances only on accept
-    // (checkpoint) or when a previously accepted/rejected file is re-edited.
-
-    // If already pending, no-op
-    if (entry.reviewStatus === "pending") {
-      return;
-    }
-
-    // If accepted or rejected, reset to pending
-    if (entry.reviewStatus === "accepted" || entry.reviewStatus === "rejected") {
-      entry.originalContent = originalContent;
-      entry.reviewStatus = "pending";
-      entry.claudeContent = undefined;
+    this.session.files[filePath] = {
+      originalContent,
+      reviewStatus: "pending",
+    };
+    // Reset session status from "reviewed" to "active" if needed
+    if (this.session.status === "reviewed") {
       this.session.status = "active";
-      this.log.appendLine(`[INFO] Re-tracking: ${filePath}`);
-      this.persist();
     }
+    this.log.appendLine(`[INFO] Tracking: ${filePath}`);
+    this.persist();
   }
 
   acceptFile(filePath: string): void {
     const entry = this.session?.files[filePath];
-    if (!entry || entry.reviewStatus !== "pending") return;
-    // Snapshot the accepted content as the "after" side so the Accepted panel
-    // can show original → accepted. originalContent stays the pre-accept
-    // baseline; the checkpoint re-advances on the next edit (hook/trackFileChange
-    // re-snapshot the current on-disk state), so it is not advanced here.
-    const current = this.readFileOrNull(filePath);
-    if (current === null) {
+    if (!entry) return;
+    // Snapshot the accepted content as the record's "after" side so the
+    // Accepted panel can show before → after.
+    const after = this.readFileOrNull(filePath);
+    if (after === null) {
       this.log.appendLine(`[WARN] Accept: could not read ${filePath}; accepted diff unavailable`);
     }
-    entry.claudeContent = current;
-    entry.reviewStatus = "accepted";
-    this.log.appendLine(`[INFO] ` + `Accepted: ${filePath}`);
+    acceptEntry(this.session!, filePath, after, new Date().toISOString());
+    this.log.appendLine(`[INFO] Accepted: ${filePath}`);
     this.persist();
   }
 
   acceptFolder(folderPath: string): void {
-    if (!this.session) return;
+    const s = this.session;
+    if (!s) return;
     const prefix = folderPath + path.sep;
+    const decidedAt = new Date().toISOString();
     let count = 0;
-    for (const [fp, entry] of Object.entries(this.session.files)) {
-      if (fp.startsWith(prefix) && entry.reviewStatus === "pending" && !isExcluded(fp)) {
-        const current = this.readFileOrNull(fp);
-        if (current === null) this.log.appendLine(`[WARN] Accept folder: could not read ${fp}; accepted diff unavailable`);
-        entry.claudeContent = current;
-        entry.reviewStatus = "accepted";
-        count++;
-      }
+    for (const fp of Object.keys(s.files)) {
+      if (!fp.startsWith(prefix) || isExcluded(fp)) continue;
+      const after = this.readFileOrNull(fp);
+      if (after === null) this.log.appendLine(`[WARN] Accept folder: could not read ${fp}; accepted diff unavailable`);
+      acceptEntry(s, fp, after, decidedAt);
+      count++;
     }
     if (count === 0) return;
     this.log.appendLine(`[INFO] Accepted folder: ${folderPath} (${count} file(s))`);
     this.persist();
   }
 
-  revertAccepted(filePath: string): void {
+  acceptAll(): void {
+    const s = this.session;
+    if (!s) return;
+    const decidedAt = new Date().toISOString();
+    let count = 0;
+    for (const fp of Object.keys(s.files)) {
+      if (!isInWorkspace(fp) || isExcluded(fp)) continue;
+      const after = this.readFileOrNull(fp);
+      if (after === null) this.log.appendLine(`[WARN] Accept all: could not read ${fp}; accepted diff unavailable`);
+      acceptEntry(s, fp, after, decidedAt);
+      count++;
+    }
+    this.log.appendLine(`[INFO] Accepted all: ${count} file(s)`);
+    this.persist();
+  }
+
+  rejectFile(filePath: string): void {
     const entry = this.session?.files[filePath];
-    if (!entry || entry.reviewStatus !== "accepted") return;
-    entry.reviewStatus = "pending";
-    entry.claudeContent = undefined;
-    this.log.appendLine(`[INFO] Reverted accepted: ${filePath}`);
-    this.persist();
-  }
-
-  revertAcceptedAll(): void {
-    if (!this.session) return;
-    let count = 0;
-    for (const entry of Object.values(this.session.files)) {
-      if (entry.reviewStatus === "accepted") {
-        entry.reviewStatus = "pending";
-        entry.claudeContent = undefined;
-        count++;
-      }
+    if (!entry) return;
+    const after = this.readFileOrNull(filePath); // Claude's discarded version
+    try {
+      if (entry.originalContent === null) fs.unlinkSync(filePath);
+      else fs.writeFileSync(filePath, entry.originalContent, "utf-8");
+    } catch (err) {
+      this.log.appendLine(`[ERROR] reject ${filePath}: ${(err as Error).message}`);
+      vscode.window.showErrorMessage(
+        `Claude Gate: Could not restore ${path.basename(filePath)} — ${(err as Error).message}`
+      );
+      return;
     }
-    if (count === 0) return;
-    this.log.appendLine(`[INFO] Reverted all accepted: ${count} file(s)`);
-    this.persist();
-  }
-
-  revertAcceptedFolder(folderPath: string): void {
-    if (!this.session) return;
-    const prefix = folderPath + path.sep;
-    let count = 0;
-    for (const [fp, entry] of Object.entries(this.session.files)) {
-      if (fp.startsWith(prefix) && entry.reviewStatus === "accepted") {
-        entry.reviewStatus = "pending";
-        entry.claudeContent = undefined;
-        count++;
-      }
-    }
-    if (count === 0) return;
-    this.log.appendLine(`[INFO] Reverted accepted folder: ${folderPath} (${count} file(s))`);
+    rejectEntry(this.session!, filePath, after, new Date().toISOString());
+    this.log.appendLine(`[INFO] Rejected: ${filePath}`);
     this.persist();
   }
 
   rejectFolder(folderPath: string): void {
-    if (!this.session) return;
+    const s = this.session;
+    if (!s) return;
     const prefix = folderPath + path.sep;
+    const decidedAt = new Date().toISOString();
     const errors: string[] = [];
     let count = 0;
 
-    for (const [fp, entry] of Object.entries(this.session.files)) {
-      if (!fp.startsWith(prefix) || entry.reviewStatus !== "pending" || isExcluded(fp)) continue;
-      let savedClaudeContent: string | null;
+    for (const fp of Object.keys(s.files)) {
+      if (!fp.startsWith(prefix) || isExcluded(fp)) continue;
+      const entry = s.files[fp];
+      const after = this.readFileOrNull(fp);
       try {
-        savedClaudeContent = fs.readFileSync(fp, "utf-8");
-      } catch {
-        savedClaudeContent = null;
-      }
-      try {
-        if (entry.originalContent === null) {
-          fs.unlinkSync(fp);
-        } else {
-          fs.writeFileSync(fp, entry.originalContent, "utf-8");
-        }
-        entry.claudeContent = savedClaudeContent;
-        entry.reviewStatus = "rejected";
-        count++;
+        if (entry.originalContent === null) fs.unlinkSync(fp);
+        else fs.writeFileSync(fp, entry.originalContent, "utf-8");
       } catch (err) {
         errors.push(`${path.basename(fp)}: ${(err as Error).message}`);
-        this.log.appendLine(
-          `[ERROR] rejectFolder failed for ${fp}: ${(err as Error).message}`
-        );
+        this.log.appendLine(`[ERROR] rejectFolder failed for ${fp}: ${(err as Error).message}`);
+        continue;
       }
+      rejectEntry(s, fp, after, decidedAt);
+      count++;
     }
 
     if (count === 0 && errors.length === 0) return;
@@ -262,177 +225,6 @@ export class SessionManager {
     }
   }
 
-  rejectFile(filePath: string): void {
-    const entry = this.session?.files[filePath];
-    if (!entry || entry.reviewStatus !== "pending") return;
-
-    // Save Claude's version before overwriting so the reject can be undone
-    try {
-      entry.claudeContent = fs.readFileSync(filePath, "utf-8");
-    } catch {
-      entry.claudeContent = null;
-    }
-
-    try {
-      if (entry.originalContent === null) {
-        fs.unlinkSync(filePath);
-        this.log.appendLine(`[INFO] ` + `Deleted new file: ${filePath}`);
-      } else {
-        fs.writeFileSync(filePath, entry.originalContent, "utf-8");
-        this.log.appendLine(`[INFO] ` + `Restored: ${filePath}`);
-      }
-    } catch (err) {
-      this.log.appendLine(`[ERROR] ` + `Failed to reject ${filePath}: ${(err as Error).message}`);
-      vscode.window.showErrorMessage(
-        `Claude Gate: Could not restore ${path.basename(filePath)} — ${(err as Error).message}`
-      );
-      return;
-    }
-
-    entry.reviewStatus = "rejected";
-    this.persist();
-  }
-
-  reapplyFile(filePath: string): void {
-    const entry = this.session?.files[filePath];
-    if (!entry || entry.reviewStatus !== "rejected") return;
-    if (entry.claudeContent === undefined) {
-      vscode.window.showWarningMessage(
-        `Claude Gate: Cannot re-apply — reject this file first with the updated extension.`
-      );
-      return;
-    }
-
-    try {
-      if (entry.claudeContent === null) {
-        // Claude had created a new file that we deleted — nothing to restore
-        vscode.window.showWarningMessage(
-          `Claude Gate: Cannot re-apply — Claude's version of "${path.basename(filePath)}" was not saved.`
-        );
-        return;
-      }
-      fs.writeFileSync(filePath, entry.claudeContent, "utf-8");
-      this.log.appendLine(`[INFO] ` + `Re-applied Claude's version: ${filePath}`);
-    } catch (err) {
-      this.log.appendLine(`[ERROR] ` + `Failed to re-apply ${filePath}: ${(err as Error).message}`);
-      vscode.window.showErrorMessage(
-        `Claude Gate: Could not re-apply ${path.basename(filePath)} — ${(err as Error).message}`
-      );
-      return;
-    }
-
-    entry.reviewStatus = "pending"; // back to pending so user can review again
-    entry.claudeContent = undefined;
-    this.persist();
-  }
-
-  reapplyAll(): void {
-    if (!this.session) return;
-    const errors: string[] = [];
-    let count = 0;
-
-    for (const [fp, entry] of Object.entries(this.session.files)) {
-      if (entry.reviewStatus !== "rejected" || isExcluded(fp)) continue;
-      if (entry.claudeContent === undefined) {
-        this.log.appendLine(`[WARN] reapplyAll skipped ${fp}: no claudeContent`);
-        continue;
-      }
-      if (entry.claudeContent === null) {
-        this.log.appendLine(`[WARN] reapplyAll skipped ${fp}: Claude created new file, nothing to restore`);
-        continue;
-      }
-      try {
-        fs.writeFileSync(fp, entry.claudeContent, "utf-8");
-        entry.reviewStatus = "pending";
-        entry.claudeContent = undefined;
-        count++;
-      } catch (err) {
-        errors.push(`${path.basename(fp)}: ${(err as Error).message}`);
-        this.log.appendLine(`[ERROR] reapplyAll failed for ${fp}: ${(err as Error).message}`);
-      }
-    }
-
-    if (count === 0 && errors.length === 0) return;
-    this.persist();
-    this.log.appendLine(`[INFO] Reapplied all: ${count} file(s)`);
-    if (errors.length > 0) {
-      vscode.window.showErrorMessage(
-        `Claude Gate: Could not re-apply ${errors.length} file(s). Check Output panel for details.`
-      );
-    }
-  }
-
-  reapplyFolder(folderPath: string): void {
-    if (!this.session) return;
-    const prefix = folderPath + path.sep;
-    const errors: string[] = [];
-    let count = 0;
-
-    for (const [fp, entry] of Object.entries(this.session.files)) {
-      if (!fp.startsWith(prefix) || entry.reviewStatus !== "rejected" || isExcluded(fp)) continue;
-      if (entry.claudeContent === undefined) {
-        this.log.appendLine(`[WARN] reapplyFolder skipped ${fp}: no claudeContent`);
-        continue;
-      }
-      if (entry.claudeContent === null) {
-        this.log.appendLine(`[WARN] reapplyFolder skipped ${fp}: Claude created new file, nothing to restore`);
-        continue;
-      }
-      try {
-        fs.writeFileSync(fp, entry.claudeContent, "utf-8");
-        entry.reviewStatus = "pending";
-        entry.claudeContent = undefined;
-        count++;
-      } catch (err) {
-        errors.push(`${path.basename(fp)}: ${(err as Error).message}`);
-        this.log.appendLine(`[ERROR] reapplyFolder failed for ${fp}: ${(err as Error).message}`);
-      }
-    }
-
-    if (count === 0 && errors.length === 0) return;
-    this.persist();
-    this.log.appendLine(`[INFO] Reapplied folder: ${folderPath} (${count} file(s))`);
-    if (errors.length > 0) {
-      vscode.window.showErrorMessage(
-        `Claude Gate: Could not re-apply ${errors.length} file(s). Check Output panel for details.`
-      );
-    }
-  }
-
-  // Mark rejected without writing to disk (used after inline diff already wrote the file)
-  markRejected(filePath: string): void {
-    const entry = this.session?.files[filePath];
-    if (!entry || entry.reviewStatus !== "pending") return;
-    let savedClaudeContent: string | null;
-    try {
-      savedClaudeContent = fs.readFileSync(filePath, "utf-8");
-    } catch {
-      savedClaudeContent = null;
-    }
-    if (entry.originalContent === null) {
-      try { fs.unlinkSync(filePath); } catch { /* already gone */ }
-    }
-    entry.claudeContent = savedClaudeContent;
-    entry.reviewStatus = "rejected";
-    this.persist();
-  }
-
-  acceptAll(): void {
-    if (!this.session) return;
-    let count = 0;
-    for (const [filePath, entry] of Object.entries(this.session.files)) {
-      if (entry.reviewStatus === "pending" && isInWorkspace(filePath) && !isExcluded(filePath)) {
-        const current = this.readFileOrNull(filePath);
-        if (current === null) this.log.appendLine(`[WARN] Accept all: could not read ${filePath}; accepted diff unavailable`);
-        entry.claudeContent = current;
-        entry.reviewStatus = "accepted";
-        count++;
-      }
-    }
-    this.log.appendLine(`[INFO] ` + `Accepted all: ${count} file(s)`);
-    this.persist();
-  }
-
   // Known limitation: hook.py and the extension both read-modify-write the
   // same JSON file without a cross-process lock. Atomic rename prevents torn
   // reads, but a concurrent hook.py write can still overwrite accept/reject
@@ -440,36 +232,31 @@ export class SessionManager {
   // in normal single-user use; the long-term fix is a version/timestamp check.
 
   rejectAll(): void {
-    if (!this.session) return;
-    let count = 0;
+    const s = this.session;
+    if (!s) return;
+    const decidedAt = new Date().toISOString();
     const errors: string[] = [];
+    let count = 0;
 
-    for (const [filePath, entry] of Object.entries(this.session.files)) {
-      if (entry.reviewStatus !== "pending" || !isInWorkspace(filePath) || isExcluded(filePath)) continue;
-      let savedClaudeContent: string | null;
+    for (const fp of Object.keys(s.files)) {
+      if (!isInWorkspace(fp) || isExcluded(fp)) continue;
+      const entry = s.files[fp];
+      const after = this.readFileOrNull(fp);
       try {
-        savedClaudeContent = fs.readFileSync(filePath, "utf-8");
-      } catch {
-        savedClaudeContent = null;
-      }
-      try {
-        if (entry.originalContent === null) {
-          fs.unlinkSync(filePath);
-        } else {
-          fs.writeFileSync(filePath, entry.originalContent, "utf-8");
-        }
-        entry.claudeContent = savedClaudeContent;
-        entry.reviewStatus = "rejected";
-        count++;
+        if (entry.originalContent === null) fs.unlinkSync(fp);
+        else fs.writeFileSync(fp, entry.originalContent, "utf-8");
       } catch (err) {
-        errors.push(`${path.basename(filePath)}: ${(err as Error).message}`);
-        this.log.appendLine(`[ERROR] ` + `rejectAll failed for ${filePath}: ${(err as Error).message}`);
+        errors.push(`${path.basename(fp)}: ${(err as Error).message}`);
+        this.log.appendLine(`[ERROR] rejectAll failed for ${fp}: ${(err as Error).message}`);
+        continue;
       }
+      rejectEntry(s, fp, after, decidedAt);
+      count++;
     }
 
     if (count === 0 && errors.length === 0) return;
     this.persist();
-    this.log.appendLine(`[INFO] ` + `Rejected all: ${count} file(s)`);
+    this.log.appendLine(`[INFO] Rejected all: ${count} file(s)`);
 
     if (errors.length > 0) {
       vscode.window.showErrorMessage(
@@ -479,37 +266,114 @@ export class SessionManager {
   }
 
   removePendingFile(filePath: string): void {
-    const entry = this.session?.files[filePath];
-    if (!entry || entry.reviewStatus !== "pending") return;
-    delete this.session!.files[filePath];
+    if (!this.session?.files[filePath]) return;
+    delete this.session.files[filePath];
     this.persist();
   }
 
+  // ── Accepted log: undo ──────────────────────────────────────────────────
+
+  // Shared mutation for reverting one accepted record; callers persist().
+  private revertAcceptedRecord(rec: ReviewRecord): void {
+    const s = this.session!;
+    const idx = s.accepted.findIndex((r) => r.id === rec.id);
+    if (idx !== -1) s.accepted.splice(idx, 1);
+    // Only reopen as pending if there is no pending entry already and this
+    // record is still the file's on-disk state (it wasn't re-edited since).
+    if (!s.files[rec.path] && this.readFileOrNull(rec.path) === rec.after) {
+      s.files[rec.path] = { originalContent: rec.before, reviewStatus: "pending", sessionId: rec.sessionId };
+    }
+  }
+
+  revertAccepted(id: string): void {
+    const s = this.session;
+    if (!s) return;
+    const rec = s.accepted.find((r) => r.id === id);
+    if (!rec) return;
+    this.revertAcceptedRecord(rec);
+    this.log.appendLine(`[INFO] Reverted accepted: ${rec.path}`);
+    this.persist();
+  }
+
+  revertAcceptedAll(): void {
+    const s = this.session;
+    if (!s) return;
+    const recs = [...s.accepted];
+    if (recs.length === 0) return;
+    for (const rec of recs) this.revertAcceptedRecord(rec);
+    this.log.appendLine(`[INFO] Reverted all accepted: ${recs.length} file(s)`);
+    this.persist();
+  }
+
+  revertAcceptedFolder(folderPath: string): void {
+    const s = this.session;
+    if (!s) return;
+    const prefix = folderPath + path.sep;
+    const recs = s.accepted.filter((r) => r.path.startsWith(prefix));
+    if (recs.length === 0) return;
+    for (const rec of recs) this.revertAcceptedRecord(rec);
+    this.log.appendLine(`[INFO] Reverted accepted folder: ${folderPath} (${recs.length} file(s))`);
+    this.persist();
+  }
+
+  // ── Rejected store (latest-per-file): re-apply ──────────────────────────
+
+  reapplyRejected(filePath: string): void {
+    const s = this.session;
+    const rec = s?.rejected[filePath];
+    if (!s || !rec) return;
+    if (rec.after == null) {
+      vscode.window.showWarningMessage(
+        `Claude Gate: Cannot re-apply — Claude's version of "${path.basename(filePath)}" was not saved.`
+      );
+      return;
+    }
+    try {
+      fs.writeFileSync(filePath, rec.after, "utf-8");
+    } catch (err) {
+      vscode.window.showErrorMessage(
+        `Claude Gate: Could not re-apply ${path.basename(filePath)} — ${(err as Error).message}`
+      );
+      return;
+    }
+    delete s.rejected[filePath];
+    s.files[filePath] = { originalContent: rec.before, reviewStatus: "pending", sessionId: rec.sessionId };
+    this.log.appendLine(`[INFO] Re-applied: ${filePath}`);
+    this.persist();
+  }
+
+  reapplyAll(): void {
+    const s = this.session;
+    if (!s) return;
+    const paths = Object.keys(s.rejected).filter((fp) => !isExcluded(fp));
+    for (const fp of paths) this.reapplyRejected(fp);
+  }
+
+  reapplyFolder(folderPath: string): void {
+    const s = this.session;
+    if (!s) return;
+    const prefix = folderPath + path.sep;
+    const paths = Object.keys(s.rejected).filter((fp) => fp.startsWith(prefix) && !isExcluded(fp));
+    for (const fp of paths) this.reapplyRejected(fp);
+  }
+
+  // ── Clear ────────────────────────────────────────────────────────────────
+
   clearAccepted(): void {
     if (!this.session) return;
-    let count = 0;
-    for (const [filePath, entry] of Object.entries(this.session.files)) {
-      if (entry.reviewStatus === "accepted") {
-        delete this.session.files[filePath];
-        count++;
-      }
-    }
+    const count = this.session.accepted.length;
     if (count === 0) return;
-    this.log.appendLine(`[INFO] Cleared accepted: ${count} file(s)`);
+    this.session.accepted = [];
+    this.log.appendLine(`[INFO] Cleared accepted: ${count} record(s)`);
     this.persist();
   }
 
   clearRejected(): void {
     if (!this.session) return;
-    let count = 0;
-    for (const [filePath, entry] of Object.entries(this.session.files)) {
-      if (entry.reviewStatus === "rejected") {
-        delete this.session.files[filePath];
-        count++;
-      }
-    }
+    const count = Object.keys(this.session.rejected).length;
     if (count === 0) return;
-    this.log.appendLine(`[INFO] Cleared rejected: ${count} file(s)`);
+    this.session.rejected = {};
+    this.log.appendLine(`[INFO] Cleared rejected: ${count} record(s)`);
     this.persist();
   }
 
@@ -526,10 +390,16 @@ export class SessionManager {
 
   private loadSession(): void {
     try {
-      const raw = fs.readFileSync(this.sessionPath, "utf-8");
-      this.session = JSON.parse(raw) as Session;
-      this.log.appendLine(`[INFO] Session loaded: ${Object.keys(this.session.files).length} file(s), status=${this.session.status}`);
+      const raw = JSON.parse(fs.readFileSync(this.sessionPath, "utf-8"));
+      const migrated = migrateSession(raw);
+      const changed = JSON.stringify(migrated) !== JSON.stringify(raw);
+      this.session = migrated;
+      this.log.appendLine(
+        `[INFO] Session loaded: ${Object.keys(this.session.files).length} pending, ` +
+        `${this.session.accepted.length} accepted, ${Object.keys(this.session.rejected).length} rejected`
+      );
       this.pruneOutOfWorkspaceEntries();
+      if (changed) this.persist();
     } catch {
       this.session = null;
     }
@@ -564,11 +434,7 @@ export class SessionManager {
     if (!this.session) return;
     let removed = 0;
     for (const [filePath, entry] of Object.entries(this.session.files)) {
-      if (
-        entry.reviewStatus === "pending" &&
-        entry.originalContent === null &&
-        !fs.existsSync(filePath)
-      ) {
+      if (entry.originalContent === null && !fs.existsSync(filePath)) {
         delete this.session.files[filePath];
         removed++;
         this.log.appendLine(`[INFO] Pruned vanished new file: ${filePath}`);
@@ -578,7 +444,7 @@ export class SessionManager {
   }
 
   // Read a file's current content, or null if it cannot be read. Used to
-  // checkpoint the review baseline at approve time.
+  // checkpoint the review baseline at approve/reject time.
   private readFileOrNull(filePath: string): string | null {
     try {
       return fs.readFileSync(filePath, "utf-8");
@@ -590,12 +456,9 @@ export class SessionManager {
   private persist(): void {
     if (!this.session) return;
 
-    const allDone = Object.values(this.session.files).every(
-      (f) => f.reviewStatus !== "pending"
-    );
-    if (allDone) {
-      this.session.status = "reviewed";
-    }
+    // No pending entries left → the session is fully reviewed; any pending
+    // entry (added by the hook, or reopened by revert/re-apply) reactivates it.
+    this.session.status = Object.keys(this.session.files).length === 0 ? "reviewed" : "active";
 
     try {
       this.atomicWrite(this.sessionPath, JSON.stringify(this.session, null, 2));
