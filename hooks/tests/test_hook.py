@@ -52,9 +52,22 @@ class HookBaselineTest(unittest.TestCase):
         with open(self.session_file, "w") as f:
             json.dump(session, f)
 
-    def read_entry(self):
+    def write_full_session(self, files=None, accepted=None, rejected=None):
+        session = {
+            "sessionId": "t", "status": "active",
+            "files": files or {},
+            "accepted": accepted or [],
+            "rejected": rejected or {},
+        }
+        with open(self.session_file, "w") as f:
+            json.dump(session, f)
+
+    def read_session(self):
         with open(self.session_file) as f:
-            return json.load(f)["files"][self.file]
+            return json.load(f)
+
+    def read_entry(self):
+        return self.read_session()["files"][self.file]
 
     def test_new_file_records_current_as_original(self):
         with open(self.file, "w") as f:
@@ -95,6 +108,58 @@ class HookBaselineTest(unittest.TestCase):
         entry = self.read_entry()
         self.assertEqual(entry["sessionId"], "s-123")
         self.assertTrue(entry.get("capturedAt"))
+
+    # ── Review-log model: re-editing a decided file (the "soul" path) ──────────
+
+    def test_reedit_after_accept_creates_pending_and_keeps_log(self):
+        # New model: an accepted file is NOT in files{}; it lives in accepted[].
+        # Claude editing it again must create a FRESH pending entry (baseline =
+        # the accepted content now on disk) WITHOUT disturbing the accepted log.
+        record = {"id": "t::a", "path": self.file, "before": "v0",
+                  "after": "v1", "decidedAt": "t"}
+        self.write_full_session(files={}, accepted=[record])
+        with open(self.file, "w") as f:
+            f.write("v1")  # the accepted content, present before Claude's next write
+        self.run_hook()
+        session = self.read_session()
+        self.assertIn(self.file, session["files"], "re-edit must create a pending entry")
+        self.assertEqual(session["files"][self.file]["originalContent"], "v1")
+        self.assertEqual(session["files"][self.file]["reviewStatus"], "pending")
+        self.assertEqual(session["accepted"], [record], "accepted log must be preserved")
+
+    def test_reedit_after_reject_creates_pending_and_keeps_log(self):
+        # A rejected file lives in rejected{} (restored on disk), not files{}.
+        record = {"id": "t::r", "path": self.file, "before": "v0",
+                  "after": "bad", "decidedAt": "t"}
+        self.write_full_session(files={}, rejected={self.file: record})
+        with open(self.file, "w") as f:
+            f.write("v0")  # disk was restored to baseline at reject time
+        self.run_hook()
+        session = self.read_session()
+        self.assertEqual(session["files"][self.file]["reviewStatus"], "pending")
+        self.assertEqual(session["files"][self.file]["originalContent"], "v0")
+        self.assertEqual(session["rejected"], {self.file: record},
+                         "rejected store must be preserved")
+
+    def test_hook_never_writes_decision_stores(self):
+        # A brand-new capture must leave accepted[]/rejected{} exactly as found.
+        acc = [{"id": "t::x", "path": "/other", "before": "a", "after": "b", "decidedAt": "t"}]
+        self.write_full_session(files={}, accepted=acc, rejected={})
+        with open(self.file, "w") as f:
+            f.write("v0")
+        self.run_hook()
+        session = self.read_session()
+        self.assertEqual(session["accepted"], acc)
+        self.assertEqual(session["rejected"], {})
+
+    def test_new_session_has_log_stores(self):
+        # No session yet → the hook creates one already matching the schema.
+        with open(self.file, "w") as f:
+            f.write("v0")
+        self.run_hook()
+        session = self.read_session()
+        self.assertEqual(session["accepted"], [])
+        self.assertEqual(session["rejected"], {})
 
 
 if __name__ == "__main__":

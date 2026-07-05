@@ -7,12 +7,16 @@ function base(): Session {
   return { sessionId: "s", status: "active", files: {}, accepted: [], rejected: {} };
 }
 
-// hasRealChange
+// hasRealChange — this predicate decides both the reconcile no-op prune and the
+// action-path guards, so its edges matter for Pending stability.
 assert.equal(hasRealChange("a", "a"), false, "equal → no change");
 assert.equal(hasRealChange("a", "b"), true, "differ → change");
 assert.equal(hasRealChange(null, "x"), true, "new file present → change");
 assert.equal(hasRealChange(null, null), false, "new file absent → no change");
-console.log("ok - hasRealChange");
+assert.equal(hasRealChange(null, ""), true, "new EMPTY file present → real change (created)");
+assert.equal(hasRealChange("", ""), false, "empty baseline == empty disk → no change");
+assert.equal(hasRealChange("a\n", "a"), true, "trailing-newline difference → real change");
+console.log("ok - hasRealChange (incl. empty/new-file/newline edges)");
 
 // accept appends a record and clears the pending entry
 {
@@ -74,5 +78,34 @@ console.log("ok - hasRealChange");
 assert.equal(makeRecordId("t", "/p"), "t::/p");
 assert.notEqual(makeRecordId("t1", "/p"), makeRecordId("t2", "/p"));
 console.log("ok - makeRecordId");
+
+// SOUL PATH: an accepted file re-edited by Claude must coexist — the accepted
+// record persists AND a fresh pending entry appears for the same path.
+{
+  const s = base();
+  s.files["/f"] = { originalContent: "A", reviewStatus: "pending" };
+  acceptEntry(s, "/f", "B", "t1");                 // accept A→B
+  assert.equal(s.files["/f"], undefined, "accepted file leaves files{}");
+  assert.equal(s.accepted.length, 1);
+  // hook re-tracks the re-edit: a new pending entry, baseline = accepted content
+  s.files["/f"] = { originalContent: "B", reviewStatus: "pending" };
+  assert.ok(s.files["/f"], "re-edit re-enters files{} as pending");
+  assert.equal(s.accepted.length, 1, "prior accepted record is NOT lost");
+  assert.equal(s.accepted[0].after, "B", "accepted after == the new pending baseline (checkpoint chain)");
+  console.log("ok - re-edit of an accepted file coexists (Pending + Accepted log)");
+}
+
+// A rejected file re-edited: rejected record kept, fresh pending entry appears.
+{
+  const s = base();
+  s.files["/f"] = { originalContent: "A", reviewStatus: "pending" };
+  rejectEntry(s, "/f", "bad", "t1");
+  assert.equal(s.files["/f"], undefined);
+  assert.ok(s.rejected["/f"]);
+  s.files["/f"] = { originalContent: "A", reviewStatus: "pending" };  // re-edit after restore
+  assert.ok(s.rejected["/f"], "prior rejected record is NOT lost");
+  assert.ok(s.files["/f"], "re-edit re-enters files{} as pending");
+  console.log("ok - re-edit of a rejected file coexists (Pending + Rejected)");
+}
 
 console.log("done");

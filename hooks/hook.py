@@ -72,6 +72,10 @@ def new_session() -> dict:
         "sessionId": datetime.now(timezone.utc).isoformat(),
         "status": "active",
         "files": {},
+        # The extension owns these decision stores; initialize them so a
+        # hook-created session already matches the schema (no migration re-write).
+        "accepted": [],
+        "rejected": {},
     }
 
 
