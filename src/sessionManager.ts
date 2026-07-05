@@ -6,7 +6,7 @@ import * as crypto from "crypto";
 import { isInWorkspace, isExcluded } from "./workspaceScope";
 import {
   Session, FileEntry, ReviewRecord, hasRealChange, shouldPruneNoOp, acceptEntry,
-  rejectEntry, migrateSession,
+  rejectEntry, migrateSession, mergeFreshCaptures,
 } from "./reviewModel";
 export type { Session, FileEntry, ReviewRecord } from "./reviewModel";
 export type ReviewStatus = "pending" | "accepted" | "rejected"; // panel tab id
@@ -26,6 +26,8 @@ export class SessionManager {
   private session: Session | null = null;
   private watcher: fs.FSWatcher | null = null;
   private reconcileTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastLoadedAtMs = 0;
+  private loadedMtimeMs = 0;
 
   private readonly _onSessionChange = new vscode.EventEmitter<Session | null>();
   readonly onSessionChange = this._onSessionChange.event;
@@ -180,7 +182,7 @@ export class SessionManager {
     const after = this.readFileOrNull(filePath); // Claude's discarded version
     try {
       if (entry.originalContent === null) fs.unlinkSync(filePath);
-      else fs.writeFileSync(filePath, entry.originalContent, "utf-8");
+      else this.atomicWrite(filePath, entry.originalContent);
     } catch (err) {
       this.log.appendLine(`[ERROR] reject ${filePath}: ${(err as Error).message}`);
       vscode.window.showErrorMessage(
@@ -207,7 +209,7 @@ export class SessionManager {
       const after = this.readFileOrNull(fp);
       try {
         if (entry.originalContent === null) fs.unlinkSync(fp);
-        else fs.writeFileSync(fp, entry.originalContent, "utf-8");
+        else this.atomicWrite(fp, entry.originalContent);
       } catch (err) {
         errors.push(`${path.basename(fp)}: ${(err as Error).message}`);
         this.log.appendLine(`[ERROR] rejectFolder failed for ${fp}: ${(err as Error).message}`);
@@ -246,7 +248,7 @@ export class SessionManager {
       const after = this.readFileOrNull(fp);
       try {
         if (entry.originalContent === null) fs.unlinkSync(fp);
-        else fs.writeFileSync(fp, entry.originalContent, "utf-8");
+        else this.atomicWrite(fp, entry.originalContent);
       } catch (err) {
         errors.push(`${path.basename(fp)}: ${(err as Error).message}`);
         this.log.appendLine(`[ERROR] rejectAll failed for ${fp}: ${(err as Error).message}`);
@@ -328,7 +330,7 @@ export class SessionManager {
     if (!rec) return null;
     if (rec.after == null) return `Claude's version of "${path.basename(filePath)}" was not saved`;
     try {
-      fs.writeFileSync(filePath, rec.after, "utf-8");
+      this.atomicWrite(filePath, rec.after);
     } catch (err) {
       return (err as Error).message;
     }
@@ -417,6 +419,8 @@ export class SessionManager {
   private loadSession(): void {
     try {
       const raw = JSON.parse(fs.readFileSync(this.sessionPath, "utf-8"));
+      this.lastLoadedAtMs = Date.now();
+      try { this.loadedMtimeMs = fs.statSync(this.sessionPath).mtimeMs; } catch { this.loadedMtimeMs = 0; }
       const migrated = migrateSession(raw);
       const changed = JSON.stringify(migrated) !== JSON.stringify(raw);
       this.session = migrated;
@@ -494,12 +498,28 @@ export class SessionManager {
   private persist(): void {
     if (!this.session) return;
 
+    // Dual-writer guard: if the on-disk file changed since we loaded it, a
+    // concurrent writer (the hook) ran — re-read and merge its fresh captures
+    // so they are not lost. Common case: mtime matches → just one stat, no
+    // read/parse/merge.
+    try {
+      const currentMtime = fs.statSync(this.sessionPath).mtimeMs;
+      if (currentMtime !== this.loadedMtimeMs) {
+        const disk = migrateSession(JSON.parse(fs.readFileSync(this.sessionPath, "utf-8")));
+        this.session = mergeFreshCaptures(this.session, disk, this.lastLoadedAtMs);
+      }
+    } catch {
+      // stat/read/parse failed → write our own state (never lose it)
+    }
+
     // No pending entries left → the session is fully reviewed; any pending
     // entry (added by the hook, or reopened by revert/re-apply) reactivates it.
     this.session.status = Object.keys(this.session.files).length === 0 ? "reviewed" : "active";
 
     try {
       this.atomicWrite(this.sessionPath, JSON.stringify(this.session, null, 2));
+      try { this.loadedMtimeMs = fs.statSync(this.sessionPath).mtimeMs; } catch { /* keep prior */ }
+      this.lastLoadedAtMs = Date.now();
     } catch (err) {
       this.log.appendLine(`[ERROR] ` + `Failed to persist session: ${(err as Error).message}`);
     }
