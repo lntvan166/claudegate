@@ -62,7 +62,8 @@ Per-workspace session file at `~/.claudegate/sessions/<md5(workspacePath)>.json`
 ```
 
 - `originalContent: null` — Claude created this file (didn't exist before). Rejecting it deletes the file.
-- `claudeContent` — saved at reject time so the action can be undone (re-apply). `undefined` means not saved (old entry or accepted file).
+- `originalContent` is the frozen "before" baseline for a file under review. It is **not** advanced on accept (the checkpoint re-advances on the next edit, when `hook.py`/`trackFileChange` re-snapshot the current on-disk content); keeping it lets the Accepted panel show what changed.
+- `claudeContent` — Claude's version, the "after" side of the review diff. Saved on **accept** (the accepted content) and on **reject** (the rejected content, also used by re-apply). It backs the Accepted/Rejected diff, which renders `originalContent → claudeContent`. `undefined`/`null` means no snapshot (pending entry, pre-1.3 entry, or a read failure).
 - `status: reviewed` — set automatically when all files have a non-pending status.
 - The workspace hash is `MD5(path.resolve(workspacePath))` (lowercased on Windows). Both `hook.py` and `SessionManager` use the same algorithm so they always agree on the filename.
 

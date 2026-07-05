@@ -20,6 +20,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **Protected files** — `claudegate.protected` flags sensitive files (`.env`, keys, credentials) with a warning and sorts them to the top of review (never hidden), so their changes get extra scrutiny.
 - **Review All Pending** — a Pending-panel action (and `Claude Gate: Review All Pending` command) opens every pending change in VS Code's multi-file diff editor for one-pass review of multi-file refactors; clicking it again reuses and focuses the existing view instead of stacking a new tab.
 
+### Fixed
+
+- **Accepted and Rejected panels now show a diff.** Clicking a file in the Accepted panel shows what you accepted (baseline → accepted content); clicking one in the Rejected panel shows what Claude proposed that you discarded (baseline → rejected content). Previously both opened an empty diff because accept advanced the baseline and reject restored the file on disk. The Pending panel is unchanged. Un-accepting a file back to Pending now also shows its diff correctly.
+
 ---
 
 ## [1.2.0] — 2026-07-04

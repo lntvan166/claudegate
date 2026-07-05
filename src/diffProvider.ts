@@ -3,6 +3,7 @@ import * as path from "path";
 import { diffLines } from "diff";
 import { SessionManager } from "./sessionManager";
 import { countChanges, formatChangeCount } from "./changeCount";
+import { chooseRightSide } from "./diffPlan";
 
 export const SCHEME = "claudegate";
 
@@ -44,7 +45,13 @@ export function claudeUri(filePath: string): vscode.Uri {
   return vscode.Uri.file(filePath).with({ scheme: SCHEME, query: "side=claude" });
 }
 
-// ─── Open diff: original (left) vs current on-disk (right) ───────────────────
+// ─── Open diff ───────────────────────────────────────────────────────────────
+//
+// Pending  → baseline (originalContent) ↔ current file on disk (the proposal).
+// Accepted → baseline ↔ claudeContent (what you accepted): the working file no
+//            longer differs, so diff the saved "after" snapshot instead.
+// Rejected → baseline ↔ claudeContent (what you threw away): the file was
+//            restored to baseline on disk, so again use the saved snapshot.
 
 export async function openDiff(
   filePath: string,
@@ -56,26 +63,30 @@ export async function openDiff(
   const entry = session.files[filePath];
   const label = path.basename(filePath);
   const beforeUri = originalUri(filePath);
+  const beforeText = entry.originalContent ?? "";
 
-  // Rejected new file: the file was deleted; show Claude's saved content instead
-  if (entry.originalContent === null && entry.reviewStatus === "rejected") {
-    const rightUri = claudeUri(filePath);
-    await vscode.commands.executeCommand(
-      "vscode.diff",
-      beforeUri,
-      rightUri,
-      `Claude Gate: ${label}  (rejected — Claude's version)`
-    );
+  // Reviewed files: show the saved before → after snapshot, independent of what
+  // is on disk now (accept left the "after" in place, reject reverted it).
+  if (chooseRightSide(entry.reviewStatus, entry.claudeContent != null) === "claude") {
+    const afterText = entry.claudeContent ?? "";
+    const verb = entry.reviewStatus === "accepted" ? "accepted" : "rejected";
+    const suffix = ` · ${formatChangeCount(countChanges(beforeText, afterText))}`;
+    const title =
+      entry.originalContent === null
+        ? `Claude Gate: ${label}  (${verb} — new file${suffix})`
+        : `Claude Gate: ${label}  (${verb}${suffix})`;
+    await vscode.commands.executeCommand("vscode.diff", beforeUri, claudeUri(filePath), title);
+    revealFirstChange(beforeText, afterText);
     return;
   }
 
+  // Pending (or a reviewed entry with no saved snapshot): baseline ↔ disk.
   const currentUri = vscode.Uri.file(filePath);
-
-  // Change-size suffix for the title (best-effort; empty on read failure).
+  let currentText = "";
   let suffix = "";
   try {
-    const currentText = (await vscode.workspace.openTextDocument(filePath)).getText();
-    suffix = ` · ${formatChangeCount(countChanges(entry.originalContent ?? "", currentText))}`;
+    currentText = (await vscode.workspace.openTextDocument(filePath)).getText();
+    suffix = ` · ${formatChangeCount(countChanges(beforeText, currentText))}`;
   } catch {
     suffix = "";
   }
@@ -87,22 +98,25 @@ export async function openDiff(
 
   await vscode.commands.executeCommand("vscode.diff", beforeUri, currentUri, title);
 
-  // Scroll the right pane to the first changed line
   if (entry.originalContent !== null) {
-    const currentDoc = await vscode.workspace.openTextDocument(filePath);
-    const changes = diffLines(entry.originalContent, currentDoc.getText());
-    let firstChangedLine = 0;
-    let cursor = 0;
-    for (const change of changes) {
-      if (change.added || change.removed) { firstChangedLine = cursor; break; }
-      if (!change.removed) cursor += change.count ?? 0;
-    }
-    const editor = vscode.window.activeTextEditor;
-    if (editor) {
-      editor.revealRange(
-        new vscode.Range(firstChangedLine, 0, firstChangedLine, 0),
-        vscode.TextEditorRevealType.InCenter
-      );
-    }
+    revealFirstChange(beforeText, currentText);
+  }
+}
+
+// Scroll the diff's right pane to the first changed line.
+function revealFirstChange(before: string, after: string): void {
+  const changes = diffLines(before, after);
+  let firstChangedLine = 0;
+  let cursor = 0;
+  for (const change of changes) {
+    if (change.added || change.removed) { firstChangedLine = cursor; break; }
+    if (!change.removed) cursor += change.count ?? 0;
+  }
+  const editor = vscode.window.activeTextEditor;
+  if (editor) {
+    editor.revealRange(
+      new vscode.Range(firstChangedLine, 0, firstChangedLine, 0),
+      vscode.TextEditorRevealType.InCenter
+    );
   }
 }

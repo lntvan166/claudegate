@@ -149,14 +149,15 @@ export class SessionManager {
   acceptFile(filePath: string): void {
     const entry = this.session?.files[filePath];
     if (!entry || entry.reviewStatus !== "pending") return;
-    // Checkpoint: the approved content becomes the new baseline so the next
-    // Claude edit diffs from here, not the original.
+    // Snapshot the accepted content as the "after" side so the Accepted panel
+    // can show original → accepted. originalContent stays the pre-accept
+    // baseline; the checkpoint re-advances on the next edit (hook/trackFileChange
+    // re-snapshot the current on-disk state), so it is not advanced here.
     const current = this.readFileOrNull(filePath);
-    if (current !== null) {
-      entry.originalContent = current;
-    } else {
-      this.log.appendLine(`[WARN] Accept: could not read ${filePath}; baseline unchanged`);
+    if (current === null) {
+      this.log.appendLine(`[WARN] Accept: could not read ${filePath}; accepted diff unavailable`);
     }
+    entry.claudeContent = current;
     entry.reviewStatus = "accepted";
     this.log.appendLine(`[INFO] ` + `Accepted: ${filePath}`);
     this.persist();
@@ -169,8 +170,8 @@ export class SessionManager {
     for (const [fp, entry] of Object.entries(this.session.files)) {
       if (fp.startsWith(prefix) && entry.reviewStatus === "pending" && !isExcluded(fp)) {
         const current = this.readFileOrNull(fp);
-        if (current !== null) entry.originalContent = current;
-        else this.log.appendLine(`[WARN] Accept folder: could not read ${fp}; baseline unchanged`);
+        if (current === null) this.log.appendLine(`[WARN] Accept folder: could not read ${fp}; accepted diff unavailable`);
+        entry.claudeContent = current;
         entry.reviewStatus = "accepted";
         count++;
       }
@@ -184,6 +185,7 @@ export class SessionManager {
     const entry = this.session?.files[filePath];
     if (!entry || entry.reviewStatus !== "accepted") return;
     entry.reviewStatus = "pending";
+    entry.claudeContent = undefined;
     this.log.appendLine(`[INFO] Reverted accepted: ${filePath}`);
     this.persist();
   }
@@ -194,6 +196,7 @@ export class SessionManager {
     for (const entry of Object.values(this.session.files)) {
       if (entry.reviewStatus === "accepted") {
         entry.reviewStatus = "pending";
+        entry.claudeContent = undefined;
         count++;
       }
     }
@@ -209,6 +212,7 @@ export class SessionManager {
     for (const [fp, entry] of Object.entries(this.session.files)) {
       if (fp.startsWith(prefix) && entry.reviewStatus === "accepted") {
         entry.reviewStatus = "pending";
+        entry.claudeContent = undefined;
         count++;
       }
     }
@@ -419,8 +423,8 @@ export class SessionManager {
     for (const [filePath, entry] of Object.entries(this.session.files)) {
       if (entry.reviewStatus === "pending" && isInWorkspace(filePath) && !isExcluded(filePath)) {
         const current = this.readFileOrNull(filePath);
-        if (current !== null) entry.originalContent = current;
-        else this.log.appendLine(`[WARN] Accept all: could not read ${filePath}; baseline unchanged`);
+        if (current === null) this.log.appendLine(`[WARN] Accept all: could not read ${filePath}; accepted diff unavailable`);
+        entry.claudeContent = current;
         entry.reviewStatus = "accepted";
         count++;
       }
