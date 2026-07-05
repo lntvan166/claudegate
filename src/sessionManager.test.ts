@@ -73,6 +73,11 @@ function readSession(sp: string): any {
     capturedAt: new Date(Date.now() + 1000).toISOString(),
   };
   fs.writeFileSync(sp, JSON.stringify(disk));
+  // Force a distinctly-later mtime so the dual-writer guard sees the change
+  // regardless of filesystem mtime granularity (coarse-mtime FSes could bucket
+  // two synchronous writes into the same timestamp → flaky).
+  const later = new Date(Date.now() + 2000);
+  fs.utimesSync(sp, later, later);
   // Now the extension persists (via accept of A); merge must keep b.
   sm.acceptFile(a);
   const s = readSession(sp);
