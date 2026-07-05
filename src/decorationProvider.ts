@@ -35,7 +35,10 @@ export class ClaudeGateDecorationProvider
     if (!entry) return undefined;
     if (isExcluded(uri.fsPath)) return undefined;
 
-    if (entry.reviewStatus === "pending" && isProtected(uri.fsPath)) {
+    // files{} is pending-only now, so entry.reviewStatus is always "pending".
+    // (No live-disk gate here: it would drop the badge for an entry the hook
+    // recorded pre-write; settled no-op entries are pruned by the reconcile.)
+    if (isProtected(uri.fsPath)) {
       return {
         badge: "⚠",
         color: new vscode.ThemeColor("list.warningForeground"),

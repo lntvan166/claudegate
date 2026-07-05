@@ -54,17 +54,51 @@ Per-workspace session file at `~/.claudegate/sessions/<md5(workspacePath)>.json`
   "files": {
     "/absolute/path/to/file.ts": {
       "originalContent": "string | null",
-      "claudeContent": "string | null | undefined",
-      "reviewStatus": "pending | accepted | rejected"
+      "reviewStatus": "pending",
+      "sessionId": "string",
+      "capturedAt": "ISO 8601 timestamp"
+    }
+  },
+  "accepted": [
+    {
+      "id": "<decidedAt>::<path>",
+      "path": "/absolute/path/to/file.ts",
+      "before": "string | null",
+      "after": "string | null",
+      "decidedAt": "ISO 8601 timestamp",
+      "sessionId": "string"
+    }
+  ],
+  "rejected": {
+    "/absolute/path/to/file.ts": {
+      "id": "<decidedAt>::<path>",
+      "path": "/absolute/path/to/file.ts",
+      "before": "string | null",
+      "after": "string | null",
+      "decidedAt": "ISO 8601 timestamp",
+      "sessionId": "string"
     }
   }
 }
 ```
 
-- `originalContent: null` — Claude created this file (didn't exist before). Rejecting it deletes the file.
-- `originalContent` is the frozen "before" baseline for a file under review. It is **not** advanced on accept (the checkpoint re-advances on the next edit, when `hook.py`/`trackFileChange` re-snapshot the current on-disk content); keeping it lets the Accepted panel show what changed.
-- `claudeContent` — Claude's version, the "after" side of the review diff. Saved on **accept** (the accepted content) and on **reject** (the rejected content, also used by re-apply). It backs the Accepted/Rejected diff, which renders `originalContent → claudeContent`. `undefined`/`null` means no snapshot (pending entry, pre-1.3 entry, or a read failure).
-- `status: reviewed` — set automatically when all files have a non-pending status.
+**Files (pending-only):**
+- `files` contains only entries with `reviewStatus: "pending"` — unreviewed changes awaiting user decision.
+- `originalContent: null` — Claude created this file (didn't exist before). Rejecting deletes the file.
+- `originalContent` is the frozen "before" baseline. It is **not** advanced on accept; the next edit (via `hook.py`) re-snapshots the current on-disk content, so re-editing an accepted file appends a new pending entry with the new baseline.
+- The entry is removed from `files` when it is accepted (appended to `accepted[]`) or rejected (stored in `rejected{}`).
+
+**Accepted (persistent log):**
+- `accepted` is an append-only array of every file the user has approved, with the before/after diffs that were accepted.
+- Reversible: `revertAccepted(id)` removes the entry from `accepted[]` and re-adds it to `files` as pending (the frozen `before` becomes the new baseline).
+
+**Rejected (latest per file):**
+- `rejected` is a map of `path → ReviewRecord`, storing only the latest rejected change per file.
+- Reapplicable: `reapplyRejected(path)` copies the `rejected[path]` entry back to `files` as pending with its frozen `before` baseline.
+
+**Session lifecycle:**
+- `status: active` — session has pending files.
+- `status: reviewed` — set automatically when `files` is empty.
 - The workspace hash is `MD5(path.resolve(workspacePath))` (lowercased on Windows). Both `hook.py` and `SessionManager` use the same algorithm so they always agree on the filename.
 
 ---
@@ -86,7 +120,10 @@ Per-workspace session file at `~/.claudegate/sessions/<md5(workspacePath)>.json`
 }
 ```
 
-`file_path` may be relative to `cwd`. The hook resolves it to an absolute path before storing.
+**Hook behavior:**
+- `file_path` may be relative to `cwd`. The hook resolves it to an absolute path before storing.
+- If the file is **already pending**, the hook leaves it untouched (preserves the frozen baseline).
+- Otherwise (no entry yet, or — for legacy/pre-migration sessions — a non-pending entry) the hook creates a fresh pending entry with the current on-disk `originalContent`. The hook only ever writes `files`; the extension owns `accepted`/`rejected`, and accept/reject remove the entry from `files`, so on a current-model session a re-edit simply finds no entry and creates a new pending one.
 
 ---
 

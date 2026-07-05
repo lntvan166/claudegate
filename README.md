@@ -43,6 +43,12 @@ Use `claude` in your terminal as usual. When Claude modifies files, Claude Gate 
 4. Accepted files move to the Accepted panel; rejected files are restored to their original content
 5. **Review All Pending** — click the multi-file diff button in the Pending panel title bar (or run `Claude Gate: Review All Pending`) to open every pending change in one scrollable multi-diff tab.
 
+### The Three Panels
+
+- **Pending** — Files with a real unreviewed change awaiting your decision. Once a file is accepted or rejected, it is removed from Pending. If you later re-edit an already-approved file, a new Pending entry appears with the fresh change.
+- **Accepted** — A persistent log of every file you approved. Each entry shows the diff you accepted (original → approved version). Reversible via **Un-accept** link or right-click menu; un-accepting moves the file back to Pending with the frozen original baseline.
+- **Rejected** — Stores the latest rejected change **per file**. If you reject a file, discard the proposed change, then Claude edits it again, the newer edit replaces the stored rejection. Re-apply a rejected change via the **Re-apply** link or right-click menu, which restores the proposed content to the file and moves it back to Pending.
+
 ### Reviewing with the keyboard
 
 With a ClaudeGate diff focused, press **Cmd+Enter** to accept or **Cmd+Backspace** to reject the file; ClaudeGate then opens the next pending diff automatically (disable via `claudegate.autoAdvance`). Right-click any file row for Open File, Reveal in Explorer, Copy Path, and (with the Claude Context extension) Add to Claude Chat.

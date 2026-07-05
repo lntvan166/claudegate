@@ -22,7 +22,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
-- **Accepted and Rejected panels now show a diff.** Clicking a file in the Accepted panel shows what you accepted (baseline → accepted content); clicking one in the Rejected panel shows what Claude proposed that you discarded (baseline → rejected content). Previously both opened an empty diff because accept advanced the baseline and reject restored the file on disk. The Pending panel is unchanged. Un-accepting a file back to Pending now also shows its diff correctly.
+- **Accepted and Rejected panels now show meaningful, persistent diffs.** The Accepted panel is a persistent per-accept log — each approval is recorded with its own diff (baseline → accepted content), so re-editing an already-accepted file no longer erases history: the new change appears in Pending while the Accepted log keeps every prior approval. The Rejected panel keeps the latest discarded change per file (baseline → discarded version). Clicking any Accepted/Rejected row opens exactly that change's diff (previously both opened an empty diff). Pending now shows only files with a real change, so no-op or failed edits no longer leave empty Pending rows or wipe an accepted decision. The Pending review flow is otherwise unchanged.
 
 ---
 

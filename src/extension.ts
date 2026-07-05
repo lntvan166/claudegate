@@ -12,7 +12,7 @@ import {
 } from "./reviewPanel";
 import { HookInstaller } from "./hookInstaller";
 import { SettingsTreeProvider, SettingsItem } from "./settingsPanel";
-import { ClaudeGateContentProvider, SCHEME, originalUri } from "./diffProvider";
+import { ClaudeGateContentProvider, SCHEME, originalUri, openReviewRecord } from "./diffProvider";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
 import { DocumentTracker } from "./documentTracker";
 import { persistWorkspaceRoots } from "./workspaceRoots";
@@ -30,7 +30,8 @@ function getActivePendingFilePath(sessionManager: SessionManager): string | unde
     undefined;
   if (!filePath) return undefined;
   if (!isInWorkspace(filePath) || isExcluded(filePath)) return undefined;
-  return sessionManager.getSession()?.files[filePath]?.reviewStatus === "pending"
+  return sessionManager.getSession()?.files[filePath]?.reviewStatus === "pending" &&
+    sessionManager.hasRealPendingChange(filePath)
     ? filePath
     : undefined;
 }
@@ -160,7 +161,13 @@ export function activate(context: vscode.ExtensionContext): void {
       const session = sessionManager.getSession();
       const next = session
         ? Object.entries(session.files)
-            .filter(([fp, e]) => e.reviewStatus === "pending" && isInWorkspace(fp) && !isExcluded(fp))
+            .filter(
+              ([fp, e]) =>
+                e.reviewStatus === "pending" &&
+                isInWorkspace(fp) &&
+                !isExcluded(fp) &&
+                sessionManager.hasRealPendingChange(fp)
+            )
             .map(([fp]) => fp)
             .sort((a, b) => a.localeCompare(b))[0]
         : undefined;
@@ -260,11 +267,10 @@ export function activate(context: vscode.ExtensionContext): void {
       ),
 
       // ── Accepted file/folder actions ──
-      vscode.commands.registerCommand(
-        "claudegate.revertAccepted",
-        (item: FileReviewItem | { filePath: string }) =>
-          sessionManager.revertAccepted(item.filePath)
-      ),
+      vscode.commands.registerCommand("claudegate.revertAccepted", (item: any) => {
+        const id = typeof item === "string" ? item : item?.recordId;
+        if (id) sessionManager.revertAccepted(id);
+      }),
 
       vscode.commands.registerCommand(
         "claudegate.revertAcceptedFolder",
@@ -280,11 +286,10 @@ export function activate(context: vscode.ExtensionContext): void {
       ),
 
       // ── Rejected file/folder actions ──
-      vscode.commands.registerCommand(
-        "claudegate.reapplyFile",
-        (item: FileReviewItem | { filePath: string }) =>
-          sessionManager.reapplyFile(item.filePath)
-      ),
+      vscode.commands.registerCommand("claudegate.reapplyFile", (item: any) => {
+        const fp = typeof item === "string" ? item : item?.filePath;
+        if (fp) sessionManager.reapplyRejected(fp);
+      }),
 
       vscode.commands.registerCommand(
         "claudegate.reapplyFolder",
@@ -431,7 +436,13 @@ export function activate(context: vscode.ExtensionContext): void {
         const session = sessionManager.getSession();
         const paths = session
           ? Object.entries(session.files)
-              .filter(([fp, e]) => e.reviewStatus === "pending" && isInWorkspace(fp) && !isExcluded(fp))
+              .filter(
+                ([fp, e]) =>
+                  e.reviewStatus === "pending" &&
+                  isInWorkspace(fp) &&
+                  !isExcluded(fp) &&
+                  sessionManager.hasRealPendingChange(fp)
+              )
               .map(([fp]) => fp)
               .sort(
                 (a, b) =>
@@ -472,6 +483,11 @@ export function activate(context: vscode.ExtensionContext): void {
     );
 
     registerOpenDiff(context, sessionManager);
+    context.subscriptions.push(
+      vscode.commands.registerCommand("claudegate.openReviewRecord", (id: string) =>
+        openReviewRecord(id, sessionManager)
+      )
+    );
 
     // ── Reactive updates ──────────────────────────────────────────────────
     context.subscriptions.push(
@@ -482,26 +498,27 @@ export function activate(context: vscode.ExtensionContext): void {
 
     sessionManager.onSessionChange((session) => {
       refreshActiveFilePendingContext(sessionManager);
-      const counts = {
-        pending:  0,
-        accepted: 0,
-        rejected: 0,
-      };
+      let pending = 0;
+      let accepted = 0;
+      let rejected = 0;
       if (session) {
-        for (const [filePath, { reviewStatus }] of Object.entries(session.files)) {
-          if (!isInWorkspace(filePath) || isExcluded(filePath)) continue;
-          counts[reviewStatus]++;
+        for (const fp of Object.keys(session.files)) {
+          // Count every pending entry (matches the Pending panel); settled
+          // no-op entries are pruned by the reconcile, not filtered here.
+          if (isInWorkspace(fp) && !isExcluded(fp)) pending++;
         }
+        accepted = session.accepted.filter((r) => isInWorkspace(r.path) && !isExcluded(r.path)).length;
+        rejected = Object.values(session.rejected).filter((r) => isInWorkspace(r.path) && !isExcluded(r.path)).length;
       }
 
-      vscode.commands.executeCommand("setContext", "claudegate.acceptedCount", counts.accepted);
-      vscode.commands.executeCommand("setContext", "claudegate.rejectedCount", counts.rejected);
+      vscode.commands.executeCommand("setContext", "claudegate.acceptedCount", accepted);
+      vscode.commands.executeCommand("setContext", "claudegate.rejectedCount", rejected);
 
-      pendingView.badge = counts.pending > 0 ? { value: counts.pending, tooltip: `${counts.pending} pending file(s)` } : undefined;
+      pendingView.badge = pending > 0 ? { value: pending, tooltip: `${pending} pending file(s)` } : undefined;
 
-      badgeBar.text            = `$(shield) ${counts.pending}`;
-      badgeBar.tooltip         = `Claude Gate: ${counts.pending} pending file(s) — click to open review panel`;
-      badgeBar.backgroundColor = counts.pending > 0
+      badgeBar.text            = `$(shield) ${pending}`;
+      badgeBar.tooltip         = `Claude Gate: ${pending} pending file(s) — click to open review panel`;
+      badgeBar.backgroundColor = pending > 0
         ? new vscode.ThemeColor("statusBarItem.warningBackground")
         : undefined;
     });

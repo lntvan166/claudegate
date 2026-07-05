@@ -30,6 +30,13 @@ The seed creates 5 files (baseline vs. Claude-edited):
 
 > Re-seed anytime after accepting/rejecting: `python3 manual-test-seed.py --clean && python3 manual-test-seed.py`
 
+The seeder can also **simulate Claude touching a file again** (fires the real hook exactly like Claude Code does), so you can test the review-log behaviour without a live Claude session:
+
+```bash
+python3 manual-test-seed.py --reedit src/auth.ts     # hook fires + writes a real change
+python3 manual-test-seed.py --noop-edit src/auth.ts  # hook fires but leaves the file unchanged
+```
+
 ---
 
 ## 2. Feature checks
@@ -57,6 +64,29 @@ The seed creates 5 files (baseline vs. Claude-edited):
 - [ ] Accept `src/utils.ts` → moves to Accepted; disk keeps Claude's version.
 - [ ] Reject `.env` → moves to Rejected; disk restored to baseline (SECRET_KEY line gone). Re-apply restores it.
 - [ ] Reject `src/newfeature.ts` (a new file) → moves to Rejected and is **deleted from disk**. Re-apply from the Rejected panel re-creates it.
+
+### Review log — Accepted history, Rejected latest, no phantom rows (the big one)
+This is the new model. Each panel means exactly what it says.
+
+*Accepted persists when Claude re-edits:*
+- [ ] **Accept** `src/auth.ts` → it leaves Pending and appears in the **Accepted** panel. Click its Accepted row → the diff shows what you accepted (baseline → accepted content).
+- [ ] Simulate Claude editing it again: `python3 manual-test-seed.py --reedit src/auth.ts`
+- [ ] `src/auth.ts` now appears in **Pending** showing **only the new change**, **and its Accepted row is still there** (A→B preserved). ✅ the original bug is fixed.
+- [ ] Accept the new pending change → the **Accepted** panel now lists **two** rows for `auth.ts` (the full log); each row opens its own diff.
+
+*No phantom rows from no-op / failed edits:*
+- [ ] Accept `src/utils.ts`. Then: `python3 manual-test-seed.py --noop-edit src/utils.ts`
+- [ ] **No empty Pending row** appears for `utils.ts`, and its **Accepted row is untouched**. ✅ (a failed/no-op edit can no longer wipe an accepted decision or leave an empty diff)
+
+*Rejected keeps the latest per file:*
+- [ ] Reject `.env` → it appears in **Rejected**; the row diffs baseline → the discarded `SECRET_KEY` change.
+- [ ] Re-edit and reject again: `python3 manual-test-seed.py --reedit .env`, then reject the new `.env` pending row → the Rejected panel still shows **one** `.env` row (the latest replaced the previous).
+
+*Undo:*
+- [ ] On an Accepted row → **Revert to Pending** puts it back in Pending. On a Rejected row → **Re-apply** writes Claude's version back and returns it to Pending.
+
+*Bulk paths ignore no-op entries:*
+- [ ] After a `--noop-edit`, **Accept All** / **Review All Pending** do **not** pick up the no-op file (no empty diff, no phantom accepted record).
 
 ### File watcher off by default (changed)
 - [ ] Command Palette → confirm **`Claude Gate: Enable File Watcher`** exists.
