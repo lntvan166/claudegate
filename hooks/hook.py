@@ -112,11 +112,17 @@ def main() -> None:
         sys.exit(0)
     session_file = workspace_session_file(workspace_root)
 
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            original_content: str | None = f.read()
-    except (FileNotFoundError, PermissionError):
-        original_content = None
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                original_content: str | None = f.read()
+        except OSError:
+            # Exists but unreadable (permissions, etc). We cannot safely baseline
+            # or later restore it, and must NOT record it as a null "new" file —
+            # that would let a reject delete the user's real file. Skip capture.
+            sys.exit(0)
+    else:
+        original_content = None  # genuinely new — Claude is creating it
 
     session = load_session(session_file) or new_session()
     existing = session["files"].get(file_path)
