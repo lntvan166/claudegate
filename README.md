@@ -61,11 +61,9 @@ With a ClaudeGate diff focused, press **Cmd+Enter** to accept or **Cmd+Backspace
 - **Keyboard review** — `Cmd+Enter` accept / `Cmd+Backspace` reject the focused diff, then auto-advance to the next pending file
 - **Change counts** — `+A -B` line counts in the diff tab title and pending-row tooltips
 - **Exclude patterns** — `claudegate.exclude` globs (or a folder name) hide generated files from review, non-destructively
-- **Gutter change marks** — while a file is pending, Claude's changed lines are marked in the editor gutter (added/modified/deleted) and the overview ruler; toggle with `claudegate.gutterDecorations.enabled`.
 - **Group by session** — optionally group the panels by the Claude session that made each change, for parallel sessions in one workspace
 - **Row file actions** — right-click for Open File, Reveal in Explorer, Copy Path, and Add to Claude Chat
 - **Accept/Reject CodeLens** — inline action links at the top of any pending file, in the diff view and the regular editor
-- **Per-hunk revert** — a "↩ Revert this change" CodeLens above each of Claude's hunks lets you undo an individual hunk (just those lines) while keeping the rest; toggle with `claudegate.hunkCodeLens.enabled`.
 - **Folder-level actions** — accept or reject an entire directory at once (tree view mode)
 - **Undo your decisions** — re-apply Claude's changes from the Rejected panel; un-accept files back to Pending
 - **Workspace-aware filtering** — files modified outside the current workspace (e.g. `~/.claude/settings.json`) are hidden from the review panel
@@ -104,8 +102,6 @@ The hook captures a file's original content **once per session** — subsequent 
 | `claudegate.exclude` | sensible defaults (lock files, minified, maps, node_modules) | Glob patterns (shaped like VS Code's `search.exclude`) whose matching files are hidden from review. Matching files are skipped by the watcher and hidden from the panel, counts, and badges even if the CLI hook captured them — nothing is deleted. Use `**/`-prefixed globs to match at any depth, or name a folder to exclude everything inside it. Ship with editable defaults; deactivate any with `"<glob>": false`. |
 | `claudegate.protected` | secrets defaults | Glob patterns for **sensitive** files (`.env`, keys, credentials). Matching files aren't hidden — they're **flagged and sorted to the top** of review so their changes get scrutiny. Edit/deactivate like `claudegate.exclude`. |
 | `claudegate.groupBySession` | `false` | Group the review panels by the Claude Code **session** that produced each change — helpful when several sessions run in one workspace. Toggle it from the Settings pane too. Re-run **Setup Hook** so the hook records session ids. |
-| `claudegate.gutterDecorations.enabled` | `true` | Show Claude's changed lines as gutter marks + overview-ruler ticks in the editor while a file is pending. |
-| `claudegate.hunkCodeLens.enabled` | `true` | Show a "Revert this change" CodeLens above each hunk in a pending file to undo individual hunks. |
 
 Example `settings.json`:
 
