@@ -171,10 +171,14 @@ ls ~/.claudegate/sessions/
 
 ## Publishing to the Marketplace
 
+**Do NOT cut a release, bump the version, tag, or run `vsce publish` on your own.** Releasing is gated behind the `release` skill and must only happen when the maintainer explicitly invokes it (`/release` or "make a release"). Until then, leave `package.json` version, `CHANGELOG.md`, tags, and publishing untouched — even after landing a fix. Just land the change; the maintainer decides when to release.
+
+When the maintainer does invoke the `release` skill, it owns the whole flow (semver bump → CHANGELOG → tests → bundle → auth → commit → tag → `vsce publish`) and pauses for confirmation before the irreversible publish.
+
 ```bash
 npm install -g @vscode/vsce   # one-time
 vsce login <publisher-id>      # requires Azure DevOps PAT with Marketplace → Manage scope
-vsce publish                   # bumps and publishes
+vsce publish                   # publishes the current package.json version
 ```
 
 The `.vscodeignore` file controls what gets packaged. vsce reads `.vscodeignore` (not `.vsixignore`). Keep dev-only directories (`.superpowers/`, `docs/`, `.claude/`, `.qodo/`) listed there.
