@@ -7,6 +7,18 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.4.0] — 2026-07-06
+
+### Fixed
+
+- **Re-running Setup Hook no longer silently kills tracking in running Claude sessions.** Claude Code snapshots its hook configuration at session start and stops trusting hooks whose config changes underneath it — so ClaudeGate's habit of rewriting `~/.claude/settings.json` on *every* Setup Hook run quietly disabled capture for every Claude Code session that was already open, all at once. (The nastiest form: noticing capture had gone quiet and clicking **Setup Hook** to fix it re-triggered the exact rewrite that broke it.) The registration write is now idempotent — it only touches `settings.json` when the hook entry actually differs from what's on disk — so re-running Setup Hook on an already-configured machine leaves the file untouched and running sessions keep tracking. The "restart your running sessions" notice now appears only when a real write happened.
+
+### Added
+
+- **A heads-up when a settings change silently stops capture.** ClaudeGate now watches `~/.claude/settings.json` and, if it changes while the hook is still registered, warns once that any already-running Claude Code sessions have stopped tracking edits and should be restarted (or `/hooks` re-run). It flags the *cause* (the settings file changed) rather than guessing from missing captures, turning a previously invisible failure into an actionable prompt.
+
+---
+
 ## [1.3.3] — 2026-07-06
 
 ### Fixed
