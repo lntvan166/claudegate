@@ -7,6 +7,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.3.2] — 2026-07-06
+
+### Fixed
+
+- **Setup Hook now warns to restart in-progress Claude sessions.** Claude Code loads its hooks once at startup, so a session that was already running when you install the hook will never be tracked until it restarts — its edits silently bypass capture and never reach the Pending panel. The post-setup message now says so explicitly. (Script *updates* still take effect immediately in running sessions — only the initial hook registration requires a restart.)
+
+---
+
 ## [1.3.1] — 2026-07-05
 
 ### Fixed

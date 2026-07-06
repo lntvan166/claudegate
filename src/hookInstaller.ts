@@ -48,7 +48,9 @@ export class HookInstaller {
 
       this.log.appendLine("[INFO] Hook installed successfully.");
       const action = await vscode.window.showInformationMessage(
-        "Claude Gate: Hook installed. Run Claude Code normally — changes will appear in the sidebar.",
+        "Claude Gate: Hook installed. Restart any Claude Code sessions that were already running — " +
+          "Claude Code loads hooks once at startup, so in-progress sessions won't be tracked until restarted. " +
+          "New sessions will appear in the sidebar automatically.",
         "Verify Setup"
       );
       if (action === "Verify Setup") this.verify();

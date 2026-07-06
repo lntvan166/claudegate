@@ -2,7 +2,7 @@
   "name": "claudegate",
   "displayName": "Claude Gate",
   "description": "Review Claude Code's file changes in a native diff panel — accept or reject each edit. The PreToolUse hook captures all Claude Code edits (terminal CLI and in-editor extension); the filesystem watcher is an optional fallback for non-Claude agents and is off by default.",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "publisher": "lntvan166",
   "icon": "media/icon.png",
   "engines": {
@@ -191,16 +191,47 @@
         "title": "Claude Gate: Remove Exclude Pattern",
         "icon": "$(trash)"
       },
-      { "command": "claudegate.enableFileWatcher", "title": "Claude Gate: Enable File Watcher" },
-      { "command": "claudegate.acceptCurrent", "title": "Claude Gate: Accept Current Diff" },
-      { "command": "claudegate.rejectCurrent", "title": "Claude Gate: Reject Current Diff" },
-      { "command": "claudegate.openFile",         "title": "Claude Gate: Open File" },
-      { "command": "claudegate.openToSide",       "title": "Claude Gate: Open to the Side" },
-      { "command": "claudegate.revealInExplorer", "title": "Claude Gate: Reveal in Explorer" },
-      { "command": "claudegate.copyPath",         "title": "Claude Gate: Copy Path" },
-      { "command": "claudegate.copyRelativePath", "title": "Claude Gate: Copy Relative Path" },
-      { "command": "claudegate.addToClaudeChat",  "title": "Claude Gate: Add to Claude Chat" },
-      { "command": "claudegate.reviewAllPending", "title": "Claude Gate: Review All Pending", "icon": "$(diff-multiple)" }
+      {
+        "command": "claudegate.enableFileWatcher",
+        "title": "Claude Gate: Enable File Watcher"
+      },
+      {
+        "command": "claudegate.acceptCurrent",
+        "title": "Claude Gate: Accept Current Diff"
+      },
+      {
+        "command": "claudegate.rejectCurrent",
+        "title": "Claude Gate: Reject Current Diff"
+      },
+      {
+        "command": "claudegate.openFile",
+        "title": "Claude Gate: Open File"
+      },
+      {
+        "command": "claudegate.openToSide",
+        "title": "Claude Gate: Open to the Side"
+      },
+      {
+        "command": "claudegate.revealInExplorer",
+        "title": "Claude Gate: Reveal in Explorer"
+      },
+      {
+        "command": "claudegate.copyPath",
+        "title": "Claude Gate: Copy Path"
+      },
+      {
+        "command": "claudegate.copyRelativePath",
+        "title": "Claude Gate: Copy Relative Path"
+      },
+      {
+        "command": "claudegate.addToClaudeChat",
+        "title": "Claude Gate: Add to Claude Chat"
+      },
+      {
+        "command": "claudegate.reviewAllPending",
+        "title": "Claude Gate: Review All Pending",
+        "icon": "$(diff-multiple)"
+      }
     ],
     "menus": {
       "editor/title": [
@@ -333,33 +364,114 @@
           "when": "view == claudegate.settingsPanel && viewItem == claudegate.excludePattern",
           "group": "inline"
         },
-        { "command": "claudegate.openFile",         "when": "viewItem =~ /^claudegate\\.file\\./",                                      "group": "navigation@1" },
-        { "command": "claudegate.openToSide",       "when": "viewItem =~ /^claudegate\\.file\\./",                                      "group": "navigation@2" },
-        { "command": "claudegate.revealInExplorer", "when": "viewItem =~ /^claudegate\\.file\\./",                                      "group": "navigation@3" },
-        { "command": "claudegate.copyPath",         "when": "viewItem =~ /^claudegate\\.file\\./",                                      "group": "9_copy@1" },
-        { "command": "claudegate.copyRelativePath", "when": "viewItem =~ /^claudegate\\.file\\./",                                      "group": "9_copy@2" },
-        { "command": "claudegate.addToClaudeChat",  "when": "viewItem =~ /^claudegate\\.file\\./ && claudegate.claudeContextAvailable", "group": "z_claude@1" }
+        {
+          "command": "claudegate.openFile",
+          "when": "viewItem =~ /^claudegate\\.file\\./",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudegate.openToSide",
+          "when": "viewItem =~ /^claudegate\\.file\\./",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claudegate.revealInExplorer",
+          "when": "viewItem =~ /^claudegate\\.file\\./",
+          "group": "navigation@3"
+        },
+        {
+          "command": "claudegate.copyPath",
+          "when": "viewItem =~ /^claudegate\\.file\\./",
+          "group": "9_copy@1"
+        },
+        {
+          "command": "claudegate.copyRelativePath",
+          "when": "viewItem =~ /^claudegate\\.file\\./",
+          "group": "9_copy@2"
+        },
+        {
+          "command": "claudegate.addToClaudeChat",
+          "when": "viewItem =~ /^claudegate\\.file\\./ && claudegate.claudeContextAvailable",
+          "group": "z_claude@1"
+        }
       ],
       "commandPalette": [
-        { "command": "claudegate.acceptFile",                 "when": "false" },
-        { "command": "claudegate.rejectFile",                 "when": "false" },
-        { "command": "claudegate.reapplyFile",                "when": "false" },
-        { "command": "claudegate.acceptFolder",               "when": "false" },
-        { "command": "claudegate.rejectFolder",               "when": "false" },
-        { "command": "claudegate.revertAccepted",             "when": "false" },
-        { "command": "claudegate.revertAcceptedFolder",       "when": "false" },
-        { "command": "claudegate.reapplyFolder",              "when": "false" },
-        { "command": "claudegate.viewAsTree",                 "when": "false" },
-        { "command": "claudegate.viewAsList",                 "when": "false" },
-        { "command": "claudegate.revertAcceptedAll",          "when": "false" },
-        { "command": "claudegate.reapplyAll",                 "when": "false" },
-        { "command": "claudegate.removeExcludePattern",       "when": "false" },
-        { "command": "claudegate.openFile",                   "when": "false" },
-        { "command": "claudegate.openToSide",                 "when": "false" },
-        { "command": "claudegate.revealInExplorer",           "when": "false" },
-        { "command": "claudegate.copyPath",                   "when": "false" },
-        { "command": "claudegate.copyRelativePath",           "when": "false" },
-        { "command": "claudegate.addToClaudeChat",            "when": "false" }
+        {
+          "command": "claudegate.acceptFile",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.rejectFile",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.reapplyFile",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.acceptFolder",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.rejectFolder",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.revertAccepted",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.revertAcceptedFolder",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.reapplyFolder",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.viewAsTree",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.viewAsList",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.revertAcceptedAll",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.reapplyAll",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.removeExcludePattern",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.openFile",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.openToSide",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.revealInExplorer",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.copyPath",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.copyRelativePath",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.addToClaudeChat",
+          "when": "false"
+        }
       ]
     },
     "configuration": {
@@ -373,23 +485,44 @@
         "claudegate.exclude": {
           "type": "object",
           "default": {
-            "**/package-lock.json": true, "**/yarn.lock": true, "**/pnpm-lock.yaml": true,
-            "**/npm-shrinkwrap.json": true, "**/bun.lockb": true, "**/Cargo.lock": true,
-            "**/poetry.lock": true, "**/Pipfile.lock": true, "**/Gemfile.lock": true,
-            "**/composer.lock": true, "**/go.sum": true, "**/*.min.js": true,
-            "**/*.min.css": true, "**/*.map": true, "**/node_modules/**": true
+            "**/package-lock.json": true,
+            "**/yarn.lock": true,
+            "**/pnpm-lock.yaml": true,
+            "**/npm-shrinkwrap.json": true,
+            "**/bun.lockb": true,
+            "**/Cargo.lock": true,
+            "**/poetry.lock": true,
+            "**/Pipfile.lock": true,
+            "**/Gemfile.lock": true,
+            "**/composer.lock": true,
+            "**/go.sum": true,
+            "**/*.min.js": true,
+            "**/*.min.css": true,
+            "**/*.map": true,
+            "**/node_modules/**": true
           },
-          "additionalProperties": { "type": "boolean" },
+          "additionalProperties": {
+            "type": "boolean"
+          },
           "markdownDescription": "Glob patterns (shaped like `search.exclude`) whose matching files are hidden from ClaudeGate review. Ships with sensible defaults (lock files, minified assets, source maps, `node_modules`) — remove or deactivate any with `\"<glob>\": false`. Skipped by the watcher and hidden from panel/counts/badges even if the CLI hook captured them; nothing is deleted. Use `**/`-prefixed globs or a folder name."
         },
         "claudegate.protected": {
           "type": "object",
           "default": {
-            "**/.env": true, "**/.env.*": true, "**/*.pem": true, "**/*.key": true,
-            "**/*.p12": true, "**/*.pfx": true, "**/id_rsa": true, "**/id_ed25519": true,
-            "**/.npmrc": true, "**/credentials": true
+            "**/.env": true,
+            "**/.env.*": true,
+            "**/*.pem": true,
+            "**/*.key": true,
+            "**/*.p12": true,
+            "**/*.pfx": true,
+            "**/id_rsa": true,
+            "**/id_ed25519": true,
+            "**/.npmrc": true,
+            "**/credentials": true
           },
-          "additionalProperties": { "type": "boolean" },
+          "additionalProperties": {
+            "type": "boolean"
+          },
           "markdownDescription": "Glob patterns for **sensitive** files (secrets, keys, credentials). Matching files are **not hidden** — they are flagged with a warning and sorted to the top of the review so their changes get scrutiny. Ships with defaults; edit or deactivate any with `\"<glob>\": false`."
         },
         "claudegate.autoAdvance": {
@@ -405,8 +538,18 @@
       }
     },
     "keybindings": [
-      { "command": "claudegate.acceptCurrent", "key": "ctrl+enter",           "mac": "cmd+enter",     "when": "claudegate.activeFileIsPending" },
-      { "command": "claudegate.rejectCurrent", "key": "ctrl+shift+backspace", "mac": "cmd+backspace", "when": "claudegate.activeFileIsPending" }
+      {
+        "command": "claudegate.acceptCurrent",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "claudegate.activeFileIsPending"
+      },
+      {
+        "command": "claudegate.rejectCurrent",
+        "key": "ctrl+shift+backspace",
+        "mac": "cmd+backspace",
+        "when": "claudegate.activeFileIsPending"
+      }
     ]
   },
   "scripts": {
