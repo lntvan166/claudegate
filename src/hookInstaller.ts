@@ -8,6 +8,47 @@ import { persistWorkspaceRoots } from "./workspaceRoots";
 
 type HookSyncAction = "none" | "installed" | "updated";
 
+/**
+ * Pure decision logic for the ~/.claude/settings.json registration write.
+ *
+ * Given the current file contents and the hook wrapper command, returns the
+ * settings JSON that *should* be on disk and whether it differs from what is.
+ *
+ * Idempotency is load-bearing: Claude Code snapshots hook config at session
+ * start and treats any later change to settings.json as untrusted, silently
+ * disabling those hooks until the session restarts. So we must NOT rewrite the
+ * file when the claudegate entry is already present and byte-identical —
+ * doing so kills capture for every already-running session at once.
+ * See docs/2026-07-06-hook-not-firing-in-running-session-bug.md.
+ */
+export function computeSettingsPatch(
+  raw: string,
+  hookCommand: string
+): { content: string; changed: boolean } {
+  let settings: Record<string, unknown> = {};
+  try {
+    settings = raw ? JSON.parse(raw) : {};
+  } catch {
+    // File absent or malformed — start fresh
+    settings = {};
+  }
+
+  if (!settings.hooks) settings.hooks = {};
+  const hooks = settings.hooks as Record<string, unknown[]>;
+  if (!hooks.PreToolUse) hooks.PreToolUse = [];
+
+  const alreadyInstalled = JSON.stringify(hooks.PreToolUse).includes("claudegate");
+  if (!alreadyInstalled) {
+    hooks.PreToolUse.push({
+      matcher: "^(Write|Edit|MultiEdit)$",
+      hooks: [{ type: "command", command: hookCommand }],
+    });
+  }
+
+  const content = JSON.stringify(settings, null, 2);
+  return { content, changed: content !== raw };
+}
+
 export interface HookStatus {
   scriptInstalled: boolean;
   registered: boolean;
@@ -44,15 +85,17 @@ export class HookInstaller {
 
       this.installHookPy();
       this.installHookWrapper();
-      this.patchClaudeSettings();
+      const settingsChanged = this.patchClaudeSettings();
 
-      this.log.appendLine("[INFO] Hook installed successfully.");
-      const action = await vscode.window.showInformationMessage(
-        "Claude Gate: Hook installed. Restart any Claude Code sessions that were already running — " +
-          "Claude Code loads hooks once at startup, so in-progress sessions won't be tracked until restarted. " +
-          "New sessions will appear in the sidebar automatically.",
-        "Verify Setup"
+      this.log.appendLine(
+        `[INFO] Hook installed successfully.${settingsChanged ? "" : " (settings.json unchanged)"}`
       );
+      const message = settingsChanged
+        ? "Claude Gate: Hook installed. Restart any Claude Code sessions that were already running — " +
+          "Claude Code loads hooks once at startup, so in-progress sessions won't be tracked until restarted. " +
+          "New sessions will appear in the sidebar automatically."
+        : "Claude Gate: Hook already registered — no changes made. Running Claude Code sessions keep tracking.";
+      const action = await vscode.window.showInformationMessage(message, "Verify Setup");
       if (action === "Verify Setup") this.verify();
     } catch (err) {
       this.log.appendLine(`[ERROR] Setup failed: ${(err as Error).message}`);
@@ -228,30 +271,26 @@ export class HookInstaller {
     }
   }
 
-  private patchClaudeSettings(): void {
+  // Registers the hook in ~/.claude/settings.json. Returns true only when the
+  // file was actually written — a no-op (entry already present, byte-identical)
+  // returns false so callers can avoid the misleading "restart your sessions"
+  // notice and, crucially, so running Claude Code sessions keep their hook trust.
+  private patchClaudeSettings(): boolean {
     const claudeDir = path.dirname(this.claudeSettingsPath);
     fs.mkdirSync(claudeDir, { recursive: true });
 
-    let settings: Record<string, unknown> = {};
+    let raw = "";
     try {
-      settings = JSON.parse(fs.readFileSync(this.claudeSettingsPath, "utf-8"));
+      raw = fs.readFileSync(this.claudeSettingsPath, "utf-8");
     } catch {
-      // File absent or malformed — start fresh
+      raw = "";
     }
 
-    if (!settings.hooks) settings.hooks = {};
-    const hooks = settings.hooks as Record<string, unknown[]>;
-    if (!hooks.PreToolUse) hooks.PreToolUse = [];
+    const { content, changed } = computeSettingsPatch(raw, this.hookWrapperDest);
+    if (!changed) return false;
 
-    const alreadyInstalled = JSON.stringify(hooks.PreToolUse).includes("claudegate");
-    if (!alreadyInstalled) {
-      hooks.PreToolUse.push({
-        matcher: "^(Write|Edit|MultiEdit)$",
-        hooks: [{ type: "command", command: this.hookWrapperDest }],
-      });
-    }
-
-    fs.writeFileSync(this.claudeSettingsPath, JSON.stringify(settings, null, 2), "utf-8");
+    fs.writeFileSync(this.claudeSettingsPath, content, "utf-8");
+    return true;
   }
 
   verify(): void {
