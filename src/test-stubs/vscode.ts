@@ -10,6 +10,10 @@ export class EventEmitter<T> {
   fire(data: T): void { for (const l of [...this.listeners]) l(data); }
   dispose(): void { this.listeners = []; }
 }
+export class Disposable {
+  constructor(private readonly callOnDispose: () => void) {}
+  dispose(): void { this.callOnDispose(); }
+}
 export const window = {
   showErrorMessage: (..._args: unknown[]): undefined => undefined,
   showWarningMessage: (..._args: unknown[]): undefined => undefined,

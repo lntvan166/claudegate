@@ -110,6 +110,9 @@ export function activate(context: vscode.ExtensionContext): void {
     void hookInstaller.syncHookIfNeeded().then(() => {
       hookInstaller.warnIfHookNotRegisteredInSettings();
     });
+    // Health signal: warn if settings.json changes out from under a running
+    // session (which silently invalidates the hook until the session restarts).
+    context.subscriptions.push(hookInstaller.watchSettingsForTrustInvalidation());
     const documentTracker = new DocumentTracker(sessionManager, workspacePath, log);
 
     const badgeBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);

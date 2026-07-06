@@ -49,6 +49,22 @@ export function computeSettingsPatch(
   return { content, changed: content !== raw };
 }
 
+/**
+ * Decision for the trust-invalidation health signal. Returns true when a
+ * detected change to settings.json should warn the user that running Claude
+ * Code sessions have gone silent.
+ *
+ * We warn on the *cause* (settings.json changed while claudegate is still
+ * registered) rather than the *effect* (edits arriving with no capture),
+ * because attributing an uncaptured edit to Claude is exactly the
+ * unsolvable problem DocumentTracker exists for. A change that removes the
+ * claudegate entry is an uninstall, not an invalidation — don't warn.
+ */
+export function shouldWarnTrustInvalidation(prevRaw: string, currentRaw: string): boolean {
+  if (currentRaw === prevRaw) return false;
+  return currentRaw.includes("claudegate");
+}
+
 export interface HookStatus {
   scriptInstalled: boolean;
   registered: boolean;
@@ -61,6 +77,11 @@ const HOOK_SETTINGS_WARNED_KEY = "claudegate.hookSettingsWarned";
 export class HookInstaller {
   private readonly isWindows = process.platform === "win32";
   private pythonCmd = "python3";
+
+  // Health-signal state: last settings.json content the extension has seen
+  // (baseline + our own writes), and whether we've already warned this session.
+  private lastKnownSettingsRaw: string | null = null;
+  private trustWarningShown = false;
 
   private readonly claudegateDir     = path.join(os.homedir(), ".claudegate");
   private readonly hookPyDest        = path.join(os.homedir(), ".claudegate", "hook.py");
@@ -290,7 +311,71 @@ export class HookInstaller {
     if (!changed) return false;
 
     fs.writeFileSync(this.claudeSettingsPath, content, "utf-8");
+    // Record our own write so the trust-invalidation watcher doesn't flag it
+    // (setup() shows its own restart notice when it actually writes).
+    this.lastKnownSettingsRaw = content;
     return true;
+  }
+
+  private readSettingsRaw(): string {
+    try {
+      return fs.readFileSync(this.claudeSettingsPath, "utf-8");
+    } catch {
+      return "";
+    }
+  }
+
+  /**
+   * Health signal: watch ~/.claude/settings.json and warn once if it changes
+   * out from under the running extension while the claudegate hook is still
+   * registered. Such a change silently invalidates the hook for every Claude
+   * Code session that was already open (Claude Code trusts hook config as
+   * loaded at session start), so capture goes quiet until those sessions
+   * restart. This turns that silent failure into a visible, actionable hint.
+   *
+   * Returns a Disposable that stops watching; register it on context.subscriptions.
+   */
+  watchSettingsForTrustInvalidation(): vscode.Disposable {
+    this.lastKnownSettingsRaw = this.readSettingsRaw();
+
+    const onChange = (): void => {
+      if (this.trustWarningShown) return;
+      const current = this.readSettingsRaw();
+      if (!shouldWarnTrustInvalidation(this.lastKnownSettingsRaw ?? "", current)) {
+        this.lastKnownSettingsRaw = current;
+        return;
+      }
+      this.lastKnownSettingsRaw = current;
+      this.trustWarningShown = true;
+      this.log.appendLine(
+        "[WARN] ~/.claude/settings.json changed while running — hook trust invalidated for open sessions."
+      );
+      void vscode.window
+        .showWarningMessage(
+          "Claude Gate: ~/.claude/settings.json changed. Claude Code loads hooks once at session start, so any " +
+            "Claude Code sessions already running have stopped tracking edits. Restart them (or run /hooks) to resume capture.",
+          "Verify Setup"
+        )
+        .then((action) => {
+          if (action === "Verify Setup") this.verify();
+        });
+    };
+
+    try {
+      fs.watchFile(this.claudeSettingsPath, { interval: 3000 }, onChange);
+    } catch (err) {
+      this.log.appendLine(
+        `[WARN] Could not watch settings.json for trust invalidation: ${(err as Error).message}`
+      );
+    }
+
+    return new vscode.Disposable(() => {
+      try {
+        fs.unwatchFile(this.claudeSettingsPath, onChange);
+      } catch {
+        /* nothing to detach */
+      }
+    });
   }
 
   verify(): void {

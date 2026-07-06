@@ -1,5 +1,5 @@
 import * as assert from "assert";
-import { computeSettingsPatch } from "./hookInstaller";
+import { computeSettingsPatch, shouldWarnTrustInvalidation } from "./hookInstaller";
 
 const CMD = "/home/me/.claudegate/hook.sh";
 const ENTRY = {
@@ -57,6 +57,29 @@ const ENTRY = {
   const parsed = JSON.parse(content);
   assert.deepEqual(parsed.hooks.PreToolUse[0], ENTRY, "entry installed over garbage");
   console.log("ok - recovers from malformed settings");
+}
+
+// ── Health signal: shouldWarnTrustInvalidation ────────────────────────────
+const registered = computeSettingsPatch("", CMD).content; // contains "claudegate"
+
+// 5. No change → never warn (covers our own no-op write / idle poll).
+{
+  assert.equal(shouldWarnTrustInvalidation(registered, registered), false, "identical → no warn");
+  console.log("ok - no warning when settings unchanged");
+}
+
+// 6. Changed while claudegate still registered → warn (trust invalidated).
+{
+  const mutated = registered.replace("Write|Edit|MultiEdit", "Write|Edit");
+  assert.notEqual(mutated, registered, "sanity: content actually changed");
+  assert.equal(shouldWarnTrustInvalidation(registered, mutated), true, "changed + registered → warn");
+  console.log("ok - warns when registered settings change mid-session");
+}
+
+// 7. Changed but claudegate removed → uninstall, not invalidation → no warn.
+{
+  assert.equal(shouldWarnTrustInvalidation(registered, "{}"), false, "claudegate removed → no warn");
+  console.log("ok - no warning when claudegate entry is removed (uninstall)");
 }
 
 console.log("all hookInstaller tests passed");
