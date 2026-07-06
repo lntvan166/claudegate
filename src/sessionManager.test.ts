@@ -239,6 +239,24 @@ function readSession(sp: string): any {
   console.log("ok - revert accepted returns the file to pending");
 }
 
+// newFile survives an accept→revert→reject round-trip: a Claude-created file
+// reopened via revert must still be DELETED on a later reject (not left on disk).
+{
+  const { ws } = newEnv();
+  const fp = path.join(ws, "created.ts");
+  fs.writeFileSync(fp, "CREATED");           // Claude created it
+  const sm = new SessionManager(fakeLog, ws); sm.startWatching();
+  sm.trackFileChange(fp, null, true);        // newFile capture (null baseline)
+  sm.acceptFile(fp);
+  const id = sm.getSession()!.accepted[0].id;
+  sm.revertAccepted(id);                     // reopen as pending
+  assert.equal(sm.getSession()!.files[fp].newFile, true, "newFile restored on revert");
+  sm.rejectFile(fp);
+  assert.equal(fs.existsSync(fp), false, "reject deletes the reopened new file");
+  sm.stopWatching();
+  console.log("ok - newFile survives accept→revert→reject (delete-safety)");
+}
+
 // Clear commands reset the stores.
 {
   const { ws } = newEnv();

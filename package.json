@@ -2,7 +2,7 @@
   "name": "claudegate",
   "displayName": "Claude Gate",
   "description": "Review Claude Code's file changes in a native diff panel — accept or reject each edit. The PreToolUse hook captures all Claude Code edits (terminal CLI and in-editor extension); the filesystem watcher is an optional fallback for non-Claude agents and is off by default.",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "publisher": "lntvan166",
   "icon": "media/icon.png",
   "engines": {
@@ -559,7 +559,7 @@
     "watch": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --platform=node --sourcemap --watch",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext ts",
-    "test:unit": "esbuild src/excludeMatcher.test.ts --bundle --platform=node --format=cjs --outfile=out/excludeMatcher.test.cjs && node out/excludeMatcher.test.cjs && esbuild src/changeCount.test.ts --bundle --platform=node --format=cjs --outfile=out/changeCount.test.cjs && node out/changeCount.test.cjs && esbuild src/reviewModel.test.ts --bundle --platform=node --format=cjs --outfile=out/reviewModel.test.cjs && node out/reviewModel.test.cjs && esbuild src/sessionManager.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/sessionManager.test.cjs && node out/sessionManager.test.cjs",
+    "test:unit": "esbuild src/excludeMatcher.test.ts --bundle --platform=node --format=cjs --outfile=out/excludeMatcher.test.cjs && node out/excludeMatcher.test.cjs && esbuild src/changeCount.test.ts --bundle --platform=node --format=cjs --outfile=out/changeCount.test.cjs && node out/changeCount.test.cjs && esbuild src/reviewModel.test.ts --bundle --platform=node --format=cjs --outfile=out/reviewModel.test.cjs && node out/reviewModel.test.cjs && esbuild src/workspaceScope.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/workspaceScope.test.cjs && node out/workspaceScope.test.cjs && esbuild src/sessionManager.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/sessionManager.test.cjs && node out/sessionManager.test.cjs",
     "test:hook": "python3 -m unittest discover -s hooks/tests -p 'test_*.py'",
     "test": "npm run test:unit && npm run test:hook"
   },

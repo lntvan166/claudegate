@@ -7,6 +7,22 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.3.3] — 2026-07-06
+
+### Fixed
+
+- **Captured changes could silently vanish from the Pending panel.** When Claude created or edited a file and you then accepted or rejected an *unrelated* file, the just-captured change could disappear without ever being reviewed. The dual-writer reconcile (`mergeFreshCaptures`) used a wall-clock heuristic to decide whether a change was "already handled"; an unrelated action could advance that clock past a genuine, unseen capture and drop it. It now keys on the actual accept/reject **decision record** instead of a timestamp, so an unseen capture is never mistaken for a handled one.
+- **The extension no longer relies on file mtime to detect concurrent hook writes.** It now always reconciles with the on-disk session before writing, so a coarse-granularity filesystem (which can stamp two writes with the same mtime) can no longer cause a capture to be clobbered.
+- **The hook can no longer overwrite your accept/reject history.** The hook and the extension now coordinate through a fail-open advisory lock around each read-modify-write, so a capture landing at the same moment as an accept/reject can’t erase the decision log. The hook never blocks a Claude edit — if the lock is contended it proceeds anyway, and the extension’s always-reconcile backstops it.
+- **A Claude-created file reopened via Revert/Re-apply is again deleted on reject.** The `newFile` marker was lost when a change was reopened, so rejecting a reopened new file left it on disk instead of removing it. The marker is now carried through the accepted/rejected record.
+- **Windows: in-repo pending changes could be wrongly pruned.** Workspace-containment checks are now case-insensitive on Windows, so a drive-letter/path-case mismatch no longer makes a real pending file look "out of workspace" and get dropped.
+
+### Notes
+
+- This release changes `hooks/hook.py` (the coordination lock). Re-run **Claude Gate: Setup Hook** (or let the activate auto-sync deploy it) to pick up the new hook.
+
+---
+
 ## [1.3.2] — 2026-07-06
 
 ### Fixed

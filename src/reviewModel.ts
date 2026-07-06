@@ -16,6 +16,8 @@ export interface ReviewRecord {
   after: string | null;  // accepted content, or the discarded Claude version
   decidedAt: string;     // ISO timestamp
   sessionId?: string;
+  newFile?: boolean;     // preserved so a reopened (revert/reapply) new-file entry
+                         // still deletes-on-reject instead of being left on disk
 }
 
 export interface Session {
@@ -61,16 +63,48 @@ export function shouldPruneNoOp(
 
 // Merge hook-captured pending entries that landed on disk since we loaded, so a
 // concurrent hook write is not lost when the extension persists. Only files{}
-// is reconciled (the hook's sole territory); mine's accepted[]/rejected{} and
-// file removals are authoritative. "Fresh" = absent from mine.files AND
-// capturedAt newer than our last load. O(disk.files) — never walks accepted[].
-export function mergeFreshCaptures(mine: Session, disk: Session, lastLoadedAtMs: number): Session {
+// is reconciled (the hook's sole territory); mine's accepted[]/rejected{} are
+// authoritative.
+//
+// A disk pending entry absent from mine.files is either (a) a hook capture we
+// never consumed, or (b) an entry the user already accepted/rejected (so we
+// dropped it from files, but the hook's pre-write copy still lingers on disk
+// until our persist overwrites it). We used to tell these apart with a
+// wall-clock guard (capturedAt > lastLoaded), but that silently dropped genuine
+// unseen captures whenever an unrelated load raced ahead of the capture's
+// timestamp — the "vanished pending file" race. The authoritative signal for
+// "already handled" is a DECISION RECORD, not a clock: skip a disk entry only
+// when we hold an accept/reject for that path at least as new as the capture.
+// Otherwise merge it (a later reconcile re-prunes a no-op, and the next
+// loadSession drops an out-of-workspace re-add, so erring toward keeping never
+// loses data).
+export function mergeFreshCaptures(mine: Session, disk: Session): Session {
   for (const [path, entry] of Object.entries(disk.files)) {
     if (mine.files[path]) continue;          // we already know this path
-    if (!entry.capturedAt) continue;         // no timestamp → cannot prove fresh
-    if (Date.parse(entry.capturedAt) > lastLoadedAtMs) {
-      mine.files[path] = entry;              // a hook capture we missed → merge in
+    if (!entry.capturedAt) continue;         // no timestamp → cannot prove it's a real capture
+    const captured = Date.parse(entry.capturedAt);
+    if (Number.isNaN(captured)) continue;    // unparseable → cannot reason; leave it
+
+    // Latest decision (accept or reject) we hold for this path, if any.
+    let decidedAtMs = -Infinity;
+    for (const rec of mine.accepted) {
+      if (rec.path !== path) continue;
+      const d = Date.parse(rec.decidedAt);
+      if (!Number.isNaN(d) && d > decidedAtMs) decidedAtMs = d;
     }
+    const rejected = mine.rejected[path];
+    if (rejected) {
+      const d = Date.parse(rejected.decidedAt);
+      if (!Number.isNaN(d) && d > decidedAtMs) decidedAtMs = d;
+    }
+
+    // Merge unless a decision STRICTLY newer than this capture supersedes it.
+    // On an exact tie (captured === decidedAt) we keep: a genuinely-decided
+    // file's stale on-disk copy always predates its decision (capture happens
+    // before the decision, and the decision's persist removes it from files{}),
+    // so an equal timestamp can only be a fresh concurrent re-capture — dropping
+    // it would be data loss.
+    if (captured >= decidedAtMs) mine.files[path] = entry;
   }
   return mine;
 }
@@ -85,6 +119,7 @@ export function acceptEntry(session: Session, path: string, after: string | null
     after,
     decidedAt,
     sessionId: entry.sessionId,
+    newFile: entry.newFile,
   });
   delete session.files[path];
 }
@@ -99,6 +134,7 @@ export function rejectEntry(session: Session, path: string, after: string | null
     after,
     decidedAt,
     sessionId: entry.sessionId,
+    newFile: entry.newFile,
   };
   delete session.files[path];
 }

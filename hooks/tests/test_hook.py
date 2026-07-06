@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 HOOK = os.path.join(os.path.dirname(__file__), "..", "hook.py")
@@ -208,6 +209,47 @@ class HookBaselineTest(unittest.TestCase):
             with open(self.session_file) as f:
                 files = json.load(f).get("files", {})
         self.assertNotIn(self.file, files)
+
+    def test_preserves_accepted_and_rejected_on_capture(self):
+        # The hook writes only files{}; an existing accept/reject log on disk
+        # must survive a capture unchanged (it must never rewrite them away).
+        with open(self.file, "w") as f:
+            f.write("v1")
+        self.write_full_session(
+            accepted=[{"id": "x", "path": "/other", "before": "a", "after": "b", "decidedAt": "t"}],
+            rejected={"/r": {"id": "y", "path": "/r", "before": "c", "after": "d", "decidedAt": "t"}},
+        )
+        self.run_hook()
+        s = self.read_session()
+        self.assertEqual(len(s["accepted"]), 1, "accepted log preserved through capture")
+        self.assertIn("/r", s["rejected"], "rejected log preserved through capture")
+        self.assertIn(self.file, s["files"], "new capture recorded")
+
+    def test_fail_open_when_lock_held(self):
+        # A lock held by another (fresh) writer must not hang the hook: it waits
+        # briefly, then proceeds unlocked so it can never block a Claude edit.
+        lock_path = self.session_file + ".lock"
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        with open(lock_path, "w") as f:
+            f.write("99999")  # a "live" lock we never release
+        with open(self.file, "w") as f:
+            f.write("v1")
+        self.run_hook()  # check=True → also asserts a 0 exit (didn't error/block)
+        self.assertIn(self.file, self.read_session()["files"], "captured despite held lock")
+
+    def test_steals_stale_lock(self):
+        # A lock left by a crashed writer (old mtime) is stolen, and released.
+        lock_path = self.session_file + ".lock"
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        with open(lock_path, "w") as f:
+            f.write("12345")
+        old = time.time() - 3600
+        os.utime(lock_path, (old, old))  # make it stale
+        with open(self.file, "w") as f:
+            f.write("v1")
+        self.run_hook()
+        self.assertIn(self.file, self.read_session()["files"], "captured after stealing stale lock")
+        self.assertFalse(os.path.exists(lock_path), "stale lock released after use")
 
 
 if __name__ == "__main__":

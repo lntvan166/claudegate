@@ -145,40 +145,83 @@ console.log("ok - makeRecordId");
   const sess = (files: Record<string, FileEntry>, accepted = [] as any[]): Session =>
     ({ sessionId: "s", status: "active", files, accepted, rejected: {} });
 
-  // fresh disk capture (capturedAt > lastLoaded), absent from mine → merged
+  // a disk capture absent from mine with NO decision record → merged (we never
+  // consumed it; keep it rather than lose a hook capture)
   {
     const mine = sess({});
     const disk = sess({ "/b": pend("B", iso(T + 100)) });
-    mergeFreshCaptures(mine, disk, T);
+    mergeFreshCaptures(mine, disk);
     assert.ok(mine.files["/b"], "fresh capture merged in");
   }
-  // stale/removed (capturedAt <= lastLoaded), absent from mine → NOT merged
+  // REGRESSION (dropped-SKILL.md race): an unseen capture whose capturedAt is
+  // OLDER than the extension's last load must still be merged when there is no
+  // accept/reject decision for it. The old wall-clock rule (capturedAt >
+  // lastLoaded) misread this as "user removed it" and silently dropped it while
+  // an unrelated accept was persisted.
+  {
+    const mine = sess({ "/other": pend("O", iso(T + 50)) });
+    const disk = sess({
+      "/unseen": pend(null, iso(T - 100)), // hook capture the extension never saw
+      "/other":  pend("O", iso(T + 50)),
+    });
+    acceptEntry(mine, "/other", "after", iso(T + 200)); // decide a DIFFERENT file
+    mergeFreshCaptures(mine, disk);
+    assert.ok(mine.files["/unseen"], "unseen capture with no decision must survive an unrelated accept");
+  }
+  // a capture the user actually DECIDED (accept newer than the capture) → NOT
+  // re-added; the decision supersedes the stale on-disk pending entry
+  {
+    const mine = sess({}, [{ id: "d::/a", path: "/a", before: "A", after: "A2", decidedAt: iso(T + 100) }]);
+    const disk = sess({ "/a": pend("A", iso(T)) }); // hook wrote before we accepted
+    mergeFreshCaptures(mine, disk);
+    assert.equal(mine.files["/a"], undefined, "decided (accepted) entry not resurrected");
+  }
+  // symmetric to the above but via REJECT: a reject newer than the capture → NOT
+  // re-added (the merge must consult rejected{}, not just accepted[])
   {
     const mine = sess({});
-    const disk = sess({ "/a": pend("A", iso(T - 100)) });
-    mergeFreshCaptures(mine, disk, T);
-    assert.equal(mine.files["/a"], undefined, "stale/removed entry not re-added");
+    mine.rejected["/r"] = { id: "d::/r", path: "/r", before: "R", after: "R2", decidedAt: iso(T + 100) };
+    const disk = sess({ "/r": pend("R", iso(T)) });
+    mergeFreshCaptures(mine, disk);
+    assert.equal(mine.files["/r"], undefined, "rejected entry not resurrected by merge");
+  }
+  // rejected THEN re-captured (capturedAt newer than the reject) → merged again
+  {
+    const mine = sess({});
+    mine.rejected["/r"] = { id: "d::/r", path: "/r", before: "R", after: "R2", decidedAt: iso(T) };
+    const disk = sess({ "/r": pend("R", iso(T + 100)) }); // edited again after reject
+    mergeFreshCaptures(mine, disk);
+    assert.ok(mine.files["/r"], "re-captured rejected file re-appears as pending");
+  }
+  // tie boundary (capturedAt === decidedAt) → KEEP: an equal timestamp can only
+  // be a fresh concurrent re-capture, so dropping it would be data loss
+  {
+    const mine = sess({}, [{ id: "d::/t", path: "/t", before: "A", after: "A2", decidedAt: iso(T) }]);
+    const disk = sess({ "/t": pend("A", iso(T)) });
+    mergeFreshCaptures(mine, disk);
+    assert.ok(mine.files["/t"], "capture tying the decision timestamp is kept (data-loss-averse)");
   }
   // path already in mine.files → mine kept (not overwritten)
   {
     const mine = sess({ "/f": pend("MINE", iso(T + 100)) });
     const disk = sess({ "/f": pend("DISK", iso(T + 200)) });
-    mergeFreshCaptures(mine, disk, T);
+    mergeFreshCaptures(mine, disk);
     assert.equal(mine.files["/f"].originalContent, "MINE", "existing entry kept");
   }
-  // coexistence: fresh capture whose path is in mine.accepted → merged as pending
+  // coexistence: RE-captured file (capturedAt newer than its accept) → merged as
+  // pending again; the accept record is preserved
   {
-    const mine = sess({}, [{ id: "t::/f", path: "/f", before: "A", after: "B", decidedAt: "t" }]);
-    const disk = sess({ "/f": pend("B", iso(T + 100)) });
-    mergeFreshCaptures(mine, disk, T);
+    const mine = sess({}, [{ id: "t::/f", path: "/f", before: "A", after: "B", decidedAt: iso(T) }]);
+    const disk = sess({ "/f": pend("B", iso(T + 100)) }); // edited again after the accept
+    mergeFreshCaptures(mine, disk);
     assert.ok(mine.files["/f"], "re-captured accepted file re-appears as pending");
     assert.equal(mine.accepted.length, 1, "accept record preserved");
   }
-  // disk entry with no capturedAt → skipped (can't prove fresh)
+  // disk entry with no capturedAt → skipped (can't prove it's a real capture)
   {
     const mine = sess({});
     const disk = sess({ "/x": pend("X", undefined) });
-    mergeFreshCaptures(mine, disk, T);
+    mergeFreshCaptures(mine, disk);
     assert.equal(mine.files["/x"], undefined, "no-capturedAt entry skipped");
   }
   console.log("ok - mergeFreshCaptures (dual-writer reconcile)");

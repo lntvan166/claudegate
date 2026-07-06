@@ -18,6 +18,17 @@ export type ReviewStatus = "pending" | "accepted" | "rejected"; // panel tab id
 // delay avoids pruning it in that window.
 const RECONCILE_GRACE_MS = 1500;
 
+// Advisory lock shared with hook.py to serialize read-modify-write of the
+// session file, so the hook cannot overwrite the extension's accepted/rejected
+// log (or vice-versa) from a snapshot taken microseconds earlier. Both sides
+// FAIL OPEN: if the lock can't be acquired in time we proceed anyway, because a
+// rare unlocked write (still backstopped by mergeFreshCaptures) is far better
+// than blocking — the hook must never stall a Claude write. A lock older than
+// LOCK_STALE_MS is presumed abandoned by a crashed writer and stolen.
+const LOCK_STALE_MS = 3000;
+const LOCK_TIMEOUT_MS = 200;   // extension gives up fast (keeps the UI responsive)
+const LOCK_SLEEP_MS = 5;
+
 export class SessionManager {
   private readonly sessionPath: string;
   private readonly sessionFilename: string;
@@ -26,8 +37,6 @@ export class SessionManager {
   private session: Session | null = null;
   private watcher: fs.FSWatcher | null = null;
   private reconcileTimer: ReturnType<typeof setTimeout> | null = null;
-  private lastLoadedAtMs = 0;
-  private loadedMtimeMs = 0;
 
   private readonly _onSessionChange = new vscode.EventEmitter<Session | null>();
   readonly onSessionChange = this._onSessionChange.event;
@@ -255,11 +264,11 @@ export class SessionManager {
     }
   }
 
-  // Known limitation: hook.py and the extension both read-modify-write the
-  // same JSON file without a cross-process lock. Atomic rename prevents torn
-  // reads, but a concurrent hook.py write can still overwrite accept/reject
-  // state written by the extension (and vice-versa). This is low-probability
-  // in normal single-user use; the long-term fix is a version/timestamp check.
+  // Concurrency: hook.py and the extension both read-modify-write the same JSON
+  // file. persist() serializes against the hook via the fail-open advisory lock
+  // (see acquireLock) and always merges the on-disk files{} before writing, so a
+  // hook capture is never lost. The residual window is the hook's fail-open case
+  // (it must never block a Claude write); atomic rename still prevents torn reads.
 
   rejectAll(): void {
     const s = this.session;
@@ -316,7 +325,7 @@ export class SessionManager {
     // Only reopen as pending if there is no pending entry already and this
     // record is still the file's on-disk state (it wasn't re-edited since).
     if (!s.files[rec.path] && this.readFileOrNull(rec.path) === rec.after) {
-      s.files[rec.path] = { originalContent: rec.before, reviewStatus: "pending", sessionId: rec.sessionId, capturedAt: new Date().toISOString() };
+      s.files[rec.path] = { originalContent: rec.before, reviewStatus: "pending", newFile: rec.newFile, sessionId: rec.sessionId, capturedAt: new Date().toISOString() };
     }
   }
 
@@ -366,7 +375,7 @@ export class SessionManager {
       return (err as Error).message;
     }
     delete s.rejected[filePath];
-    s.files[filePath] = { originalContent: rec.before, reviewStatus: "pending", sessionId: rec.sessionId, capturedAt: new Date().toISOString() };
+    s.files[filePath] = { originalContent: rec.before, reviewStatus: "pending", newFile: rec.newFile, sessionId: rec.sessionId, capturedAt: new Date().toISOString() };
     this.log.appendLine(`[INFO] Re-applied: ${filePath}`);
     return null;
   }
@@ -450,8 +459,6 @@ export class SessionManager {
   private loadSession(): void {
     try {
       const raw = JSON.parse(fs.readFileSync(this.sessionPath, "utf-8"));
-      this.lastLoadedAtMs = Date.now();
-      try { this.loadedMtimeMs = fs.statSync(this.sessionPath).mtimeMs; } catch { this.loadedMtimeMs = 0; }
       const migrated = migrateSession(raw);
       const changed = JSON.stringify(migrated) !== JSON.stringify(raw);
       this.session = migrated;
@@ -526,21 +533,78 @@ export class SessionManager {
     }
   }
 
+  private get lockPath(): string {
+    return this.sessionPath + ".lock";
+  }
+
+  // Sync millisecond sleep that doesn't spin the CPU (persist() is synchronous).
+  private sleep(ms: number): void {
+    try {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    } catch {
+      /* SharedArrayBuffer unavailable → skip the wait; the retry loop still bounds attempts */
+    }
+  }
+
+  // Acquire the advisory lock, returning an fd, or null if we should proceed
+  // without it (fail-open). Steals a stale lock left by a crashed writer.
+  private acquireLock(): number | null {
+    const deadline = Date.now() + LOCK_TIMEOUT_MS;
+    for (;;) {
+      try {
+        const fd = fs.openSync(this.lockPath, "wx"); // O_CREAT|O_EXCL
+        try { fs.writeSync(fd, String(process.pid)); } catch { /* pid is advisory only */ }
+        return fd;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") return null; // unexpected → skip lock
+        try {
+          const age = Date.now() - fs.statSync(this.lockPath).mtimeMs;
+          if (age > LOCK_STALE_MS) { try { fs.unlinkSync(this.lockPath); } catch { /* raced */ } continue; }
+        } catch {
+          continue; // lock vanished between open and stat → try to grab it
+        }
+        if (Date.now() >= deadline) return null; // timed out → proceed unlocked
+        this.sleep(LOCK_SLEEP_MS);
+      }
+    }
+  }
+
+  private releaseLock(fd: number | null): void {
+    if (fd === null) return;
+    try { fs.closeSync(fd); } catch { /* already closed */ }
+    try { fs.unlinkSync(this.lockPath); } catch { /* already gone */ }
+  }
+
   private persist(): void {
     if (!this.session) return;
 
-    // Dual-writer guard: if the on-disk file changed since we loaded it, a
-    // concurrent writer (the hook) ran — re-read and merge its fresh captures
-    // so they are not lost. Common case: mtime matches → just one stat, no
-    // read/parse/merge.
+    const lock = this.acquireLock();
     try {
-      const currentMtime = fs.statSync(this.sessionPath).mtimeMs;
-      if (currentMtime !== this.loadedMtimeMs) {
-        const disk = migrateSession(JSON.parse(fs.readFileSync(this.sessionPath, "utf-8")));
-        this.session = mergeFreshCaptures(this.session, disk, this.lastLoadedAtMs);
-      }
+      this.persistLocked();
+    } finally {
+      this.releaseLock(lock);
+    }
+    this._onSessionChange.fire(this.session);
+  }
+
+  // The read-modify-write body of persist(), run while holding the advisory lock.
+  private persistLocked(): void {
+    if (!this.session) return;
+
+    // Dual-writer guard: always re-read the on-disk copy and merge in any hook
+    // captures that landed since we loaded, so a concurrent hook write is never
+    // clobbered. We deliberately do NOT gate this on an mtime check — coarse
+    // filesystem mtime granularity (FAT, many network/virtual mounts) can bucket
+    // a concurrent hook write into the same timestamp as our last write, and
+    // skipping the merge on that false "unchanged" reading silently drops the
+    // capture. The read+parse+merge is cheap (small JSON, and persist only runs
+    // on a user decision or a reconcile), and mergeFreshCaptures is a no-op when
+    // nothing changed, so always reconciling is both correct and inexpensive.
+    try {
+      const disk = migrateSession(JSON.parse(fs.readFileSync(this.sessionPath, "utf-8")));
+      this.session = mergeFreshCaptures(this.session, disk);
     } catch {
-      // stat/read/parse failed → write our own state (never lose it)
+      // no readable/parseable disk copy → write our own state (never lose it)
     }
 
     // No pending entries left → the session is fully reviewed; any pending
@@ -549,13 +613,9 @@ export class SessionManager {
 
     try {
       this.atomicWrite(this.sessionPath, JSON.stringify(this.session, null, 2));
-      try { this.loadedMtimeMs = fs.statSync(this.sessionPath).mtimeMs; } catch { /* keep prior */ }
-      this.lastLoadedAtMs = Date.now();
     } catch (err) {
       this.log.appendLine(`[ERROR] ` + `Failed to persist session: ${(err as Error).message}`);
     }
-
-    this._onSessionChange.fire(this.session);
   }
 
   // Write via a temp file + rename so an interrupted write can't corrupt the

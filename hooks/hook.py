@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 import json
 import os
+import time
 import hashlib
 import random
 from datetime import datetime, timezone
@@ -18,6 +19,59 @@ from datetime import datetime, timezone
 CLAUDEGATE_DIR = os.path.expanduser("~/.claudegate")
 SESSIONS_DIR   = os.path.join(CLAUDEGATE_DIR, "sessions")
 WORKSPACE_ROOTS_FILE = os.path.join(CLAUDEGATE_DIR, "workspace-roots.json")
+
+# Advisory lock shared with the extension to serialize read-modify-write of the
+# session file, so this hook cannot overwrite the extension's accepted/rejected
+# log from a snapshot loaded microseconds before the user accepted a file.
+# CRITICAL: this hook runs synchronously before every Claude write, so it must
+# FAIL OPEN — never block the edit. We wait only briefly for the lock (the
+# extension holds it for a few milliseconds at most) and proceed unlocked on
+# timeout; a stale lock left by a crashed process is stolen after LOCK_STALE_S.
+LOCK_STALE_S   = 3.0
+LOCK_TIMEOUT_S = 0.5
+LOCK_SLEEP_S   = 0.005
+
+
+def acquire_lock(session_file: str):
+    """Return (fd, lock_path). fd is None when we should proceed without the lock."""
+    lock_path = session_file + ".lock"
+    deadline = time.monotonic() + LOCK_TIMEOUT_S
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, str(os.getpid()).encode())
+            except OSError:
+                pass  # pid is advisory
+            return fd, lock_path
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(lock_path) > LOCK_STALE_S:
+                    try:
+                        os.unlink(lock_path)  # steal an abandoned lock
+                    except OSError:
+                        pass
+                    continue
+            except OSError:
+                continue  # lock vanished between open and stat → retry
+            if time.monotonic() >= deadline:
+                return None, lock_path  # fail open: proceed unlocked
+            time.sleep(LOCK_SLEEP_S)
+        except OSError:
+            return None, lock_path  # unexpected fs error → don't block the edit
+
+
+def release_lock(fd, lock_path: str) -> None:
+    if fd is None:
+        return
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    try:
+        os.unlink(lock_path)
+    except OSError:
+        pass
 
 
 def workspace_root_for_file(file_path: str, cwd: str) -> str | None:
@@ -52,12 +106,14 @@ def workspace_session_file(workspace_root: str) -> str:
     return os.path.join(SESSIONS_DIR, f"{workspace_hash}.json")
 
 
-# Known limitation: hook.py and the VS Code extension both read-modify-write
-# the same JSON file without a cross-process lock. The probability of a
-# collision is very low (both must be in their read→write window simultaneously)
-# but is non-zero when the user is actively accepting/rejecting files while
-# Claude is writing new ones. Atomic os.replace() prevents torn reads, but
-# does not prevent one writer from overwriting the other's changes.
+# Concurrency: hook.py and the VS Code extension both read-modify-write the same
+# JSON file. They coordinate via the fail-open advisory lock above, which
+# serializes the read→write window in the common case; atomic os.replace() also
+# prevents torn reads. Residual (accepted): because the hook must fail open (it
+# can never block a Claude write), a write during a lock-timeout/steal window is
+# still possible. The extension backstops this by always merging the on-disk
+# files{} before it writes (see mergeFreshCaptures), so a hook capture survives
+# even an unlocked collision.
 
 def load_session(session_file: str) -> dict | None:
     try:
@@ -125,20 +181,27 @@ def main() -> None:
     else:
         original_content = None  # genuinely new — Claude is creating it
 
-    session = load_session(session_file) or new_session()
-    existing = session["files"].get(file_path)
-    if existing is None or existing.get("reviewStatus") != "pending":
-        session["files"][file_path] = {
-            "originalContent": original_content,
-            "reviewStatus": "pending",
-            "newFile": original_content is None,
-            "sessionId": session_id,
-            "capturedAt": captured_at,
-        }
-        if session.get("status") == "reviewed":
-            session["status"] = "active"
-        save_session(session, session_file)
-    # else: an existing pending entry keeps its frozen baseline (no-op)
+    # Hold the advisory lock across the whole read-modify-write so an accept/
+    # reject the extension persists in this window can't be clobbered by our
+    # write (and vice-versa). Fail-open: acquire_lock returns None on timeout.
+    fd, lock_path = acquire_lock(session_file)
+    try:
+        session = load_session(session_file) or new_session()
+        existing = session["files"].get(file_path)
+        if existing is None or existing.get("reviewStatus") != "pending":
+            session["files"][file_path] = {
+                "originalContent": original_content,
+                "reviewStatus": "pending",
+                "newFile": original_content is None,
+                "sessionId": session_id,
+                "capturedAt": captured_at,
+            }
+            if session.get("status") == "reviewed":
+                session["status"] = "active"
+            save_session(session, session_file)
+        # else: an existing pending entry keeps its frozen baseline (no-op)
+    finally:
+        release_lock(fd, lock_path)
 
 
 if __name__ == "__main__":
