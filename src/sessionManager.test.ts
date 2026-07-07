@@ -347,4 +347,38 @@ function readSession(sp: string): any {
   console.log("ok - pending scope: out-of-workspace pruned, excluded uncounted");
 }
 
-console.log("done");
+// REGRESSION (nonstop-rewrite loop): a settled no-op pending entry (baseline ==
+// disk, captured long ago) must be pruned by the reconcile timer AND STAY pruned.
+// Before the fix, persist()'s dual-writer merge resurrected the just-pruned entry
+// from the stale on-disk copy every cycle, so removed>0 fired persist forever
+// (≈ every RECONCILE_GRACE_MS) — the file was rewritten nonstop and the UI
+// reloaded without end. We assert the entry is gone and the file stops changing.
+(async () => {
+  const { ws, sp } = newEnv();
+  const noop = path.join(ws, "noop.go");
+  fs.writeFileSync(noop, "SAME");
+  fs.mkdirSync(path.dirname(sp), { recursive: true });
+  const old = new Date(Date.now() - 60_000).toISOString(); // captured well past grace
+  fs.writeFileSync(sp, JSON.stringify({
+    sessionId: "t", status: "active",
+    files: { [noop]: { originalContent: "SAME", reviewStatus: "pending", capturedAt: old } },
+    accepted: [], rejected: {},
+  }));
+  const sm = new SessionManager(fakeLog, ws);
+  sm.startWatching(); // load → schedules reconcile
+
+  const RECONCILE_GRACE_MS = 1500;
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  await sleep(RECONCILE_GRACE_MS + 500);            // let reconcile fire + persist settle
+  assert.equal(sm.getSession()!.files[noop], undefined, "settled no-op pruned in memory");
+  assert.equal(readSession(sp).files[noop], undefined, "settled no-op pruned on disk");
+
+  const before = fs.statSync(sp).mtimeMs;
+  await sleep(RECONCILE_GRACE_MS + 500);            // if the loop persisted, mtime advances
+  assert.equal(fs.statSync(sp).mtimeMs, before, "session file stops being rewritten (no loop)");
+  assert.equal(readSession(sp).files[noop], undefined, "prune stays applied (not resurrected)");
+  sm.stopWatching();
+  console.log("ok - settled no-op prune sticks; no nonstop-rewrite loop");
+
+  console.log("done");
+})().catch((e) => { console.error(e); process.exit(1); });

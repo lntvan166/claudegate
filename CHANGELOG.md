@@ -7,6 +7,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.4.1] — 2026-07-07
+
+### Fixed
+
+- **The review panels no longer reload nonstop when a no-op change is pending.** If a captured file ended up identical to its baseline (e.g. Claude edited it and the edit was undone by hand), the extension could get stuck rewriting its session file several times a second — flickering the Pending/Accepted/Rejected panels and the explorer badges without end. The cause was an interaction between two safeguards: the reconcile pass pruned the settled no-op entry, but the dual-writer merge that guards against concurrent hook writes then re-read the (not-yet-rewritten) session file and *resurrected* the entry it had just pruned — so the prune never stuck and every cycle wrote the file again. The merge now skips re-adding an entry the same persist cycle just deliberately pruned (matched by capture timestamp, so a genuinely fresh re-capture still merges and no hook write is lost). Both the no-op reconcile and the out-of-workspace prune share the guard.
+
+---
+
 ## [1.4.0] — 2026-07-06
 
 ### Fixed

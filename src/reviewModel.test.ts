@@ -224,6 +224,27 @@ console.log("ok - makeRecordId");
     mergeFreshCaptures(mine, disk);
     assert.equal(mine.files["/x"], undefined, "no-capturedAt entry skipped");
   }
+  // REGRESSION (nonstop-rewrite loop): reconcile just pruned a settled no-op
+  // entry, so mine.files no longer has it — but the on-disk copy persist re-reads
+  // still does. Without the prunedThisCycle guard the merge resurrects it every
+  // persist, so removed>0 fires persist forever (~every RECONCILE_GRACE_MS) and
+  // the UI reloads nonstop. The guard skips re-adding the SAME stale entry
+  // (matched by capturedAt) so the prune sticks.
+  {
+    const mine = sess({});
+    const disk = sess({ "/n": pend("N", iso(T)) }); // baseline==disk no-op still on disk
+    mergeFreshCaptures(mine, disk, new Map([["/n", iso(T)]]));
+    assert.equal(mine.files["/n"], undefined, "just-pruned no-op not resurrected by merge");
+  }
+  // …but a genuinely fresh RE-capture to a just-pruned path (newer capturedAt)
+  // must still merge — the guard only suppresses the exact stale entry, never a
+  // new hook write that landed in the prune→persist window.
+  {
+    const mine = sess({});
+    const disk = sess({ "/n": pend("N2", iso(T + 100)) }); // hook re-captured after prune
+    mergeFreshCaptures(mine, disk, new Map([["/n", iso(T)]]));
+    assert.ok(mine.files["/n"], "fresh re-capture (newer capturedAt) still merged despite prune");
+  }
   console.log("ok - mergeFreshCaptures (dual-writer reconcile)");
 }
 

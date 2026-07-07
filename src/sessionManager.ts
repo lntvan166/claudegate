@@ -477,15 +477,17 @@ export class SessionManager {
 
   private pruneOutOfWorkspaceEntries(): void {
     if (!this.session) return;
-    let removed = 0;
+    const pruned = new Map<string, string | undefined>();
     for (const filePath of Object.keys(this.session.files)) {
       if (!isInWorkspace(filePath)) {
+        pruned.set(filePath, this.session.files[filePath].capturedAt);
         delete this.session.files[filePath];
-        removed++;
         this.log.appendLine(`[INFO] Pruned out-of-workspace entry: ${filePath}`);
       }
     }
-    if (removed > 0) this.persist();
+    // Same anti-resurrection guard as reconcilePending: the merge must not re-add
+    // an entry we just pruned from the stale on-disk copy (would loop persist).
+    if (pruned.size > 0) this.persist(pruned);
   }
 
   // Prune temp files Claude created then deleted, after a grace delay so a
@@ -505,19 +507,22 @@ export class SessionManager {
   private reconcilePending(): void {
     if (!this.session) return;
     const now = Date.now();
-    let removed = 0;
+    const pruned = new Map<string, string | undefined>();
     let youngNoOp = false;
     for (const [filePath, entry] of Object.entries(this.session.files)) {
       const disk = this.readFileOrNull(filePath);
       if (shouldPruneNoOp(entry, disk, now, RECONCILE_GRACE_MS)) {
+        pruned.set(filePath, entry.capturedAt);
         delete this.session.files[filePath];
-        removed++;
         this.log.appendLine(`[INFO] Pruned no-op pending entry: ${filePath}`);
       } else if (!hasRealChange(entry.originalContent, disk)) {
         youngNoOp = true; // no-op but still within grace — re-evaluate once it settles
       }
     }
-    if (removed > 0) this.persist();
+    // Pass the pruned set so the dual-writer merge in persist() does not resurrect
+    // these entries from the stale on-disk copy — otherwise the prune never sticks
+    // and persist spins forever (nonstop UI reload).
+    if (pruned.size > 0) this.persist(pruned);
     // Give still-young no-op entries their full per-entry grace instead of the
     // shared timer's remaining time (closes the burst-coalescing hole).
     if (youngNoOp) this.scheduleReconcile();
@@ -575,12 +580,15 @@ export class SessionManager {
     try { fs.unlinkSync(this.lockPath); } catch { /* already gone */ }
   }
 
-  private persist(): void {
+  // `prunedThisCycle` (path → capturedAt) lets a caller that just deliberately
+  // removed no-op entries tell the dual-writer merge below not to resurrect them
+  // from the still-stale on-disk copy (see mergeFreshCaptures).
+  private persist(prunedThisCycle?: Map<string, string | undefined>): void {
     if (!this.session) return;
 
     const lock = this.acquireLock();
     try {
-      this.persistLocked();
+      this.persistLocked(prunedThisCycle);
     } finally {
       this.releaseLock(lock);
     }
@@ -588,7 +596,7 @@ export class SessionManager {
   }
 
   // The read-modify-write body of persist(), run while holding the advisory lock.
-  private persistLocked(): void {
+  private persistLocked(prunedThisCycle?: Map<string, string | undefined>): void {
     if (!this.session) return;
 
     // Dual-writer guard: always re-read the on-disk copy and merge in any hook
@@ -602,7 +610,7 @@ export class SessionManager {
     // nothing changed, so always reconciling is both correct and inexpensive.
     try {
       const disk = migrateSession(JSON.parse(fs.readFileSync(this.sessionPath, "utf-8")));
-      this.session = mergeFreshCaptures(this.session, disk);
+      this.session = mergeFreshCaptures(this.session, disk, prunedThisCycle);
     } catch {
       // no readable/parseable disk copy → write our own state (never lose it)
     }

@@ -78,10 +78,23 @@ export function shouldPruneNoOp(
 // Otherwise merge it (a later reconcile re-prunes a no-op, and the next
 // loadSession drops an out-of-workspace re-add, so erring toward keeping never
 // loses data).
-export function mergeFreshCaptures(mine: Session, disk: Session): Session {
+// `prunedThisCycle` (path → capturedAt) lists entries the caller deliberately
+// removed from `mine` in this same persist cycle (e.g. a settled no-op reconcile
+// prune). The on-disk copy we re-read below still contains them, so without this
+// guard the merge would resurrect the just-removed entry, undo the prune, and —
+// because the prune caller then persists again — spin an endless rewrite loop
+// (persist ≈ every RECONCILE_GRACE_MS, reloading the UI nonstop). We suppress
+// only the EXACT stale entry (matched by capturedAt); a genuinely fresh
+// re-capture carries a newer capturedAt and still merges, so no hook write is lost.
+export function mergeFreshCaptures(
+  mine: Session,
+  disk: Session,
+  prunedThisCycle?: Map<string, string | undefined>,
+): Session {
   for (const [path, entry] of Object.entries(disk.files)) {
     if (mine.files[path]) continue;          // we already know this path
     if (!entry.capturedAt) continue;         // no timestamp → cannot prove it's a real capture
+    if (prunedThisCycle && prunedThisCycle.get(path) === entry.capturedAt) continue; // just pruned this exact entry
     const captured = Date.parse(entry.capturedAt);
     if (Number.isNaN(captured)) continue;    // unparseable → cannot reason; leave it
 
