@@ -7,6 +7,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.5.0] — 2026-07-09
+
+### Fixed
+
+- **The extension's changelog now shows up on the Marketplace and Open VSX.** `CHANGELOG.md` was listed in `.vscodeignore`, so it was stripped from the packaged `.vsix` and both registries rendered an empty "Changes" tab. It now ships with the extension, so the version history is visible where you install from. (Applies from this release forward — already-published versions can't be back-filled.)
+
+### Changed
+
+- **Reloading the review panels is cheaper and flickers less.** Every time the session file changed on disk, the extension re-serialized the entire session twice just to check whether a migration had altered it — work that scaled with the size of your accepted/rejected history and ran on every filesystem event. It now gets that answer directly from the migration step, and no longer rewrites the session file for cosmetic (key-order) differences — removing a class of spurious rewrites that each triggered another panel reload.
+- **The Accepted history is now bounded (most recent 500).** The accepted log grew without limit, and every entry stores the file's full before/after content, so a long-lived workspace could accumulate a multi-megabyte session file that was re-read on every reload. The log now keeps the 500 most recent records, dropping the oldest first; recent entries — the ones you'd actually revert — are always retained.
+
+### Added
+
+- **A warning when a workspace's review history gets very large.** If the per-workspace session file exceeds 5 MB (usually a big accepted/rejected backlog, or stray oversized captures), ClaudeGate logs it to its Output channel on each load and shows a one-time notice suggesting you clear the Accepted or Rejected list to shrink it. The file still loads normally — your pending changes are never withheld — and the popup fires at most once per session so it never spams.
+
+---
+
 ## [1.4.1] — 2026-07-07
 
 ### Fixed

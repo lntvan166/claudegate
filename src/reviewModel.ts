@@ -32,6 +32,22 @@ export function makeRecordId(decidedAt: string, path: string): string {
   return `${decidedAt}::${path}`;
 }
 
+// Upper bound on the append-only accepted[] log. Past this, the OLDEST records
+// are dropped first (they lose their "Revert Accepted" undo, but the recent
+// history a user actually acts on is always kept). The cap keeps the per-workspace
+// session file — re-read on every fs.watch event — from growing without limit.
+// Generous on purpose: normal review sessions never approach it.
+export const MAX_ACCEPTED_RECORDS = 500;
+
+// Trim accepted[] in place to the most recent MAX_ACCEPTED_RECORDS. Returns true
+// if anything was dropped (so callers can flag the session as needing a rewrite).
+export function capAcceptedLog(session: Session): boolean {
+  const excess = session.accepted.length - MAX_ACCEPTED_RECORDS;
+  if (excess <= 0) return false;
+  session.accepted.splice(0, excess); // drop oldest-first
+  return true;
+}
+
 // A pending entry is a real change unless its baseline already equals the
 // current disk content (no-op / failed edit). diskContent === null means the
 // file is absent on disk.
@@ -134,6 +150,7 @@ export function acceptEntry(session: Session, path: string, after: string | null
     sessionId: entry.sessionId,
     newFile: entry.newFile,
   });
+  capAcceptedLog(session); // bound the log; drops oldest if over the cap
   delete session.files[path];
 }
 
@@ -154,18 +171,37 @@ export function rejectEntry(session: Session, path: string, after: string | null
 
 // Convert a raw on-disk session (possibly legacy: accepted/rejected in files{})
 // into the current shape. Best-effort — sessions are transient.
-export function migrateSession(raw: any): Session {
+//
+// Returns { session, changed }. `changed` is true when the migration actually
+// transformed something (defaulted a missing/invalid top-level field, moved a
+// legacy accepted/rejected entry out of files{}, or trimmed an over-cap log),
+// i.e. when the on-disk form is stale and worth rewriting. Callers use it to
+// re-persist ONLY when needed — replacing the old approach of stringifying the
+// whole session twice and diffing, which ran on every fs.watch reload and, for
+// large sessions, dominated reload cost (and re-persisted on cosmetic key-order
+// differences, spuriously churning the file and reloading the UI).
+export function migrateSession(raw: any): { session: Session; changed: boolean } {
+  let changed = false;
+  const hasSessionId  = typeof raw?.sessionId === "string";
+  const validStatus   = raw?.status === "reviewed" || raw?.status === "active";
+  const validAccepted = Array.isArray(raw?.accepted);
+  const validRejected = raw?.rejected != null && typeof raw.rejected === "object";
+  // Any missing/invalid top-level field means the raw form differs from what we
+  // will write back → flag it so the normalized shape gets persisted.
+  if (!hasSessionId || !validStatus || !validAccepted || !validRejected) changed = true;
+
   const session: Session = {
-    sessionId: raw?.sessionId ?? new Date().toISOString(),
+    sessionId: hasSessionId ? raw.sessionId : new Date().toISOString(),
     status: raw?.status === "reviewed" ? "reviewed" : "active",
     files: {},
-    accepted: Array.isArray(raw?.accepted) ? raw.accepted : [],
-    rejected: raw?.rejected && typeof raw.rejected === "object" ? raw.rejected : {},
+    accepted: validAccepted ? raw.accepted : [],
+    rejected: validRejected ? raw.rejected : {},
   };
   const files = raw?.files ?? {};
   for (const [path, e] of Object.entries<any>(files)) {
     const status = e?.reviewStatus;
     if (status === "accepted") {
+      changed = true; // legacy shape → moved out of files{}
       const decidedAt = e.capturedAt ?? session.sessionId;
       session.accepted.push({
         id: makeRecordId(decidedAt, path), path,
@@ -174,6 +210,7 @@ export function migrateSession(raw: any): Session {
         decidedAt, sessionId: e.sessionId,
       });
     } else if (status === "rejected") {
+      changed = true; // legacy shape → moved out of files{}
       const decidedAt = e.capturedAt ?? session.sessionId;
       session.rejected[path] = {
         id: makeRecordId(decidedAt, path), path,
@@ -192,5 +229,7 @@ export function migrateSession(raw: any): Session {
       };
     }
   }
-  return session;
+  // Heal a pre-cap session that already grew past the bound (drops oldest-first).
+  if (capAcceptedLog(session)) changed = true;
+  return { session, changed };
 }

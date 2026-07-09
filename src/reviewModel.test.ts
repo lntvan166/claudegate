@@ -2,6 +2,7 @@ import * as assert from "assert";
 import {
   hasRealChange, shouldPruneNoOp, acceptEntry, rejectEntry, migrateSession,
   makeRecordId, Session, FileEntry, mergeFreshCaptures,
+  MAX_ACCEPTED_RECORDS, capAcceptedLog,
 } from "./reviewModel";
 
 function base(): Session {
@@ -66,12 +67,13 @@ console.log("ok - hasRealChange (incl. empty/new-file/newline edges)");
       "/r": { originalContent: "R0", claudeContent: "R1", reviewStatus: "rejected" },
     },
   };
-  const s = migrateSession(raw);
+  const { session: s, changed } = migrateSession(raw);
   assert.deepEqual(Object.keys(s.files), ["/p"], "only pending stays in files");
   assert.equal(s.accepted.length, 1);
   assert.deepEqual([s.accepted[0].before, s.accepted[0].after], ["A", "B"]);
   assert.equal(Object.keys(s.rejected).length, 1);
   assert.deepEqual([s.rejected["/r"].before, s.rejected["/r"].after], ["R0", "R1"]);
+  assert.equal(changed, true, "moving legacy entries flags the session as changed");
   console.log("ok - migrateSession converts legacy entries");
 }
 
@@ -246,6 +248,58 @@ console.log("ok - makeRecordId");
     assert.ok(mine.files["/n"], "fresh re-capture (newer capturedAt) still merged despite prune");
   }
   console.log("ok - mergeFreshCaptures (dual-writer reconcile)");
+}
+
+// migrateSession.changed — a well-formed current-model session must report
+// changed=false so loadSession skips a redundant re-persist (no fs.watch churn /
+// UI blink), while a raw with missing/invalid top-level fields reports changed=true.
+{
+  const wellFormed = {
+    sessionId: "s", status: "active",
+    files: { "/p": { originalContent: "A", reviewStatus: "pending" } },
+    accepted: [], rejected: {},
+  };
+  assert.equal(migrateSession(wellFormed).changed, false, "clean session → no rewrite needed");
+
+  assert.equal(migrateSession({ files: {} }).changed, true, "missing sessionId/status/accepted/rejected → changed");
+  assert.equal(migrateSession({ sessionId: "s", status: "active", accepted: {}, rejected: {}, files: {} }).changed,
+    true, "accepted not an array → changed");
+  console.log("ok - migrateSession.changed flags only real normalization");
+}
+
+// capAcceptedLog / accepted cap — the log is bounded at MAX_ACCEPTED_RECORDS,
+// dropping OLDEST-first so recent undo history is preserved.
+{
+  const s: Session = { sessionId: "s", status: "active", files: {}, accepted: [], rejected: {} };
+  // Push cap + 10 accepts; oldest 10 should fall off.
+  for (let i = 0; i < MAX_ACCEPTED_RECORDS + 10; i++) {
+    s.files["/f"] = { originalContent: String(i), reviewStatus: "pending" };
+    acceptEntry(s, "/f", "after" + i, `2026-01-01T00:00:${i}Z`);
+  }
+  assert.equal(s.accepted.length, MAX_ACCEPTED_RECORDS, "accepted[] capped at the max");
+  assert.equal(s.accepted[0].before, "10", "oldest 10 dropped (before of the survivor is #10)");
+  assert.equal(s.accepted[s.accepted.length - 1].after, "after" + (MAX_ACCEPTED_RECORDS + 9), "newest kept");
+
+  // capAcceptedLog is a no-op (returns false) when already under the cap.
+  const small: Session = { sessionId: "s", status: "active", files: {}, accepted: [{ id: "x", path: "/x", before: null, after: "a", decidedAt: "t" }], rejected: {} };
+  assert.equal(capAcceptedLog(small), false, "under-cap log untouched");
+  assert.equal(small.accepted.length, 1, "no records dropped under cap");
+  console.log("ok - accepted log capped oldest-first at MAX_ACCEPTED_RECORDS");
+}
+
+// migrateSession heals a pre-cap over-sized accepted[] on load (drops oldest,
+// flags changed so the trimmed form is written back).
+{
+  const bloated = {
+    sessionId: "s", status: "active", files: {}, rejected: {},
+    accepted: Array.from({ length: MAX_ACCEPTED_RECORDS + 5 }, (_v, i) =>
+      ({ id: "r" + i, path: "/f", before: null, after: String(i), decidedAt: "t" + i })),
+  };
+  const { session, changed } = migrateSession(bloated);
+  assert.equal(session.accepted.length, MAX_ACCEPTED_RECORDS, "over-cap log healed on migrate");
+  assert.equal(changed, true, "trimming an over-cap log flags changed");
+  assert.equal(session.accepted[0].after, "5", "oldest 5 dropped on heal");
+  console.log("ok - migrateSession heals a pre-cap oversized accepted log");
 }
 
 console.log("done");

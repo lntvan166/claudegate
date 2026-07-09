@@ -16,9 +16,8 @@ node_modules/**
 .qodo/**
 docs/**
 
-# Internal docs
+# Internal docs (CHANGELOG.md is intentionally shipped — registries render it on the Changes tab)
 CLAUDE.md
-CHANGELOG.md
 
 # Media assets not used in the marketplace listing
 media/icon.svg

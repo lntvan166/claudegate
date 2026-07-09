@@ -353,6 +353,33 @@ function readSession(sp: string): any {
 // from the stale on-disk copy every cycle, so removed>0 fired persist forever
 // (≈ every RECONCILE_GRACE_MS) — the file was rewritten nonstop and the UI
 // reloaded without end. We assert the entry is gone and the file stops changing.
+// oversized-session guard: a bloated session file still loads (the user keeps
+// their pending changes) and a WARN is logged so the bloat is visible; the popup
+// path (showWarningMessage) must not throw during load.
+{
+  const { ws, sp } = newEnv();
+  const fp = path.join(ws, "big.ts");
+  fs.writeFileSync(fp, "NEW");
+  fs.mkdirSync(path.dirname(sp), { recursive: true });
+  const huge = "x".repeat(2_100_000);
+  fs.writeFileSync(sp, JSON.stringify({
+    sessionId: "t", status: "active",
+    files: { [fp]: { originalContent: "OLD", reviewStatus: "pending" } },
+    // three ~2 MB blobs → ~6 MB file, over SESSION_SIZE_WARN_BYTES, under the cap
+    accepted: [0, 1, 2].map((i) => ({ id: "r" + i, path: fp, before: null, after: huge, decidedAt: "t" + i })),
+    rejected: {},
+  }));
+  const lines: string[] = [];
+  const capturingLog = { appendLine: (l: string) => lines.push(l) } as any;
+  const sm = new SessionManager(capturingLog, ws);
+  sm.startWatching();
+  assert.ok(sm.getSession(), "oversized session still loads");
+  assert.ok(sm.getSession()!.files[fp], "pending entry preserved from a large session");
+  assert.ok(lines.some((l) => l.includes("[WARN]") && l.includes("large")), "large-session WARN logged");
+  sm.stopWatching();
+  console.log("ok - oversized session loads with a size warning");
+}
+
 (async () => {
   const { ws, sp } = newEnv();
   const noop = path.join(ws, "noop.go");

@@ -29,6 +29,12 @@ const LOCK_STALE_MS = 3000;
 const LOCK_TIMEOUT_MS = 200;   // extension gives up fast (keeps the UI responsive)
 const LOCK_SLEEP_MS = 5;
 
+// A per-workspace session file this large is almost certainly bloated (a huge
+// accepted/rejected history, or stray oversized captures). We still load it, but
+// surface it: parsing megabytes on every fs.watch reload hurts responsiveness,
+// and clearing the review history shrinks it. Well past a healthy session.
+const SESSION_SIZE_WARN_BYTES = 5_000_000;
+
 export class SessionManager {
   private readonly sessionPath: string;
   private readonly sessionFilename: string;
@@ -37,6 +43,7 @@ export class SessionManager {
   private session: Session | null = null;
   private watcher: fs.FSWatcher | null = null;
   private reconcileTimer: ReturnType<typeof setTimeout> | null = null;
+  private oversizeWarned = false; // popup fires at most once per activation
 
   private readonly _onSessionChange = new vscode.EventEmitter<Session | null>();
   readonly onSessionChange = this._onSessionChange.event;
@@ -458,21 +465,53 @@ export class SessionManager {
 
   private loadSession(): void {
     try {
+      const oversized = this.checkSessionSize();
       const raw = JSON.parse(fs.readFileSync(this.sessionPath, "utf-8"));
-      const migrated = migrateSession(raw);
-      const changed = JSON.stringify(migrated) !== JSON.stringify(raw);
-      this.session = migrated;
+      // migrateSession reports whether it normalized anything, so we re-persist
+      // only when the on-disk form is actually stale — no full-session stringify
+      // on every fs.watch reload (was two serializations per event).
+      const { session, changed } = migrateSession(raw);
+      this.session = session;
       this.log.appendLine(
         `[INFO] Session loaded: ${Object.keys(this.session.files).length} pending, ` +
         `${this.session.accepted.length} accepted, ${Object.keys(this.session.rejected).length} rejected`
       );
       this.pruneOutOfWorkspaceEntries();
       if (changed) this.persist();
+      if (oversized) this.warnOversizedOnce();
     } catch {
       this.session = null;
     }
     this._onSessionChange.fire(this.session);
     this.scheduleReconcile();
+  }
+
+  // Log a warning (every load, for diagnostics) if the session file is bloated,
+  // and return whether it is so loadSession can surface a one-time popup. Stat is
+  // cheap; we never block loading — the user still needs their pending changes.
+  private checkSessionSize(): boolean {
+    try {
+      const { size } = fs.statSync(this.sessionPath);
+      if (size <= SESSION_SIZE_WARN_BYTES) return false;
+      this.log.appendLine(
+        `[WARN] Session file is large (${(size / 1e6).toFixed(1)} MB): ${this.sessionPath}. ` +
+        `Clearing Accepted/Rejected history will shrink it.`
+      );
+      return true;
+    } catch {
+      return false; // stat failed → let the read below decide
+    }
+  }
+
+  // Surface the bloat to the user, but only once per activation — loadSession
+  // runs on every fs.watch event, so a popup here would otherwise spam.
+  private warnOversizedOnce(): void {
+    if (this.oversizeWarned) return;
+    this.oversizeWarned = true;
+    vscode.window.showWarningMessage(
+      "Claude Gate: this workspace's review history is unusually large and may slow the panel. " +
+      "Clear the Accepted or Rejected list to shrink it."
+    );
   }
 
   private pruneOutOfWorkspaceEntries(): void {
@@ -609,7 +648,7 @@ export class SessionManager {
     // on a user decision or a reconcile), and mergeFreshCaptures is a no-op when
     // nothing changed, so always reconciling is both correct and inexpensive.
     try {
-      const disk = migrateSession(JSON.parse(fs.readFileSync(this.sessionPath, "utf-8")));
+      const disk = migrateSession(JSON.parse(fs.readFileSync(this.sessionPath, "utf-8"))).session;
       this.session = mergeFreshCaptures(this.session, disk, prunedThisCycle);
     } catch {
       // no readable/parseable disk copy → write our own state (never lose it)
