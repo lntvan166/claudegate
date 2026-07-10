@@ -342,12 +342,18 @@ def worktree_root_for_file(file_path: str, best_root: str) -> str | None:
                         first = f.read().strip()
                 except OSError:
                     return None
-                # `gitdir: .../worktrees/<name>` marks a worktree; `.../modules/`
-                # marks a submodule (leave those attributed to the parent root).
-                if first.startswith("gitdir:") and (
-                    "/worktrees/" in first or "\\worktrees\\" in first
-                ):
-                    return cur
+                # A worktree's gitdir is structurally `<main>/.git/worktrees/<name>`;
+                # a submodule's is `<super>/.git/modules/<name>`. Check the two
+                # segments above <name> are `worktrees` then `.git` (a substring
+                # match would misclassify a submodule parked under a dir literally
+                # named "worktrees").
+                if first.startswith("gitdir:"):
+                    target = first[len("gitdir:"):].strip()
+                    parent = os.path.dirname(target)        # <main>/.git/worktrees
+                    grandparent = os.path.dirname(parent)   # <main>/.git
+                    if (os.path.basename(parent) == "worktrees"
+                            and os.path.basename(grandparent) == ".git"):
+                        return cur
                 return None
             parent = os.path.dirname(cur)
             if parent == cur:
