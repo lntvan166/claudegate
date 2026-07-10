@@ -3,7 +3,7 @@ const vscode = acquireVsCodeApi();
 let state = { model: { files: [], reviewedCount: 0, totalCount: 0 }, diffMode: "split", feedbackText: "", feedbackOpen: false };
 const ui = { collapsed: {}, reasonOpen: {} }; // per-relPath UI state, preserved across renders
 
-function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
 
 function splitRows(pieces) {
   // Build aligned left/right rows from the unified piece stream.
@@ -70,10 +70,12 @@ function render() {
   const app = document.getElementById("app");
   if (!m.files.length) { app.innerHTML = `<div class="empty-state">All changes reviewed 🎉</div>`; return; }
   const pct = m.totalCount ? Math.round((m.reviewedCount / m.totalCount) * 100) : 0;
-  const toolbar = `<div class="toolbar"><span class="title">All Changes</span><span class="progress">${m.reviewedCount} of ${m.totalCount} reviewed</span><div class="progbar"><i style="width:${pct}%"></i></div><div class="spacer"></div><div class="seg"><button class="${state.diffMode === "split" ? "on" : ""}" data-mode="split">Split</button><button class="${state.diffMode === "unified" ? "on" : ""}" data-mode="unified">Unified</button></div><button class="btn" data-fb-toggle>💬 Feedback to AI</button><button class="btn undo" data-undo-all>Undo All</button><button class="btn keep" data-keep-all>Keep All</button></div>`;
+  const toolbar = `<div class="toolbar"><span class="title">All Changes</span><span class="progress">${m.reviewedCount} of ${m.totalCount} reviewed</span><div class="progbar"><i></i></div><div class="spacer"></div><div class="seg"><button class="${state.diffMode === "split" ? "on" : ""}" data-mode="split">Split</button><button class="${state.diffMode === "unified" ? "on" : ""}" data-mode="unified">Unified</button></div><button class="btn" data-fb-toggle>💬 Feedback to AI</button><button class="btn undo" data-undo-all>Undo All</button><button class="btn keep" data-keep-all>Keep All</button></div>`;
   const files = m.files.map(fileHtml).join("");
   const fb = `<div class="fbpanel ${state.feedbackOpen ? "" : "hidden"}"><div class="fbhdr"><span>💬 Feedback to AI</span><div class="spacer"></div><button class="btn" data-fb-copy>📋 Copy</button></div><div class="fbbody">${esc(state.feedbackText)}</div></div>`;
   app.innerHTML = toolbar + `<div id="files">${files}</div>` + fb;
+  const bar = document.querySelector(".progbar > i");
+  if (bar) bar.style.width = pct + "%";
 }
 
 document.addEventListener("click", (e) => {

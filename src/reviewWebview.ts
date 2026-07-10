@@ -8,6 +8,7 @@ export class ReviewWebviewPanel {
   private static current: ReviewWebviewPanel | undefined;
   private readonly disposables: vscode.Disposable[] = [];
   private batchOrder: string[] = []; // stable display order: seed pending, then late arrivals
+  private relToAbs = new Map<string, string>(); // relPath -> absolute fs path, rebuilt each items() call
 
   static showOrReveal(context: vscode.ExtensionContext, sessionManager: SessionManager): void {
     if (ReviewWebviewPanel.current) {
@@ -53,10 +54,12 @@ export class ReviewWebviewPanel {
     if (!s) return [];
     for (const fp of this.currentPendingPaths()) if (!this.batchOrder.includes(fp)) this.batchOrder.push(fp);
 
+    this.relToAbs.clear();
     const items: ReviewItemInput[] = [];
     for (const fp of this.batchOrder) {
       if (!isInWorkspace(fp) || isExcluded(fp)) continue;
       const rel = vscode.workspace.asRelativePath(fp, false).split(/[\\/]/).join("/");
+      this.relToAbs.set(rel, fp);
       const pending = s.files[fp];
       if (pending) {
         const after = this.readOrNull(fp);
@@ -98,8 +101,16 @@ export class ReviewWebviewPanel {
   private async onMessage(m: any): Promise<void> {
     switch (m?.type) {
       case "ready": this.render(); break;
-      case "keep": if (m.path) this.sessionManager.acceptFile(this.abs(m.path)); break;
-      case "undo": if (m.path) this.sessionManager.rejectFile(this.abs(m.path), m.reason || undefined); break;
+      case "keep": {
+        const target = m.path ? this.relToAbs.get(m.path) : undefined;
+        if (target) this.sessionManager.acceptFile(target);
+        break;
+      }
+      case "undo": {
+        const target = m.path ? this.relToAbs.get(m.path) : undefined;
+        if (target) this.sessionManager.rejectFile(target, m.reason || undefined);
+        break;
+      }
       case "keepAll": this.sessionManager.acceptAll(); break;
       case "undoAll": {
         const answer = await vscode.window.showWarningMessage(
@@ -118,12 +129,6 @@ export class ReviewWebviewPanel {
         break;
       }
     }
-  }
-
-  // relPath from the webview → absolute fs path via the first workspace folder.
-  private abs(rel: string): string {
-    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
-    return root ? vscode.Uri.joinPath(root, rel).fsPath : rel;
   }
 
   private html(): string {
