@@ -43,3 +43,17 @@ function makeRepo(): string {
   fs.rmSync(root, { recursive: true, force: true });
   console.log("ok - worktree detection (worktree vs main vs submodule)");
 }
+
+// Regression: a submodule whose gitdir target has a `worktrees`-named ANCESTOR
+// (but is structurally `.../.git/modules/<name>`) must NOT be seen as a worktree.
+{
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "cg-wtx-"));
+  const proj = path.join(base, "worktrees", "proj"); // ancestor dir named "worktrees"
+  const sub = path.join(proj, "sub");
+  fs.mkdirSync(sub, { recursive: true });
+  fs.writeFileSync(path.join(sub, ".git"),
+    `gitdir: ${path.join(proj, ".git", "modules", "sub")}\n`);
+  assert.equal(isWorktreeRoot(sub), false, "submodule under a worktrees-named dir is not a worktree");
+  fs.rmSync(base, { recursive: true, force: true });
+  console.log("ok - submodule under worktrees-named ancestor is not misclassified");
+}

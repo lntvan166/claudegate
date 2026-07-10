@@ -2,12 +2,6 @@ import * as fs from "fs";
 import * as path from "path";
 import { pathIsUnder } from "./workspaceScope";
 
-// A git worktree's working directory has a `.git` FILE (not a dir) whose content
-// is `gitdir: <main-repo>/.git/worktrees/<name>`. A submodule ALSO uses a `.git`
-// file, but its gitdir points into `<super>/.git/modules/<name>` — so we key on
-// the `worktrees` path segment to avoid classifying a submodule as a worktree.
-// Git writes the gitdir path with the platform separator, so accept either.
-const WORKTREE_MARKER = /[\\/]worktrees[\\/]/;
 
 // Read the `gitdir: <target>` line from a `.git` FILE, or null if it isn't one.
 function gitFileTarget(dotGitPath: string): string | null {
@@ -29,7 +23,14 @@ export function isWorktreeRoot(dir: string): boolean {
     return false;
   }
   const target = gitFileTarget(dotGit);
-  return target !== null && WORKTREE_MARKER.test(target);
+  if (target === null) return false;
+  // A worktree's gitdir is structurally `<main-repo>/.git/worktrees/<name>`. Check
+  // the two segments above <name> are `worktrees` then `.git`, so a submodule
+  // (`.../.git/modules/<name>`) or a repo merely parked under a folder named
+  // "worktrees" is NOT misclassified. path.basename/dirname handle both separators.
+  const worktreesDir = path.dirname(target);        // <main-repo>/.git/worktrees
+  const gitDir = path.dirname(worktreesDir);        // <main-repo>/.git
+  return path.basename(worktreesDir) === "worktrees" && path.basename(gitDir) === ".git";
 }
 
 /**
