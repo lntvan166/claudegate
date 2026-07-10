@@ -37,6 +37,19 @@ function getActivePendingFilePath(sessionManager: SessionManager): string | unde
     : undefined;
 }
 
+// Replaces the old yes/no revert confirm with an optional reason capture: the
+// input box IS the confirmation (submit = revert, Esc = cancel). Empty reason
+// is allowed. The reason feeds the "Feedback to AI" log via ReviewRecord.reason.
+async function promptRevertReason(basename: string): Promise<{ ok: boolean; reason?: string }> {
+  const input = await vscode.window.showInputBox({
+    title: `Revert "${basename}" to its original content`,
+    prompt: "Reason to feed back to AI (optional) — leave blank to just revert. Press Esc to cancel.",
+    placeHolder: "e.g. don't drop legacyDropoff — still called by the batch job",
+  });
+  if (input === undefined) return { ok: false };          // Esc / dismissed → cancel
+  return { ok: true, reason: input.trim() || undefined }; // submitted (empty allowed) → revert
+}
+
 function refreshActiveFilePendingContext(sessionManager: SessionManager): void {
   const editor = vscode.window.activeTextEditor;
   if (editor) {
@@ -209,13 +222,9 @@ export function activate(context: vscode.ExtensionContext): void {
         async (item?: FileReviewItem | { filePath: string }) => {
           const filePath = item?.filePath ?? getActivePendingFilePath(sessionManager);
           if (!filePath) return;
-          const answer = await vscode.window.showWarningMessage(
-            `Revert "${path.basename(filePath)}" to its original content?`,
-            { modal: false },
-            "Revert"
-          );
-          if (answer === "Revert") {
-            sessionManager.rejectFile(filePath);
+          const { ok, reason } = await promptRevertReason(path.basename(filePath));
+          if (ok) {
+            sessionManager.rejectFile(filePath, reason);
             await closeDiffEditor(filePath);
           }
         }
@@ -233,7 +242,9 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.commands.registerCommand("claudegate.rejectCurrent", async () => {
         const fp = getActivePendingFilePath(sessionManager);
         if (!fp) return;
-        sessionManager.rejectFile(fp);
+        const { ok, reason } = await promptRevertReason(path.basename(fp));
+        if (!ok) return;
+        sessionManager.rejectFile(fp, reason);
         await closeDiffEditor(fp);
         if (vscode.workspace.getConfiguration("claudegate").get<boolean>("autoAdvance", true)) {
           await openNextPending();
