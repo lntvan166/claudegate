@@ -28,7 +28,9 @@ export class WorktreeSessionRegistry {
   // trigger (window focus / manual refresh), never in a hot loop.
   refresh(): void {
     if (!this.primaryRoot) return;
-    let roots = nestedWorktreesUnder(this.primaryRoot);
+    // Sort for a STABLE cap: slicing raw readdir order could drop a still-present
+    // worktree (and attach a different one) when the count crosses the cap.
+    let roots = nestedWorktreesUnder(this.primaryRoot).sort();
     if (roots.length > MAX_ATTACHED_WORKTREES) {
       this.log.appendLine(
         `[WARN] ${roots.length} nested worktrees found; attaching only ${MAX_ATTACHED_WORKTREES}. ` +
@@ -37,8 +39,9 @@ export class WorktreeSessionRegistry {
       roots = roots.slice(0, MAX_ATTACHED_WORKTREES);
     }
     const wanted = new Set(roots);
+    let changed = false;
     for (const root of [...this.managers.keys()]) {
-      if (!wanted.has(root)) this.detach(root);
+      if (!wanted.has(root)) { this.detach(root); changed = true; }
     }
     for (const root of roots) {
       if (this.managers.has(root)) continue;
@@ -47,8 +50,9 @@ export class WorktreeSessionRegistry {
       mgr.startWatching(); // loads the session synchronously
       this.managers.set(root, mgr);
       this.log.appendLine(`[INFO] Attached worktree session: ${root}`);
+      changed = true;
     }
-    this._onChange.fire();
+    if (changed) this._onChange.fire();
   }
 
   private detach(root: string): void {
@@ -59,8 +63,10 @@ export class WorktreeSessionRegistry {
     this.log.appendLine(`[INFO] Detached worktree session: ${root}`);
   }
 
+  // Copy so a caller can't mutate our internal map (which would desync the
+  // subscription set and leak a watcher/timer that detach() never stops).
   getManagers(): Map<string, SessionManager> {
-    return this.managers;
+    return new Map(this.managers);
   }
 
   // The SessionManager that OWNS filePath (the worktree it falls under), or null.
