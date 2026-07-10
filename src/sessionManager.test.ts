@@ -59,6 +59,22 @@ function readSession(sp: string): any {
   console.log("ok - reject restores baseline on disk");
 }
 
+// rejectFile records the revert reason, and still preserves Claude's discarded content.
+{
+  const { ws } = newEnv();
+  const fp = path.join(ws, "c.ts");
+  fs.writeFileSync(fp, "claude-edited\n");
+  const sm = new SessionManager(fakeLog, ws);
+  sm.startWatching();
+  sm.trackFileChange(fp, "original\n");
+  sm.rejectFile(fp, "reverted: wrong approach");
+  const rec = sm.getSession()!.rejected[fp];
+  assert.equal(rec.reason, "reverted: wrong approach", "reason stored on rejected record");
+  assert.equal(rec.after, "claude-edited\n", "Claude's discarded version preserved");
+  sm.stopWatching();
+  console.log("ok - rejectFile records the revert reason");
+}
+
 // merge-on-write: a concurrent write to the session file (a fresh hook capture)
 // is preserved when the extension persists.
 {

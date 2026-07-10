@@ -208,7 +208,7 @@ export class SessionManager {
     return "left";
   }
 
-  rejectFile(filePath: string): void {
+  rejectFile(filePath: string, reason?: string): void {
     const entry = this.session?.files[filePath];
     if (!entry) return;
     const after = this.readFileOrNull(filePath); // Claude's discarded version
@@ -222,7 +222,7 @@ export class SessionManager {
       );
       return;
     }
-    rejectEntry(this.session!, filePath, after, new Date().toISOString());
+    rejectEntry(this.session!, filePath, after, new Date().toISOString(), reason);
     if (outcome === "left") {
       vscode.window.showInformationMessage(
         `Claude Gate: left "${path.basename(filePath)}" on disk (created outside Claude Code — not auto-deleted).`
@@ -232,7 +232,7 @@ export class SessionManager {
     this.persist();
   }
 
-  rejectFolder(folderPath: string): void {
+  rejectFolder(folderPath: string, reason?: string): void {
     const s = this.session;
     if (!s) return;
     const prefix = folderPath + path.sep;
@@ -252,7 +252,7 @@ export class SessionManager {
         this.log.appendLine(`[ERROR] rejectFolder failed for ${fp}: ${(err as Error).message}`);
         continue;
       }
-      rejectEntry(s, fp, after, decidedAt);
+      rejectEntry(s, fp, after, decidedAt, reason);
       count++;
     }
 
@@ -277,7 +277,7 @@ export class SessionManager {
   // hook capture is never lost. The residual window is the hook's fail-open case
   // (it must never block a Claude write); atomic rename still prevents torn reads.
 
-  rejectAll(): void {
+  rejectAll(reason?: string): void {
     const s = this.session;
     if (!s) return;
     const decidedAt = new Date().toISOString();
@@ -296,7 +296,7 @@ export class SessionManager {
         this.log.appendLine(`[ERROR] rejectAll failed for ${fp}: ${(err as Error).message}`);
         continue;
       }
-      rejectEntry(s, fp, after, decidedAt);
+      rejectEntry(s, fp, after, decidedAt, reason);
       count++;
     }
 
