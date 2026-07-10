@@ -304,7 +304,7 @@ console.log("ok - makeRecordId");
 
 // rejectEntry stores an optional reason on the record
 {
-  const session = {
+  const session: Session = {
     sessionId: "s", status: "active" as const,
     files: { "/w/a.ts": { originalContent: "old", reviewStatus: "pending" as const } },
     accepted: [], rejected: {},
@@ -317,7 +317,7 @@ console.log("ok - makeRecordId");
 
 // rejectEntry omits reason when none is given
 {
-  const session = {
+  const session: Session = {
     sessionId: "s", status: "active" as const,
     files: { "/w/b.ts": { originalContent: "old", reviewStatus: "pending" as const } },
     accepted: [], rejected: {},
