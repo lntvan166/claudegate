@@ -1,7 +1,7 @@
 // @ts-nocheck
 const vscode = acquireVsCodeApi();
 let state = { model: { files: [], reviewedCount: 0, totalCount: 0 }, diffMode: "split", feedbackText: "", feedbackOpen: false };
-const ui = { collapsed: {}, reasonOpen: {} }; // per-relPath UI state, preserved across renders
+const ui = { collapsed: {}, reasonOpen: {}, reasonText: {} }; // per-relPath UI state, preserved across renders
 
 function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
 
@@ -53,14 +53,18 @@ function fileHtml(file) {
   const base = file.relPath.slice(dir.length);
   const collapsed = ui.collapsed[file.relPath] ?? (file.status !== "pending");
   const badges = [file.added ? `<span class="badge add">+${file.added}</span>` : "", file.removed ? `<span class="badge del">−${file.removed}</span>` : ""].join(" ");
+  const openNativeBtn = `<button class="btn" data-open-native="${esc(file.relPath)}" title="Open in native diff">Open diff</button>`;
   let actions = "";
-  if (file.status === "pending") actions = `<div class="factions"><button class="btn undo" data-undo="${esc(file.relPath)}">Undo</button><button class="btn keep" data-keep="${esc(file.relPath)}">Keep</button></div>`;
-  else actions = `<span class="status ${file.status}">${file.status === "kept" ? "✓ kept" : "✗ undone"}</span>`;
+  if (file.status === "pending") actions = `<div class="factions">${openNativeBtn}<button class="btn undo" data-undo="${esc(file.relPath)}">Undo</button><button class="btn keep" data-keep="${esc(file.relPath)}">Keep</button></div>`;
+  else actions = `<div class="factions">${openNativeBtn}<span class="status ${file.status}">${file.status === "kept" ? "✓ kept" : "✗ undone"}</span></div>`;
   const head = `<div class="fhead" data-toggle="${esc(file.relPath)}"><span class="chev">${collapsed ? "▸" : "▾"}</span>${file.isProtected ? '<span class="warn">⚠</span>' : ""}<span class="fname">${esc(base)}</span><span class="fpath">${esc(dir)}</span>${badges}<div class="spacer"></div>${actions}</div>`;
   let body = "";
   if (!collapsed) body += diffHtml(file);
+  if (file.status === "undone" && file.reason) {
+    body += `<div class="note">reason: ${esc(file.reason)}</div>`;
+  }
   if (ui.reasonOpen[file.relPath]) {
-    body += `<div class="reason"><span class="rl">Reverting to original. Add a reason to feed back to AI (optional):</span><div class="rrow"><input data-reason-input="${esc(file.relPath)}" placeholder="e.g. don't drop legacyDropoff — still called by the batch job" /><button class="btn" data-reason-cancel="${esc(file.relPath)}">Cancel</button><button class="btn undo" data-reason-confirm="${esc(file.relPath)}">Revert</button></div></div>`;
+    body += `<div class="reason"><span class="rl">Reverting to original. Add a reason to feed back to AI (optional):</span><div class="rrow"><input data-reason-input="${esc(file.relPath)}" placeholder="e.g. don't drop legacyDropoff — still called by the batch job" value="${esc(ui.reasonText[file.relPath] ?? "")}" /><button class="btn" data-reason-cancel="${esc(file.relPath)}">Cancel</button><button class="btn undo" data-reason-confirm="${esc(file.relPath)}">Revert</button></div></div>`;
   }
   return `<div class="file">${head}${body}</div>`;
 }
@@ -69,6 +73,7 @@ function render() {
   const m = state.model;
   const app = document.getElementById("app");
   if (!m.files.length) { app.innerHTML = `<div class="empty-state">All changes reviewed 🎉</div>`; return; }
+  const scrollX = window.scrollX, scrollY = window.scrollY;
   const pct = m.totalCount ? Math.round((m.reviewedCount / m.totalCount) * 100) : 0;
   const toolbar = `<div class="toolbar"><span class="title">All Changes</span><span class="progress">${m.reviewedCount} of ${m.totalCount} reviewed</span><div class="progbar"><i></i></div><div class="spacer"></div><div class="seg"><button class="${state.diffMode === "split" ? "on" : ""}" data-mode="split">Split</button><button class="${state.diffMode === "unified" ? "on" : ""}" data-mode="unified">Unified</button></div><button class="btn" data-fb-toggle>💬 Feedback to AI</button><button class="btn undo" data-undo-all>Undo All</button><button class="btn keep" data-keep-all>Keep All</button></div>`;
   const files = m.files.map(fileHtml).join("");
@@ -76,21 +81,29 @@ function render() {
   app.innerHTML = toolbar + `<div id="files">${files}</div>` + fb;
   const bar = document.querySelector(".progbar > i");
   if (bar) bar.style.width = pct + "%";
+  window.scrollTo(scrollX, scrollY);
 }
 
 document.addEventListener("click", (e) => {
-  const t = e.target.closest("[data-keep],[data-undo],[data-toggle],[data-mode],[data-keep-all],[data-undo-all],[data-fb-toggle],[data-fb-copy],[data-reason-cancel],[data-reason-confirm]");
+  const t = e.target.closest("[data-keep],[data-undo],[data-toggle],[data-mode],[data-keep-all],[data-undo-all],[data-fb-toggle],[data-fb-copy],[data-reason-cancel],[data-reason-confirm],[data-open-native]");
   if (!t) return;
   if (t.dataset.keep) vscode.postMessage({ type: "keep", path: t.dataset.keep });
   else if (t.dataset.undo) { ui.reasonOpen[t.dataset.undo] = true; ui.collapsed[t.dataset.undo] = ui.collapsed[t.dataset.undo] ?? false; render(); }
-  else if (t.dataset.reasonCancel) { delete ui.reasonOpen[t.dataset.reasonCancel]; render(); }
-  else if (t.dataset.reasonConfirm) { const inp = document.querySelector(`[data-reason-input="${CSS.escape(t.dataset.reasonConfirm)}"]`); vscode.postMessage({ type: "undo", path: t.dataset.reasonConfirm, reason: inp ? inp.value.trim() : "" }); delete ui.reasonOpen[t.dataset.reasonConfirm]; }
+  else if (t.dataset.reasonCancel) { delete ui.reasonOpen[t.dataset.reasonCancel]; delete ui.reasonText[t.dataset.reasonCancel]; render(); }
+  else if (t.dataset.reasonConfirm) { const inp = document.querySelector(`[data-reason-input="${CSS.escape(t.dataset.reasonConfirm)}"]`); vscode.postMessage({ type: "undo", path: t.dataset.reasonConfirm, reason: inp ? inp.value.trim() : "" }); delete ui.reasonOpen[t.dataset.reasonConfirm]; delete ui.reasonText[t.dataset.reasonConfirm]; }
   else if (t.dataset.toggle) { ui.collapsed[t.dataset.toggle] = !(ui.collapsed[t.dataset.toggle] ?? false); render(); }
   else if (t.dataset.mode) { state.diffMode = t.dataset.mode; vscode.postMessage({ type: "setDiffMode", mode: t.dataset.mode }); render(); }
+  else if (t.dataset.openNative) vscode.postMessage({ type: "openNative", path: t.dataset.openNative });
   else if (t.hasAttribute("data-keep-all")) vscode.postMessage({ type: "keepAll" });
   else if (t.hasAttribute("data-undo-all")) vscode.postMessage({ type: "undoAll" });
   else if (t.hasAttribute("data-fb-toggle")) { state.feedbackOpen = !state.feedbackOpen; render(); }
   else if (t.hasAttribute("data-fb-copy")) vscode.postMessage({ type: "copyFeedback" });
+});
+
+document.addEventListener("input", (e) => {
+  const t = e.target.closest("[data-reason-input]");
+  if (!t) return;
+  ui.reasonText[t.dataset.reasonInput] = t.value;
 });
 
 window.addEventListener("message", (e) => {

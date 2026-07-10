@@ -128,6 +128,11 @@ export class ReviewWebviewPanel {
         vscode.window.showInformationMessage("Claude Gate: review feedback copied to clipboard.");
         break;
       }
+      case "openNative": {
+        const target = m.path ? this.relToAbs.get(m.path) : undefined;
+        if (target) await vscode.commands.executeCommand("claudegate.openDiff", target);
+        break;
+      }
     }
   }
 
