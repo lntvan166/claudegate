@@ -231,6 +231,11 @@
         "command": "claudegate.reviewAllPending",
         "title": "Claude Gate: Review All Pending",
         "icon": "$(diff-multiple)"
+      },
+      {
+        "command": "claudegate.reviewChanges",
+        "title": "Claude Gate: Review Changes",
+        "icon": "$(diff-multiple)"
       }
     ],
     "menus": {
@@ -477,6 +482,12 @@
     "configuration": {
       "title": "Claude Gate",
       "properties": {
+        "claudegate.review.diffMode": {
+          "type": "string",
+          "enum": ["split", "unified"],
+          "default": "split",
+          "markdownDescription": "Diff layout in the **Review Changes** panel: `split` (side-by-side, original ↔ current) or `unified` (single column, GitHub-style). The panel's toggle updates this."
+        },
         "claudegate.fileWatcher.enabled": {
           "type": "boolean",
           "default": false,

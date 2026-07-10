@@ -12,11 +12,12 @@ import {
 } from "./reviewPanel";
 import { HookInstaller } from "./hookInstaller";
 import { SettingsTreeProvider, SettingsItem } from "./settingsPanel";
-import { ClaudeGateContentProvider, SCHEME, originalUri, openReviewRecord } from "./diffProvider";
+import { ClaudeGateContentProvider, SCHEME, openReviewRecord } from "./diffProvider";
+import { ReviewWebviewPanel } from "./reviewWebview";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
 import { DocumentTracker } from "./documentTracker";
 import { persistWorkspaceRoots } from "./workspaceRoots";
-import { isInWorkspace, isExcluded, setExcludeMatcher, isProtected, setProtectedMatcher } from "./workspaceScope";
+import { isInWorkspace, isExcluded, setExcludeMatcher, setProtectedMatcher } from "./workspaceScope";
 import { ExcludeMatcher, DEFAULT_EXCLUDES } from "./excludeMatcher";
 
 
@@ -180,55 +181,6 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage("Claude Gate: all caught up ✓");
       }
     };
-
-    // ── Review All Pending (multi-diff) helpers ───────────────────────────
-    const pendingReviewPaths = (): string[] => {
-      const session = sessionManager.getSession();
-      return session
-        ? Object.entries(session.files)
-            .filter(
-              ([fp, e]) =>
-                e.reviewStatus === "pending" &&
-                isInWorkspace(fp) &&
-                !isExcluded(fp) &&
-                sessionManager.hasRealPendingChange(fp)
-            )
-            .map(([fp]) => fp)
-            .sort(
-              (a, b) =>
-                (Number(isProtected(b)) - Number(isProtected(a))) || a.localeCompare(b)
-            )
-        : [];
-    };
-    const closePendingMultiDiff = async (): Promise<void> => {
-      const stale = vscode.window.tabGroups.all
-        .flatMap((group) => group.tabs)
-        .filter((tab) => tab.label.startsWith("Claude Gate: Pending"));
-      if (stale.length > 0) await vscode.window.tabGroups.close(stale);
-    };
-    const openPendingMultiDiff = async (paths: string[]): Promise<void> => {
-      const resourceList = paths.map((fp) => [
-        vscode.Uri.file(fp),
-        originalUri(fp),
-        vscode.Uri.file(fp),
-      ]);
-      try {
-        await vscode.commands.executeCommand(
-          "vscode.changes",
-          `Claude Gate: Pending (${paths.length})`,
-          resourceList
-        );
-      } catch (err) {
-        log.appendLine(`[WARN] reviewAllPending: vscode.changes failed: ${(err as Error).message}`);
-        vscode.window.showWarningMessage(
-          "Claude Gate: the multi-file diff view isn't available in this VS Code version."
-        );
-      }
-    };
-    const isPendingMultiDiffOpen = (): boolean =>
-      vscode.window.tabGroups.all.some((g) =>
-        g.tabs.some((t) => t.label.startsWith("Claude Gate: Pending"))
-      );
 
     // ── Commands ──────────────────────────────────────────────────────────
     context.subscriptions.push(
@@ -484,16 +436,12 @@ export function activate(context: vscode.ExtensionContext): void {
         }
       }),
 
-      vscode.commands.registerCommand("claudegate.reviewAllPending", async () => {
-        const paths = pendingReviewPaths();
-        // Reuse the existing multi-diff tab instead of stacking a new one.
-        await closePendingMultiDiff();
-        if (paths.length === 0) {
-          vscode.window.showInformationMessage("Claude Gate: no pending changes to review.");
-          return;
-        }
-        await openPendingMultiDiff(paths);
-      }),
+      vscode.commands.registerCommand("claudegate.reviewAllPending", () =>
+        ReviewWebviewPanel.showOrReveal(context, sessionManager)
+      ),
+      vscode.commands.registerCommand("claudegate.reviewChanges", () =>
+        ReviewWebviewPanel.showOrReveal(context, sessionManager)
+      ),
     );
 
     registerOpenDiff(context, sessionManager);
@@ -509,23 +457,6 @@ export function activate(context: vscode.ExtensionContext): void {
         refreshActiveFilePendingContext(sessionManager)
       )
     );
-
-    // Keep an open "Review All Pending" multi-diff in sync: when the session
-    // changes (a file accepted/rejected), rebuild it with the current pending
-    // set, or close it once everything is reviewed. The multi-diff's resource
-    // list is static, so it must be reopened to reflect changes.
-    let multiDiffRefreshing = false;
-    sessionManager.onSessionChange(async () => {
-      if (multiDiffRefreshing || !isPendingMultiDiffOpen()) return;
-      multiDiffRefreshing = true;
-      try {
-        const paths = pendingReviewPaths();
-        await closePendingMultiDiff();
-        if (paths.length > 0) await openPendingMultiDiff(paths);
-      } finally {
-        multiDiffRefreshing = false;
-      }
-    });
 
     sessionManager.onSessionChange((session) => {
       refreshActiveFilePendingContext(sessionManager);
