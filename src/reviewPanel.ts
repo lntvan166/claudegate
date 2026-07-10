@@ -194,38 +194,45 @@ export class FilteredTreeProvider
 
   getChildren(element?: vscode.TreeItem): vscode.TreeItem[] {
     const session = this.sessionManager.getSession();
-    if (!session) return [];
 
     const grouped = vscode.workspace
       .getConfiguration("claudegate")
       .get<boolean>("groupBySession", false);
 
-    if (this.status !== "pending") return this.getRecordChildren(session, element, grouped);
+    // Accepted/Rejected panels are primary-only — nothing to show without a session.
+    if (this.status !== "pending") {
+      return session ? this.getRecordChildren(session, element, grouped) : [];
+    }
+
+    // Worktree group expansion must work even when the primary session is null
+    // (all edits may live in a nested worktree), so handle it before that guard.
+    if (element instanceof WorktreeGroupItem) return this.worktreeFiles(element);
 
     // Root
     if (!element) {
-      if (grouped) return [...this.sessionGroups(session), ...this.worktreeGroups()];
-      const files = this.filteredFiles(session);
-      if (this.viewMode === "list") {
-        const ordered = [...files].sort(
-          (a, b) =>
-            (Number(isProtected(b)) - Number(isProtected(a))) || a.localeCompare(b)
-        );
-        return [
-          ...ordered.map((fp) => new FileReviewItem(fp, this.status, this.sessionManager)),
-          ...this.worktreeGroups(),
-        ];
+      let primary: vscode.TreeItem[] = [];
+      if (session) {
+        if (grouped) {
+          primary = this.sessionGroups(session);
+        } else {
+          const files = this.filteredFiles(session);
+          primary =
+            this.viewMode === "list"
+              ? [...files]
+                  .sort(
+                    (a, b) =>
+                      (Number(isProtected(b)) - Number(isProtected(a))) || a.localeCompare(b)
+                  )
+                  .map((fp) => new FileReviewItem(fp, this.status, this.sessionManager))
+              : this.directChildren(files, getWorkspaceRoot(files), this.status, false);
+        }
       }
-      return [
-        ...this.directChildren(files, getWorkspaceRoot(files), this.status, false),
-        ...this.worktreeGroups(),
-      ];
+      return [...primary, ...this.worktreeGroups()];
     }
 
-    // Worktree group children (flat list, sourced from the worktree's own session)
-    if (element instanceof WorktreeGroupItem) {
-      return this.worktreeFiles(element);
-    }
+    // Remaining element branches need the primary session (SessionItem/FolderItem
+    // are only produced when a session exists).
+    if (!session) return [];
 
     // Session group children
     if (element instanceof SessionItem) {

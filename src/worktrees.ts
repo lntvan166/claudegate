@@ -2,7 +2,6 @@ import * as fs from "fs";
 import * as path from "path";
 import { pathIsUnder } from "./workspaceScope";
 
-
 // Read the `gitdir: <target>` line from a `.git` FILE, or null if it isn't one.
 function gitFileTarget(dotGitPath: string): string | null {
   try {
@@ -27,7 +26,9 @@ export function isWorktreeRoot(dir: string): boolean {
   // A worktree's gitdir is structurally `<main-repo>/.git/worktrees/<name>`. Check
   // the two segments above <name> are `worktrees` then `.git`, so a submodule
   // (`.../.git/modules/<name>`) or a repo merely parked under a folder named
-  // "worktrees" is NOT misclassified. path.basename/dirname handle both separators.
+  // "worktrees" is NOT misclassified. path.basename/dirname split on the
+  // platform's native separator, which is fine here since the same OS both
+  // writes and reads the gitdir file.
   const worktreesDir = path.dirname(target);        // <main-repo>/.git/worktrees
   const gitDir = path.dirname(worktreesDir);        // <main-repo>/.git
   return path.basename(worktreesDir) === "worktrees" && path.basename(gitDir) === ".git";

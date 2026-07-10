@@ -22,7 +22,7 @@ import { isInWorkspace, isExcluded, setExcludeMatcher, isProtected, setProtected
 import { ExcludeMatcher, DEFAULT_EXCLUDES } from "./excludeMatcher";
 
 
-function getActivePendingFilePath(sessionManager: SessionManager): string | undefined {
+function getActivePendingFilePath(managerFor: (p?: string) => SessionManager): string | undefined {
   const editor = vscode.window.activeTextEditor;
   if (!editor) return undefined;
   const uri = editor.document.uri;
@@ -32,19 +32,21 @@ function getActivePendingFilePath(sessionManager: SessionManager): string | unde
     undefined;
   if (!filePath) return undefined;
   if (!isInWorkspace(filePath) || isExcluded(filePath)) return undefined;
-  return sessionManager.getSession()?.files[filePath]?.reviewStatus === "pending" &&
-    sessionManager.hasRealPendingChange(filePath)
+  // Resolve the owning session (primary or the worktree the file belongs to).
+  const mgr = managerFor(filePath);
+  return mgr.getSession()?.files[filePath]?.reviewStatus === "pending" &&
+    mgr.hasRealPendingChange(filePath)
     ? filePath
     : undefined;
 }
 
-function refreshActiveFilePendingContext(sessionManager: SessionManager): void {
+function refreshActiveFilePendingContext(managerFor: (p?: string) => SessionManager): void {
   const editor = vscode.window.activeTextEditor;
   if (editor) {
     const scheme = editor.document.uri.scheme;
     if (scheme !== "file" && scheme !== "claudegate") return;
   }
-  const pending = getActivePendingFilePath(sessionManager);
+  const pending = getActivePendingFilePath(managerFor);
   vscode.commands.executeCommand("setContext", "claudegate.activeFileIsPending", pending !== undefined);
 }
 
@@ -190,22 +192,25 @@ export function activate(context: vscode.ExtensionContext): void {
 
     // ── Review All Pending (multi-diff) helpers ───────────────────────────
     const pendingReviewPaths = (): string[] => {
-      const session = sessionManager.getSession();
-      return session
-        ? Object.entries(session.files)
-            .filter(
-              ([fp, e]) =>
-                e.reviewStatus === "pending" &&
-                isInWorkspace(fp) &&
-                !isExcluded(fp) &&
-                sessionManager.hasRealPendingChange(fp)
-            )
-            .map(([fp]) => fp)
-            .sort(
-              (a, b) =>
-                (Number(isProtected(b)) - Number(isProtected(a))) || a.localeCompare(b)
-            )
-        : [];
+      const collect = (mgr: SessionManager): string[] => {
+        const s = mgr.getSession();
+        return s
+          ? Object.entries(s.files)
+              .filter(
+                ([fp, e]) =>
+                  e.reviewStatus === "pending" &&
+                  isInWorkspace(fp) &&
+                  !isExcluded(fp) &&
+                  mgr.hasRealPendingChange(fp)
+              )
+              .map(([fp]) => fp)
+          : [];
+      };
+      const all = collect(sessionManager);
+      for (const mgr of worktreeRegistry.getManagers().values()) all.push(...collect(mgr));
+      return all.sort(
+        (a, b) => (Number(isProtected(b)) - Number(isProtected(a))) || a.localeCompare(b)
+      );
     };
     const closePendingMultiDiff = async (): Promise<void> => {
       const stale = vscode.window.tabGroups.all
@@ -252,7 +257,7 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.commands.registerCommand(
         "claudegate.acceptFile",
         async (item?: FileReviewItem | { filePath: string }) => {
-          const filePath = item?.filePath ?? getActivePendingFilePath(sessionManager);
+          const filePath = item?.filePath ?? getActivePendingFilePath(managerFor);
           if (!filePath) return;
           managerFor(filePath).acceptFile(filePath);
           await closeDiffEditor(filePath);
@@ -262,7 +267,7 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.commands.registerCommand(
         "claudegate.rejectFile",
         async (item?: FileReviewItem | { filePath: string }) => {
-          const filePath = item?.filePath ?? getActivePendingFilePath(sessionManager);
+          const filePath = item?.filePath ?? getActivePendingFilePath(managerFor);
           if (!filePath) return;
           const answer = await vscode.window.showWarningMessage(
             `Revert "${path.basename(filePath)}" to its original content?`,
@@ -277,18 +282,18 @@ export function activate(context: vscode.ExtensionContext): void {
       ),
 
       vscode.commands.registerCommand("claudegate.acceptCurrent", async () => {
-        const fp = getActivePendingFilePath(sessionManager);
+        const fp = getActivePendingFilePath(managerFor);
         if (!fp) return;
-        sessionManager.acceptFile(fp);
+        managerFor(fp).acceptFile(fp);
         await closeDiffEditor(fp);
         if (vscode.workspace.getConfiguration("claudegate").get<boolean>("autoAdvance", true)) {
           await openNextPending();
         }
       }),
       vscode.commands.registerCommand("claudegate.rejectCurrent", async () => {
-        const fp = getActivePendingFilePath(sessionManager);
+        const fp = getActivePendingFilePath(managerFor);
         if (!fp) return;
-        sessionManager.rejectFile(fp);
+        managerFor(fp).rejectFile(fp);
         await closeDiffEditor(fp);
         if (vscode.workspace.getConfiguration("claudegate").get<boolean>("autoAdvance", true)) {
           await openNextPending();
@@ -526,7 +531,7 @@ export function activate(context: vscode.ExtensionContext): void {
     // ── Reactive updates ──────────────────────────────────────────────────
     context.subscriptions.push(
       vscode.window.onDidChangeActiveTextEditor(() =>
-        refreshActiveFilePendingContext(sessionManager)
+        refreshActiveFilePendingContext(managerFor)
       )
     );
 
@@ -548,7 +553,7 @@ export function activate(context: vscode.ExtensionContext): void {
     });
 
     sessionManager.onSessionChange((session) => {
-      refreshActiveFilePendingContext(sessionManager);
+      refreshActiveFilePendingContext(managerFor);
       let pending = 0;
       let accepted = 0;
       let rejected = 0;
@@ -558,10 +563,10 @@ export function activate(context: vscode.ExtensionContext): void {
           // no-op entries are pruned by the reconcile, not filtered here.
           if (isInWorkspace(fp) && !isExcluded(fp)) pending++;
         }
-        pending += worktreeRegistry.totalPending();
         accepted = session.accepted.filter((r) => isInWorkspace(r.path) && !isExcluded(r.path)).length;
         rejected = Object.values(session.rejected).filter((r) => isInWorkspace(r.path) && !isExcluded(r.path)).length;
       }
+      pending += worktreeRegistry.totalPending();
 
       vscode.commands.executeCommand("setContext", "claudegate.acceptedCount", accepted);
       vscode.commands.executeCommand("setContext", "claudegate.rejectedCount", rejected);
@@ -674,7 +679,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }
 
-    refreshActiveFilePendingContext(sessionManager);
+    refreshActiveFilePendingContext(managerFor);
     log.appendLine("[INFO] Claude Gate ready.");
   } catch (err) {
     console.error("[Claude Gate] ACTIVATION ERROR:", err);

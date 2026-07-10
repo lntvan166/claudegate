@@ -59,7 +59,9 @@ class WorktreeRoutingTest(unittest.TestCase):
         ws_session = session_file_for(self.claudegate, self.ws)
         root_session = session_file_for(self.claudegate, self.root)
         self.assertTrue(os.path.exists(ws_session), "captured into the worktree session")
-        self.assertIn(fp, json.load(open(ws_session))["files"])
+        with open(ws_session) as f:
+            ws_data = json.load(f)
+        self.assertIn(fp, ws_data["files"])
         self.assertFalse(os.path.exists(root_session), "not captured into the parent session")
 
     def test_submodule_file_routes_to_parent_session(self):
@@ -69,7 +71,9 @@ class WorktreeRoutingTest(unittest.TestCase):
         self.run_hook(fp)
         root_session = session_file_for(self.claudegate, self.root)
         self.assertTrue(os.path.exists(root_session), "submodule stays with the parent")
-        self.assertIn(fp, json.load(open(root_session))["files"])
+        with open(root_session) as f:
+            root_data = json.load(f)
+        self.assertIn(fp, root_data["files"])
 
     def test_plain_nested_file_routes_to_parent_session(self):
         d = os.path.join(self.root, "src")
@@ -79,7 +83,9 @@ class WorktreeRoutingTest(unittest.TestCase):
             f.write("hi")
         self.run_hook(fp)
         root_session = session_file_for(self.claudegate, self.root)
-        self.assertIn(fp, json.load(open(root_session))["files"])
+        with open(root_session) as f:
+            root_data = json.load(f)
+        self.assertIn(fp, root_data["files"])
 
 
 if __name__ == "__main__":
