@@ -14,7 +14,10 @@ export class ClaudeGateContentProvider
   private readonly _onDidChange = new vscode.EventEmitter<vscode.Uri>();
   readonly onDidChange = this._onDidChange.event;
 
-  constructor(private readonly sessionManager: SessionManager) {
+  constructor(
+    private readonly sessionManager: SessionManager,
+    private readonly resolveManager: (filePath: string) => SessionManager = () => sessionManager
+  ) {
     sessionManager.onSessionChange((session) => {
       if (!session) return;
       for (const fp of Object.keys(session.files)) {
@@ -28,14 +31,14 @@ export class ClaudeGateContentProvider
   }
 
   provideTextDocumentContent(uri: vscode.Uri): string {
-    const session = this.sessionManager.getSession();
-    if (!session) return "";
-
     // Record URIs carry the real file path (so the editor infers the language
     // for syntax highlighting) plus a `rec` query identifying the record.
     const params = new URLSearchParams(uri.query);
     const recId = params.get("rec");
     if (recId) {
+      // Accepted/rejected records are shown only for the primary session.
+      const session = this.sessionManager.getSession();
+      if (!session) return "";
       const side = params.get("side");
       const rec = [...session.accepted, ...Object.values(session.rejected)].find((r) => r.id === recId);
       if (!rec) return "";
@@ -44,7 +47,8 @@ export class ClaudeGateContentProvider
 
     // Look up by fsPath (the session key). On Windows uri.path is "/c:/…" while
     // the key is "c:\…", so uri.path would miss; uri.fsPath matches on all OSes.
-    const entry = session.files[uri.fsPath];
+    const owner = this.resolveManager(uri.fsPath).getSession();
+    const entry = owner?.files[uri.fsPath];
     if (!entry) return "";
     return entry.originalContent ?? "// New file — no original content";
   }

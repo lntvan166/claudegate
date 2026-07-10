@@ -236,6 +236,12 @@
         "command": "claudegate.reviewChanges",
         "title": "Claude Gate: Review Changes",
         "icon": "$(diff-multiple)"
+      },
+      {
+        "command": "claudegate.openWorktreeWindow",
+        "title": "Open Worktree in New Window",
+        "category": "Claude Gate",
+        "icon": "$(empty-window)"
       }
     ],
     "menus": {
@@ -398,6 +404,11 @@
           "command": "claudegate.addToClaudeChat",
           "when": "viewItem =~ /^claudegate\\.file\\./ && claudegate.claudeContextAvailable",
           "group": "z_claude@1"
+        },
+        {
+          "command": "claudegate.openWorktreeWindow",
+          "when": "view == claudegate.pendingPanel && viewItem == claudegate.worktreeGroup",
+          "group": "inline@1"
         }
       ],
       "commandPalette": [
@@ -475,6 +486,10 @@
         },
         {
           "command": "claudegate.addToClaudeChat",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.openWorktreeWindow",
           "when": "false"
         }
       ]
@@ -570,7 +585,7 @@
     "watch": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --platform=node --sourcemap --watch",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext ts",
-    "test:unit": "esbuild src/excludeMatcher.test.ts --bundle --platform=node --format=cjs --outfile=out/excludeMatcher.test.cjs && node out/excludeMatcher.test.cjs && esbuild src/changeCount.test.ts --bundle --platform=node --format=cjs --outfile=out/changeCount.test.cjs && node out/changeCount.test.cjs && esbuild src/reviewWebviewModel.test.ts --bundle --platform=node --format=cjs --outfile=out/reviewWebviewModel.test.cjs && node out/reviewWebviewModel.test.cjs && esbuild src/reviewModel.test.ts --bundle --platform=node --format=cjs --outfile=out/reviewModel.test.cjs && node out/reviewModel.test.cjs && esbuild src/workspaceScope.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/workspaceScope.test.cjs && node out/workspaceScope.test.cjs && esbuild src/sessionManager.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/sessionManager.test.cjs && node out/sessionManager.test.cjs && esbuild src/hookInstaller.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/hookInstaller.test.cjs && node out/hookInstaller.test.cjs",
+    "test:unit": "esbuild src/excludeMatcher.test.ts --bundle --platform=node --format=cjs --outfile=out/excludeMatcher.test.cjs && node out/excludeMatcher.test.cjs && esbuild src/changeCount.test.ts --bundle --platform=node --format=cjs --outfile=out/changeCount.test.cjs && node out/changeCount.test.cjs && esbuild src/reviewWebviewModel.test.ts --bundle --platform=node --format=cjs --outfile=out/reviewWebviewModel.test.cjs && node out/reviewWebviewModel.test.cjs && esbuild src/reviewModel.test.ts --bundle --platform=node --format=cjs --outfile=out/reviewModel.test.cjs && node out/reviewModel.test.cjs && esbuild src/workspaceScope.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/workspaceScope.test.cjs && node out/workspaceScope.test.cjs && esbuild src/sessionManager.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/sessionManager.test.cjs && node out/sessionManager.test.cjs && esbuild src/hookInstaller.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/hookInstaller.test.cjs && node out/hookInstaller.test.cjs && esbuild src/worktrees.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/worktrees.test.cjs && node out/worktrees.test.cjs && esbuild src/worktreeSessionRegistry.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/worktreeSessionRegistry.test.cjs && node out/worktreeSessionRegistry.test.cjs",
     "test:hook": "python3 -m unittest discover -s hooks/tests -p 'test_*.py'",
     "test": "npm run test:unit && npm run test:hook"
   },

@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
 import { SessionManager } from "./sessionManager";
+import { WorktreeSessionRegistry } from "./worktreeSessionRegistry";
 import { buildReviewModel, buildFeedbackText, ReviewItemInput } from "./reviewWebviewModel";
 import { isInWorkspace, isExcluded, isProtected } from "./workspaceScope";
 
@@ -10,7 +11,11 @@ export class ReviewWebviewPanel {
   private batchOrder: string[] = []; // stable display order: seed pending, then late arrivals
   private relToAbs = new Map<string, string>(); // relPath -> absolute fs path, rebuilt each items() call
 
-  static showOrReveal(context: vscode.ExtensionContext, sessionManager: SessionManager): void {
+  static showOrReveal(
+    context: vscode.ExtensionContext,
+    sessionManager: SessionManager,
+    worktreeRegistry: WorktreeSessionRegistry
+  ): void {
     if (ReviewWebviewPanel.current) {
       ReviewWebviewPanel.current.panel.reveal(vscode.ViewColumn.Active);
       ReviewWebviewPanel.current.render();
@@ -23,41 +28,62 @@ export class ReviewWebviewPanel {
       { enableScripts: true, retainContextWhenHidden: true,
         localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media")] }
     );
-    ReviewWebviewPanel.current = new ReviewWebviewPanel(panel, context, sessionManager);
+    ReviewWebviewPanel.current = new ReviewWebviewPanel(panel, context, sessionManager, worktreeRegistry);
   }
 
   private constructor(
     private readonly panel: vscode.WebviewPanel,
     private readonly context: vscode.ExtensionContext,
-    private readonly sessionManager: SessionManager
+    private readonly sessionManager: SessionManager,
+    private readonly worktreeRegistry: WorktreeSessionRegistry
   ) {
     this.batchOrder = this.currentPendingPaths();
     this.panel.webview.html = this.html();
     this.panel.webview.onDidReceiveMessage((m) => this.onMessage(m), null, this.disposables);
+    // Worktree session changes already fan into the primary onSessionChange via
+    // notifyChanged(), so a single subscription re-renders on any session change.
     this.sessionManager.onSessionChange(() => this.render(), null, this.disposables);
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
   }
 
+  // Resolve the SessionManager that owns a given absolute path: the worktree it
+  // falls under, else the primary window session.
+  private managerFor(absPath: string): SessionManager {
+    return this.worktreeRegistry.managerFor(absPath) ?? this.sessionManager;
+  }
+
+  // Every session in scope: the primary window plus each nested worktree.
+  private allManagers(): SessionManager[] {
+    return [this.sessionManager, ...this.worktreeRegistry.getManagers().values()];
+  }
+
   private currentPendingPaths(): string[] {
-    const s = this.sessionManager.getSession();
-    if (!s) return [];
-    return Object.keys(s.files)
-      .filter((fp) => isInWorkspace(fp) && !isExcluded(fp))
-      .sort((a, b) => (Number(isProtected(b)) - Number(isProtected(a))) || a.localeCompare(b));
+    const all: string[] = [];
+    for (const mgr of this.allManagers()) {
+      const s = mgr.getSession();
+      if (!s) continue;
+      for (const fp of Object.keys(s.files)) {
+        if (isInWorkspace(fp) && !isExcluded(fp)) all.push(fp);
+      }
+    }
+    return all.sort(
+      (a, b) => (Number(isProtected(b)) - Number(isProtected(a))) || a.localeCompare(b)
+    );
   }
 
   // Assemble the review items in stable batch order: every path seen while this
   // panel is open (seed pending set + any later captures), each tagged with its
-  // current status (pending / kept / undone) and diff content.
+  // current status (pending / kept / undone) and diff content, read from the
+  // session (primary or worktree) that owns the path.
   private items(): ReviewItemInput[] {
-    const s = this.sessionManager.getSession();
-    if (!s) return [];
     for (const fp of this.currentPendingPaths()) if (!this.batchOrder.includes(fp)) this.batchOrder.push(fp);
 
     this.relToAbs.clear();
     const items: ReviewItemInput[] = [];
     for (const fp of this.batchOrder) {
       if (!isInWorkspace(fp) || isExcluded(fp)) continue;
+      const s = this.managerFor(fp).getSession();
+      if (!s) continue;
       const rel = vscode.workspace.asRelativePath(fp, false).split(/[\\/]/).join("/");
       this.relToAbs.set(rel, fp);
       const pending = s.files[fp];
@@ -103,19 +129,21 @@ export class ReviewWebviewPanel {
       case "ready": this.render(); break;
       case "keep": {
         const target = m.path ? this.relToAbs.get(m.path) : undefined;
-        if (target) this.sessionManager.acceptFile(target);
+        if (target) this.managerFor(target).acceptFile(target);
         break;
       }
       case "undo": {
         const target = m.path ? this.relToAbs.get(m.path) : undefined;
-        if (target) this.sessionManager.rejectFile(target, m.reason || undefined);
+        if (target) this.managerFor(target).rejectFile(target, m.reason || undefined);
         break;
       }
-      case "keepAll": this.sessionManager.acceptAll(); break;
+      case "keepAll":
+        for (const mgr of this.allManagers()) mgr.acceptAll();
+        break;
       case "undoAll": {
         const answer = await vscode.window.showWarningMessage(
           "Revert all pending files to their original content?", { modal: true }, "Revert All");
-        if (answer === "Revert All") this.sessionManager.rejectAll();
+        if (answer === "Revert All") for (const mgr of this.allManagers()) mgr.rejectAll();
         break;
       }
       case "setDiffMode":

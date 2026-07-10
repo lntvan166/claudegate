@@ -167,6 +167,20 @@ echo '{"tool_name":"Write","cwd":"/tmp","tool_input":{"file_path":"test.txt"}}' 
 ls ~/.claudegate/sessions/
 ```
 
+### Testing
+
+- `npm test` runs `test:unit` (TS) + `test:hook` (Python `unittest` in `hooks/tests/`).
+- Unit tests are plain `assert` + `console.log("ok - …")`, bundled per-file by esbuild and run with node. **Each new `src/*.test.ts` must be appended to the `test:unit` script in `package.json`** or it won't run.
+- Tests that import VS Code-dependent modules bundle with `--alias:vscode=./src/test-stubs/vscode.ts`; isolate `~/.claudegate` via `process.env.HOME = fs.mkdtempSync(...)`.
+
+## Subagent / Background-Task Git Safety
+
+Subagents run in the **same working directory** (no worktree isolation by default), so a stray `git checkout`/`reset` — or a race — can land a commit as a **dangling commit on the wrong base**, leaving the branch HEAD unmoved with a clean tree (work recoverable only via `git cherry-pick <sha>`).
+
+- When dispatching a subagent that commits: instruct it to run ONLY `git add <files>` + `git commit` on the current branch, NEVER `checkout/switch/reset/rebase/stash/branch`, and to confirm `git branch --show-current` before committing.
+- After each subagent returns, verify HEAD actually advanced on the expected branch (`git log --oneline -1`, clean status, files present) before trusting the work. If not, find the dangling commit (`git log --oneline <sha>`) and `cherry-pick` it.
+- Prefer worktree isolation for parallel or file-mutating agents.
+
 ---
 
 ## Publishing to the Marketplace
