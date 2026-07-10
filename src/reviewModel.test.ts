@@ -302,4 +302,29 @@ console.log("ok - makeRecordId");
   console.log("ok - migrateSession heals a pre-cap oversized accepted log");
 }
 
+// rejectEntry stores an optional reason on the record
+{
+  const session = {
+    sessionId: "s", status: "active" as const,
+    files: { "/w/a.ts": { originalContent: "old", reviewStatus: "pending" as const } },
+    accepted: [], rejected: {},
+  };
+  rejectEntry(session, "/w/a.ts", "new", "2026-07-10T00:00:00.000Z", "broke the API");
+  assert.equal(session.rejected["/w/a.ts"].reason, "broke the API");
+  assert.equal(session.files["/w/a.ts"], undefined); // entry removed from files{}
+  console.log("ok - rejectEntry stores an optional reason on the record");
+}
+
+// rejectEntry omits reason when none is given
+{
+  const session = {
+    sessionId: "s", status: "active" as const,
+    files: { "/w/b.ts": { originalContent: "old", reviewStatus: "pending" as const } },
+    accepted: [], rejected: {},
+  };
+  rejectEntry(session, "/w/b.ts", "new", "2026-07-10T00:00:00.000Z");
+  assert.equal(session.rejected["/w/b.ts"].reason, undefined);
+  console.log("ok - rejectEntry omits reason when none is given");
+}
+
 console.log("done");

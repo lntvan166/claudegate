@@ -18,6 +18,7 @@ export interface ReviewRecord {
   sessionId?: string;
   newFile?: boolean;     // preserved so a reopened (revert/reapply) new-file entry
                          // still deletes-on-reject instead of being left on disk
+  reason?: string;       // optional revert reason, fed into the "Feedback to AI" log (reject only)
 }
 
 export interface Session {
@@ -154,7 +155,7 @@ export function acceptEntry(session: Session, path: string, after: string | null
   delete session.files[path];
 }
 
-export function rejectEntry(session: Session, path: string, after: string | null, decidedAt: string): void {
+export function rejectEntry(session: Session, path: string, after: string | null, decidedAt: string, reason?: string): void {
   const entry = session.files[path];
   if (!entry) return;
   session.rejected[path] = {
@@ -165,6 +166,7 @@ export function rejectEntry(session: Session, path: string, after: string | null
     decidedAt,
     sessionId: entry.sessionId,
     newFile: entry.newFile,
+    ...(reason ? { reason } : {}),
   };
   delete session.files[path];
 }
