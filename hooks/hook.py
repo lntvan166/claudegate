@@ -106,6 +106,44 @@ def workspace_session_file(workspace_root: str) -> str:
     return os.path.join(SESSIONS_DIR, f"{workspace_hash}.json")
 
 
+def worktree_root_for_file(file_path: str, best_root: str) -> str | None:
+    """Return the nested git-worktree working dir containing file_path, if it is a
+    real worktree (not a submodule) strictly BELOW best_root. Pure filesystem and
+    FAIL-OPEN: any error returns None so routing falls back to best_root. Never
+    walks above best_root."""
+    try:
+        best_abs = os.path.normcase(os.path.abspath(best_root))
+        cur = os.path.dirname(os.path.normcase(os.path.abspath(file_path)))
+        while cur.startswith(best_abs + os.sep):  # strictly below best_root
+            dot_git = os.path.join(cur, ".git")
+            if os.path.isfile(dot_git):
+                try:
+                    with open(dot_git, encoding="utf-8") as f:
+                        first = f.read().strip()
+                except OSError:
+                    return None
+                # A worktree's gitdir is structurally `<main>/.git/worktrees/<name>`;
+                # a submodule's is `<super>/.git/modules/<name>`. Check the two
+                # segments above <name> are `worktrees` then `.git` (a substring
+                # match would misclassify a submodule parked under a dir literally
+                # named "worktrees").
+                if first.startswith("gitdir:"):
+                    target = first[len("gitdir:"):].strip()
+                    parent = os.path.dirname(target)        # <main>/.git/worktrees
+                    grandparent = os.path.dirname(parent)   # <main>/.git
+                    if (os.path.basename(parent) == "worktrees"
+                            and os.path.basename(grandparent) == ".git"):
+                        return cur
+                return None
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                break
+            cur = parent
+        return None
+    except Exception:
+        return None
+
+
 # Concurrency: hook.py and the VS Code extension both read-modify-write the same
 # JSON file. They coordinate via the fail-open advisory lock above, which
 # serializes the read→write window in the common case; atomic os.replace() also
@@ -166,6 +204,11 @@ def main() -> None:
     workspace_root = workspace_root_for_file(file_path, cwd)
     if workspace_root is None:
         sys.exit(0)
+    # A nested git worktree owns its own session deterministically, regardless of
+    # which windows are open (fail-open: falls back to workspace_root on any error).
+    worktree_root = worktree_root_for_file(file_path, workspace_root)
+    if worktree_root is not None:
+        workspace_root = worktree_root
     session_file = workspace_session_file(workspace_root)
 
     if os.path.exists(file_path):

@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
 import { SessionManager, ReviewStatus, Session, FileEntry, ReviewRecord } from "./sessionManager";
+import { WorktreeSessionRegistry } from "./worktreeSessionRegistry";
 import { openDiff } from "./diffProvider";
 import { isInWorkspace, isExcluded, isProtected } from "./workspaceScope";
 import { countChanges, formatChangeCount } from "./changeCount";
@@ -69,6 +70,25 @@ export class SessionItem extends vscode.TreeItem {
     this.description  = `${fileCount} file${fileCount === 1 ? "" : "s"}`;
     this.contextValue = "claudegate.session";
     this.iconPath     = new vscode.ThemeIcon(sessionId ? "history" : "question");
+  }
+}
+
+// ─── Worktree group item (parent window shows a nested worktree's pending) ─────
+
+export class WorktreeGroupItem extends vscode.TreeItem {
+  constructor(
+    public readonly worktreeRoot: string,
+    public readonly sessionManager: SessionManager,
+    pendingCount: number
+  ) {
+    super(`${path.basename(worktreeRoot)} (worktree)`, vscode.TreeItemCollapsibleState.Expanded);
+    this.resourceUri  = vscode.Uri.file(worktreeRoot);
+    this.description  = `${pendingCount} pending`;
+    this.tooltip      = new vscode.MarkdownString(
+      `**Git worktree**\n\n${worktreeRoot}\n\n${pendingCount} pending file(s) · shown here and in the worktree's own window`
+    );
+    this.contextValue = "claudegate.worktreeGroup";
+    this.iconPath     = new vscode.ThemeIcon("git-branch");
   }
 }
 
@@ -147,10 +167,12 @@ export class FilteredTreeProvider
   constructor(
     private readonly sessionManager: SessionManager,
     private readonly status: ReviewStatus,
-    initialViewMode: ViewMode = "tree"
+    initialViewMode: ViewMode = "tree",
+    private readonly worktreeRegistry?: WorktreeSessionRegistry
   ) {
     this.viewMode = initialViewMode;
     sessionManager.onSessionChange(() => this._onDidChangeTreeData.fire());
+    worktreeRegistry?.onChange(() => this._onDidChangeTreeData.fire());
   }
 
   setViewMode(mode: ViewMode): void {
@@ -172,27 +194,45 @@ export class FilteredTreeProvider
 
   getChildren(element?: vscode.TreeItem): vscode.TreeItem[] {
     const session = this.sessionManager.getSession();
-    if (!session) return [];
 
     const grouped = vscode.workspace
       .getConfiguration("claudegate")
       .get<boolean>("groupBySession", false);
 
-    if (this.status !== "pending") return this.getRecordChildren(session, element, grouped);
+    // Accepted/Rejected panels are primary-only — nothing to show without a session.
+    if (this.status !== "pending") {
+      return session ? this.getRecordChildren(session, element, grouped) : [];
+    }
+
+    // Worktree group expansion must work even when the primary session is null
+    // (all edits may live in a nested worktree), so handle it before that guard.
+    if (element instanceof WorktreeGroupItem) return this.worktreeFiles(element);
 
     // Root
     if (!element) {
-      if (grouped) return this.sessionGroups(session);
-      const files = this.filteredFiles(session);
-      if (this.viewMode === "list") {
-        const ordered = [...files].sort(
-          (a, b) =>
-            (Number(isProtected(b)) - Number(isProtected(a))) || a.localeCompare(b)
-        );
-        return ordered.map((fp) => new FileReviewItem(fp, this.status, this.sessionManager));
+      let primary: vscode.TreeItem[] = [];
+      if (session) {
+        if (grouped) {
+          primary = this.sessionGroups(session);
+        } else {
+          const files = this.filteredFiles(session);
+          primary =
+            this.viewMode === "list"
+              ? [...files]
+                  .sort(
+                    (a, b) =>
+                      (Number(isProtected(b)) - Number(isProtected(a))) || a.localeCompare(b)
+                  )
+                  .map((fp) => new FileReviewItem(fp, this.status, this.sessionManager))
+              : this.directChildren(files, getWorkspaceRoot(files), this.status, false);
+        }
       }
-      return this.directChildren(files, getWorkspaceRoot(files), this.status, false);
+      return [...primary, ...this.worktreeGroups()];
     }
+
+    // Remaining element branches need the primary session (SessionItem/FolderItem
+    // are only produced when a session exists).
+    if (!session) return [];
 
     // Session group children
     if (element instanceof SessionItem) {
@@ -303,6 +343,33 @@ export class FilteredTreeProvider
     return Object.keys(session.files).filter(
       (fp) => isInWorkspace(fp) && !isExcluded(fp)
     );
+  }
+
+  // In-scope pending files of an arbitrary (worktree) session manager.
+  private pendingOf(mgr: SessionManager): string[] {
+    const s = mgr.getSession();
+    if (!s) return [];
+    return Object.keys(s.files).filter((fp) => isInWorkspace(fp) && !isExcluded(fp));
+  }
+
+  // One group node per attached worktree that currently has pending files.
+  private worktreeGroups(): WorktreeGroupItem[] {
+    if (this.status !== "pending" || !this.worktreeRegistry) return [];
+    const items: WorktreeGroupItem[] = [];
+    for (const [root, mgr] of this.worktreeRegistry.getManagers()) {
+      const count = this.pendingOf(mgr).length;
+      if (count > 0) items.push(new WorktreeGroupItem(root, mgr, count));
+    }
+    return items.sort((a, b) => a.worktreeRoot.localeCompare(b.worktreeRoot));
+  }
+
+  // Flat pending-file rows for one worktree group, bound to its session manager
+  // so openDiff/accept/reject resolve against the correct (worktree) session.
+  private worktreeFiles(group: WorktreeGroupItem): vscode.TreeItem[] {
+    const files = this.pendingOf(group.sessionManager).sort(
+      (a, b) => (Number(isProtected(b)) - Number(isProtected(a))) || a.localeCompare(b)
+    );
+    return files.map((fp) => new FileReviewItem(fp, "pending", group.sessionManager, true));
   }
 
   // Accepted (newest first) / rejected (latest-per-file) records, scoped to
@@ -472,12 +539,12 @@ export class FilteredTreeProvider
 
 export function registerOpenDiff(
   context: vscode.ExtensionContext,
-  sessionManager: SessionManager
+  resolve: (filePath: string) => SessionManager
 ): void {
   context.subscriptions.push(
     vscode.commands.registerCommand(
       "claudegate.openDiff",
-      (filePath: string) => openDiff(filePath, sessionManager)
+      (filePath: string) => openDiff(filePath, resolve(filePath))
     )
   );
 }
