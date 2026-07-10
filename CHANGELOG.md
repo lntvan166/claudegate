@@ -7,6 +7,20 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.6.0] — 2026-07-10
+
+### Added
+
+- **A new "Review Changes" panel that shows every pending file in one scrollable surface.** Run **Claude Gate: Review Changes** to open a single editor tab that renders all pending changes stacked, each with its own **Keep / Undo** buttons, a **split ↔ unified** diff toggle (your choice is remembered), and an **Open in native diff** shortcut for close inspection. It updates live as you decide files — no reopening, and none of the flicker of the old multi-diff. It also keeps a copyable **Feedback to AI** log of your keep/undo decisions (and any undo reasons) that you can paste back to your agent yourself — ClaudeGate never calls a model; the log is just formatted text.
+- **A git worktree nested inside your workspace now gets its own review scope, shown in the parent window.** Previously, whether an edit inside a nested worktree (e.g. `repo/ws-feature`) landed in the parent's review or the worktree's own depended on which editor windows happened to be open — the same change could scatter across two sessions. Now Claude's edits to a worktree are always captured to that worktree's own session (detected purely from git's on-disk layout, no `git` binary), and the parent window's **Pending** panel shows them under a labeled `… (worktree)` group with full accept/reject/diff actions plus an **Open Worktree in New Window** button. Accept or reject from either window and the decision applies in both, because it's one shared record.
+- **You can attach an optional reason when you reject a change.** Rejecting now offers an inline prompt for a short "why" (across the sidebar, keyboard, and the Review Changes panel), and the reason is shown with the record in the **Rejected** list and included in the Feedback to AI log — so you can tell your agent what to do differently. Leaving it blank behaves exactly as before.
+
+### Notes
+
+- **Re-run `Claude Gate: Setup Hook` after updating.** This release changes `hooks/hook.py` (nested-worktree routing); the updated hook is only picked up when you re-run Setup Hook.
+
+---
+
 ## [1.5.0] — 2026-07-09
 
 ### Fixed

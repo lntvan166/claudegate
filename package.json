@@ -2,7 +2,7 @@
   "name": "claudegate",
   "displayName": "Claude Gate",
   "description": "Review Claude Code's file changes in a native diff panel — accept or reject each edit. The PreToolUse hook captures all Claude Code edits (terminal CLI and in-editor extension); the filesystem watcher is an optional fallback for non-Claude agents and is off by default.",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "publisher": "lntvan166",
   "icon": "media/icon.png",
   "engines": {
@@ -499,7 +499,10 @@
       "properties": {
         "claudegate.review.diffMode": {
           "type": "string",
-          "enum": ["split", "unified"],
+          "enum": [
+            "split",
+            "unified"
+          ],
           "default": "split",
           "markdownDescription": "Diff layout in the **Review Changes** panel: `split` (side-by-side, original ↔ current) or `unified` (single column, GitHub-style). The panel's toggle updates this."
         },
