@@ -31,14 +31,14 @@ export class ClaudeGateContentProvider
   }
 
   provideTextDocumentContent(uri: vscode.Uri): string {
-    const session = this.sessionManager.getSession();
-    if (!session) return "";
-
     // Record URIs carry the real file path (so the editor infers the language
     // for syntax highlighting) plus a `rec` query identifying the record.
     const params = new URLSearchParams(uri.query);
     const recId = params.get("rec");
     if (recId) {
+      // Accepted/rejected records are shown only for the primary session.
+      const session = this.sessionManager.getSession();
+      if (!session) return "";
       const side = params.get("side");
       const rec = [...session.accepted, ...Object.values(session.rejected)].find((r) => r.id === recId);
       if (!rec) return "";

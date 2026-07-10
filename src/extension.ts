@@ -593,10 +593,10 @@ export function activate(context: vscode.ExtensionContext): void {
     sessionManager.startWatching();
     context.subscriptions.push({ dispose: () => sessionManager.stopWatching() });
 
-    worktreeRegistry.refresh();
-    // A worktree session changing (or worktrees added/removed) re-runs the primary
-    // counter (badge) via notifyChanged; the providers refresh via onChange directly.
+    // Subscribe BEFORE the first refresh so the initial attach's synchronous
+    // onChange updates the badge counter (via notifyChanged) at cold start.
     context.subscriptions.push(worktreeRegistry.onChange(() => sessionManager.notifyChanged()));
+    worktreeRegistry.refresh();
     context.subscriptions.push(
       vscode.window.onDidChangeWindowState((e) => { if (e.focused) worktreeRegistry.refresh(); })
     );
