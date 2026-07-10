@@ -7,9 +7,11 @@ import {
   FilteredTreeProvider,
   FileReviewItem,
   FolderItem,
+  WorktreeGroupItem,
   registerOpenDiff,
   closeDiffEditor,
 } from "./reviewPanel";
+import { WorktreeSessionRegistry } from "./worktreeSessionRegistry";
 import { HookInstaller } from "./hookInstaller";
 import { SettingsTreeProvider, SettingsItem } from "./settingsPanel";
 import { ClaudeGateContentProvider, SCHEME, originalUri, openReviewRecord } from "./diffProvider";
@@ -106,6 +108,11 @@ export function activate(context: vscode.ExtensionContext): void {
     loadProtected();
     setProtectedMatcher(protectedMatcher);
     const sessionManager = new SessionManager(log, workspacePath);
+    const worktreeRegistry = new WorktreeSessionRegistry(log, workspacePath);
+    // Route a file/folder path to its owning session: the worktree it falls under,
+    // else the primary window session.
+    const managerFor = (p?: string): SessionManager =>
+      (p ? worktreeRegistry.managerFor(p) : null) ?? sessionManager;
     const hookInstaller  = new HookInstaller(context, log);
     void hookInstaller.syncHookIfNeeded().then(() => {
       hookInstaller.warnIfHookNotRegisteredInSettings();
@@ -122,14 +129,14 @@ export function activate(context: vscode.ExtensionContext): void {
     badgeBar.show();
     context.subscriptions.push(badgeBar);
 
-    const pendingProvider  = new FilteredTreeProvider(sessionManager, "pending",  "tree");
+    const pendingProvider  = new FilteredTreeProvider(sessionManager, "pending",  "tree", worktreeRegistry);
     const acceptedProvider = new FilteredTreeProvider(sessionManager, "accepted", "tree");
     const rejectedProvider = new FilteredTreeProvider(sessionManager, "rejected", "tree");
 
     context.subscriptions.push(
       vscode.workspace.registerTextDocumentContentProvider(
         SCHEME,
-        new ClaudeGateContentProvider(sessionManager)
+        new ClaudeGateContentProvider(sessionManager, managerFor)
       )
     );
 
@@ -247,7 +254,7 @@ export function activate(context: vscode.ExtensionContext): void {
         async (item?: FileReviewItem | { filePath: string }) => {
           const filePath = item?.filePath ?? getActivePendingFilePath(sessionManager);
           if (!filePath) return;
-          sessionManager.acceptFile(filePath);
+          managerFor(filePath).acceptFile(filePath);
           await closeDiffEditor(filePath);
         }
       ),
@@ -263,7 +270,7 @@ export function activate(context: vscode.ExtensionContext): void {
             "Revert"
           );
           if (answer === "Revert") {
-            sessionManager.rejectFile(filePath);
+            managerFor(filePath).rejectFile(filePath);
             await closeDiffEditor(filePath);
           }
         }
@@ -291,13 +298,14 @@ export function activate(context: vscode.ExtensionContext): void {
       // ── Pending folder actions ──
       vscode.commands.registerCommand(
         "claudegate.acceptFolder",
-        (item: FolderItem) => sessionManager.acceptFolder(item.folderPath)
+        (item: FolderItem) => managerFor(item.folderPath).acceptFolder(item.folderPath)
       ),
 
       vscode.commands.registerCommand(
         "claudegate.rejectFolder",
         async (item: FolderItem) => {
-          const session = sessionManager.getSession();
+          const mgr = managerFor(item.folderPath);
+          const session = mgr.getSession();
           const pendingFiles = Object.entries(session?.files ?? {})
             .filter(
               ([fp, e]) =>
@@ -312,7 +320,7 @@ export function activate(context: vscode.ExtensionContext): void {
             "Revert"
           );
           if (answer === "Revert") {
-            sessionManager.rejectFolder(item.folderPath);
+            mgr.rejectFolder(item.folderPath);
             await Promise.all(pendingFiles.map((fp) => closeDiffEditor(fp)));
           }
         }
@@ -494,9 +502,21 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         await openPendingMultiDiff(paths);
       }),
+
+      vscode.commands.registerCommand(
+        "claudegate.openWorktreeWindow",
+        (item: WorktreeGroupItem) => {
+          if (!item?.worktreeRoot) return;
+          void vscode.commands.executeCommand(
+            "vscode.openFolder",
+            vscode.Uri.file(item.worktreeRoot),
+            { forceNewWindow: true }
+          );
+        }
+      ),
     );
 
-    registerOpenDiff(context, sessionManager);
+    registerOpenDiff(context, managerFor);
     context.subscriptions.push(
       vscode.commands.registerCommand("claudegate.openReviewRecord", (id: string) =>
         openReviewRecord(id, sessionManager)
@@ -538,6 +558,7 @@ export function activate(context: vscode.ExtensionContext): void {
           // no-op entries are pruned by the reconcile, not filtered here.
           if (isInWorkspace(fp) && !isExcluded(fp)) pending++;
         }
+        pending += worktreeRegistry.totalPending();
         accepted = session.accepted.filter((r) => isInWorkspace(r.path) && !isExcluded(r.path)).length;
         rejected = Object.values(session.rejected).filter((r) => isInWorkspace(r.path) && !isExcluded(r.path)).length;
       }
@@ -571,6 +592,15 @@ export function activate(context: vscode.ExtensionContext): void {
 
     sessionManager.startWatching();
     context.subscriptions.push({ dispose: () => sessionManager.stopWatching() });
+
+    worktreeRegistry.refresh();
+    // A worktree session changing (or worktrees added/removed) re-runs the primary
+    // counter (badge) via notifyChanged; the providers refresh via onChange directly.
+    context.subscriptions.push(worktreeRegistry.onChange(() => sessionManager.notifyChanged()));
+    context.subscriptions.push(
+      vscode.window.onDidChangeWindowState((e) => { if (e.focused) worktreeRegistry.refresh(); })
+    );
+    context.subscriptions.push({ dispose: () => worktreeRegistry.dispose() });
 
     const isWatcherEnabled = () =>
       vscode.workspace.getConfiguration("claudegate").get<boolean>("fileWatcher.enabled", false);

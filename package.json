@@ -231,6 +231,12 @@
         "command": "claudegate.reviewAllPending",
         "title": "Claude Gate: Review All Pending",
         "icon": "$(diff-multiple)"
+      },
+      {
+        "command": "claudegate.openWorktreeWindow",
+        "title": "Open Worktree in New Window",
+        "category": "Claude Gate",
+        "icon": "$(empty-window)"
       }
     ],
     "menus": {
@@ -393,6 +399,11 @@
           "command": "claudegate.addToClaudeChat",
           "when": "viewItem =~ /^claudegate\\.file\\./ && claudegate.claudeContextAvailable",
           "group": "z_claude@1"
+        },
+        {
+          "command": "claudegate.openWorktreeWindow",
+          "when": "view == claudegate.pendingPanel && viewItem == claudegate.worktreeGroup",
+          "group": "inline@1"
         }
       ],
       "commandPalette": [
@@ -470,6 +481,10 @@
         },
         {
           "command": "claudegate.addToClaudeChat",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.openWorktreeWindow",
           "when": "false"
         }
       ]

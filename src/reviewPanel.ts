@@ -532,12 +532,12 @@ export class FilteredTreeProvider
 
 export function registerOpenDiff(
   context: vscode.ExtensionContext,
-  sessionManager: SessionManager
+  resolve: (filePath: string) => SessionManager
 ): void {
   context.subscriptions.push(
     vscode.commands.registerCommand(
       "claudegate.openDiff",
-      (filePath: string) => openDiff(filePath, sessionManager)
+      (filePath: string) => openDiff(filePath, resolve(filePath))
     )
   );
 }
