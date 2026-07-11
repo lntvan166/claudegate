@@ -7,6 +7,28 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.6.1] — 2026-07-11
+
+### Changed
+
+- **"Review All Pending" is back to VS Code's native multi-file diff editor.** The 1.6.0 "Review Changes" webview reimplemented the diff view in HTML and had layout bugs — long lines overflowing the pane, misaligned columns, aggressive folding that hid real changes, and no syntax highlighting. This release reverts the feature to VS Code's built-in multi-diff editor (real syntax highlighting, correct scrolling and alignment), reached from the **Review All Pending** icon on the Pending panel. It still rebuilds live as you accept/reject and closes once nothing's left, and it now also includes pending files from **nested git worktrees** — each diffed against its own baseline — which the native view previously omitted. The webview code stays in the repo for future work but is no longer wired into the UI; the webview-only `claudegate.review.diffMode` setting has been removed.
+- **A very large review history now self-heals instead of only warning.** When the per-workspace session file crosses the size threshold, the oldest accepted records are now trimmed automatically by byte budget (recent history is always kept) rather than relying on you to clear the list by hand.
+- **Bulk history actions now confirm and report.** *Clear All Accepted*, *Clear All Rejected*, *Clear Session*, *Revert All*, and *Re-apply All* now ask for confirmation and show a summary notice (and *Accept All* confirms what it did), so a mis-click on a title-bar icon can't silently wipe history.
+
+### Fixed
+
+- **Setup Hook can no longer wipe your `~/.claude/settings.json`.** If that file failed to parse — a JSONC comment, a trailing comma, a stray hand-edit — the old logic reset it to `{}` and overwrote it, destroying your model config, permissions, other hooks, and MCP entries with no backup. It now refuses to write on a parse error (leaving the file untouched and telling you to fix the JSON), writes a `.bak` before its first change, writes atomically, repairs a stale or mis-pathed claudegate entry in place, and rewrites only when the registration actually changes — never for cosmetic formatting differences, which used to silently invalidate hook trust in running sessions.
+- **Review decisions are no longer lost when a nested worktree and its parent window are open at once.** Both windows own the same session file; the previous merge treated each window's accepted/rejected log as authoritative and could overwrite the other's decisions. The merge now reconciles the decision log from disk (union by record id, latest reject per path) and drops a pending entry the other window has already decided — so no accept/reject record is clobbered.
+- **Binary / non-UTF-8 files are no longer corrupted.** Reading file content decoded invalid bytes to `U+FFFD` and could write that mojibake back on reject. Content is now decoded strictly as UTF-8 and treated as unreadable (skipped) when it isn't valid — matching the hook — so a binary file is never mangled.
+- **A corrupt session file no longer silently empties the panels.** A parse failure used to be swallowed, nulling the session with no signal. It is now logged and surfaced once, the last-known state is kept (a normally absent or cleared file is still handled quietly), and the next decision rewrites the file atomically.
+- **The review hook can't crash a Claude edit.** `hooks/hook.py` now wraps its whole body in a fail-open guard, so an unwritable `~/.claudegate`, a full disk, or a malformed `workspace-roots.json` degrades to "no capture" instead of printing a Python traceback on every Write/Edit.
+
+### Notes
+
+- **Re-run `Claude Gate: Setup Hook` after updating.** This release changes `hooks/hook.py` (fail-open guard); the updated hook is only picked up when you re-run Setup Hook.
+
+---
+
 ## [1.6.0] — 2026-07-10
 
 ### Added

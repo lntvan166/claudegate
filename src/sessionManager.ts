@@ -6,7 +6,7 @@ import * as crypto from "crypto";
 import { isInWorkspace, isExcluded } from "./workspaceScope";
 import {
   Session, FileEntry, ReviewRecord, hasRealChange, shouldPruneNoOp, acceptEntry,
-  rejectEntry, migrateSession, mergeFreshCaptures,
+  rejectEntry, migrateSession, mergeFreshCaptures, MergeGuards, capAcceptedBytes,
 } from "./reviewModel";
 export type { Session, FileEntry, ReviewRecord } from "./reviewModel";
 export type ReviewStatus = "pending" | "accepted" | "rejected"; // panel tab id
@@ -34,6 +34,11 @@ const LOCK_SLEEP_MS = 5;
 // surface it: parsing megabytes on every fs.watch reload hurts responsiveness,
 // and clearing the review history shrinks it. Well past a healthy session.
 const SESSION_SIZE_WARN_BYTES = 5_000_000;
+// When a session file crosses the warning size, auto-trim the accepted log down
+// to this byte budget (oldest-first) so the panel self-heals instead of relying
+// on the user to clear history manually. Kept under the warn threshold to leave
+// room for pending/rejected entries.
+const MAX_ACCEPTED_BYTES = 4_000_000;
 
 export class SessionManager {
   private readonly sessionPath: string;
@@ -44,6 +49,7 @@ export class SessionManager {
   private watcher: fs.FSWatcher | null = null;
   private reconcileTimer: ReturnType<typeof setTimeout> | null = null;
   private oversizeWarned = false; // popup fires at most once per activation
+  private corruptWarned = false;  // corruption popup fires at most once per activation
 
   private readonly _onSessionChange = new vscode.EventEmitter<Session | null>();
   readonly onSessionChange = this._onSessionChange.event;
@@ -156,7 +162,9 @@ export class SessionManager {
     }
     acceptEntry(this.session!, filePath, after, new Date().toISOString());
     this.log.appendLine(`[INFO] Accepted: ${filePath}`);
-    this.persist();
+    // acceptEntry drops any prior reject for this path; tombstone it so the merge
+    // doesn't resurrect the reject from the still-stale on-disk copy.
+    this.persist({ droppedRejectedPaths: new Set([filePath]) });
   }
 
   acceptFolder(folderPath: string): void {
@@ -164,33 +172,33 @@ export class SessionManager {
     if (!s) return;
     const prefix = folderPath + path.sep;
     const decidedAt = new Date().toISOString();
-    let count = 0;
+    const accepted = new Set<string>();
     for (const fp of Object.keys(s.files)) {
       if (!fp.startsWith(prefix) || isExcluded(fp) || !this.hasRealPendingChange(fp)) continue;
       const after = this.readFileOrNull(fp);
       if (after === null) this.log.appendLine(`[WARN] Accept folder: could not read ${fp}; accepted diff unavailable`);
       acceptEntry(s, fp, after, decidedAt);
-      count++;
+      accepted.add(fp);
     }
-    if (count === 0) return;
-    this.log.appendLine(`[INFO] Accepted folder: ${folderPath} (${count} file(s))`);
-    this.persist();
+    if (accepted.size === 0) return;
+    this.log.appendLine(`[INFO] Accepted folder: ${folderPath} (${accepted.size} file(s))`);
+    this.persist({ droppedRejectedPaths: accepted });
   }
 
   acceptAll(): void {
     const s = this.session;
     if (!s) return;
     const decidedAt = new Date().toISOString();
-    let count = 0;
+    const accepted = new Set<string>();
     for (const fp of Object.keys(s.files)) {
       if (!isInWorkspace(fp) || isExcluded(fp) || !this.hasRealPendingChange(fp)) continue;
       const after = this.readFileOrNull(fp);
       if (after === null) this.log.appendLine(`[WARN] Accept all: could not read ${fp}; accepted diff unavailable`);
       acceptEntry(s, fp, after, decidedAt);
-      count++;
+      accepted.add(fp);
     }
-    this.log.appendLine(`[INFO] Accepted all: ${count} file(s)`);
-    this.persist();
+    this.log.appendLine(`[INFO] Accepted all: ${accepted.size} file(s)`);
+    this.persist({ droppedRejectedPaths: accepted });
   }
 
   // The on-disk effect of rejecting one entry. Deletes only a confident-new
@@ -317,9 +325,12 @@ export class SessionManager {
   }
 
   removePendingFile(filePath: string): void {
-    if (!this.session?.files[filePath]) return;
-    delete this.session.files[filePath];
-    this.persist();
+    const entry = this.session?.files[filePath];
+    if (!entry) return;
+    delete this.session!.files[filePath];
+    // Tombstone so the merge does not resurrect the just-removed pending entry
+    // from the still-stale on-disk copy.
+    this.persist({ prunedFiles: new Map([[filePath, entry.capturedAt]]) });
   }
 
   // ── Accepted log: undo ──────────────────────────────────────────────────
@@ -343,7 +354,7 @@ export class SessionManager {
     if (!rec) return;
     this.revertAcceptedRecord(rec);
     this.log.appendLine(`[INFO] Reverted accepted: ${rec.path}`);
-    this.persist();
+    this.persist({ droppedAcceptedIds: new Set([rec.id]) });
   }
 
   revertAcceptedAll(): void {
@@ -353,7 +364,7 @@ export class SessionManager {
     if (recs.length === 0) return;
     for (const rec of recs) this.revertAcceptedRecord(rec);
     this.log.appendLine(`[INFO] Reverted all accepted: ${recs.length} file(s)`);
-    this.persist();
+    this.persist({ droppedAcceptedIds: new Set(recs.map((r) => r.id)) });
   }
 
   revertAcceptedFolder(folderPath: string): void {
@@ -364,7 +375,7 @@ export class SessionManager {
     if (recs.length === 0) return;
     for (const rec of recs) this.revertAcceptedRecord(rec);
     this.log.appendLine(`[INFO] Reverted accepted folder: ${folderPath} (${recs.length} file(s))`);
-    this.persist();
+    this.persist({ droppedAcceptedIds: new Set(recs.map((r) => r.id)) });
   }
 
   // ── Rejected store (latest-per-file): re-apply ──────────────────────────
@@ -394,20 +405,23 @@ export class SessionManager {
       vscode.window.showWarningMessage(`Claude Gate: Cannot re-apply ${path.basename(filePath)} — ${err}`);
       return;
     }
-    this.persist();
+    this.persist({ droppedRejectedPaths: new Set([filePath]) });
   }
 
   private reapplyMany(paths: string[], label: string): void {
     if (paths.length === 0) return;
     const errors: string[] = [];
+    const dropped = new Set<string>();
     for (const fp of paths) {
       const err = this.reapplyRejectedRecord(fp);
       if (err) {
         errors.push(`${path.basename(fp)}: ${err}`);
         this.log.appendLine(`[ERROR] reapply ${fp}: ${err}`);
+      } else {
+        dropped.add(fp); // reapplyRejectedRecord removed it from rejected{}
       }
     }
-    this.persist();
+    this.persist({ droppedRejectedPaths: dropped });
     this.log.appendLine(`[INFO] ${label}: ${paths.length - errors.length}/${paths.length} file(s)`);
     if (errors.length > 0) {
       vscode.window.showErrorMessage(
@@ -436,20 +450,22 @@ export class SessionManager {
 
   clearAccepted(): void {
     if (!this.session) return;
-    const count = this.session.accepted.length;
-    if (count === 0) return;
+    const ids = this.session.accepted.map((r) => r.id);
+    if (ids.length === 0) return;
     this.session.accepted = [];
-    this.log.appendLine(`[INFO] Cleared accepted: ${count} record(s)`);
-    this.persist();
+    this.log.appendLine(`[INFO] Cleared accepted: ${ids.length} record(s)`);
+    // Tombstone every cleared id so the merge can't resurrect them from disk (a
+    // concurrent accept in another window, absent from this set, still survives).
+    this.persist({ droppedAcceptedIds: new Set(ids) });
   }
 
   clearRejected(): void {
     if (!this.session) return;
-    const count = Object.keys(this.session.rejected).length;
-    if (count === 0) return;
+    const paths = Object.keys(this.session.rejected);
+    if (paths.length === 0) return;
     this.session.rejected = {};
-    this.log.appendLine(`[INFO] Cleared rejected: ${count} record(s)`);
-    this.persist();
+    this.log.appendLine(`[INFO] Cleared rejected: ${paths.length} record(s)`);
+    this.persist({ droppedRejectedPaths: new Set(paths) });
   }
 
   clearSession(): void {
@@ -464,13 +480,26 @@ export class SessionManager {
   }
 
   private loadSession(): void {
+    let raw: string;
+    try {
+      raw = fs.readFileSync(this.sessionPath, "utf-8");
+    } catch (err) {
+      // Absent file is normal: the session was never created, or was cleared
+      // (clearSession unlinks it). Anything else (e.g. EACCES) is worth a log.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        this.log.appendLine(`[WARN] Could not read session file: ${(err as Error).message}`);
+      }
+      this.session = null;
+      this._onSessionChange.fire(this.session);
+      this.scheduleReconcile();
+      return;
+    }
     try {
       const oversized = this.checkSessionSize();
-      const raw = JSON.parse(fs.readFileSync(this.sessionPath, "utf-8"));
       // migrateSession reports whether it normalized anything, so we re-persist
       // only when the on-disk form is actually stale — no full-session stringify
       // on every fs.watch reload (was two serializations per event).
-      const { session, changed } = migrateSession(raw);
+      const { session, changed } = migrateSession(JSON.parse(raw));
       this.session = session;
       this.log.appendLine(
         `[INFO] Session loaded: ${Object.keys(this.session.files).length} pending, ` +
@@ -478,12 +507,29 @@ export class SessionManager {
       );
       this.pruneOutOfWorkspaceEntries();
       if (changed) this.persist();
-      if (oversized) this.warnOversizedOnce();
-    } catch {
-      this.session = null;
+      if (oversized) this.healOversized();
+    } catch (err) {
+      // The file exists but does not parse → corruption (external, since our own
+      // writes are atomic). Do NOT discard a good in-memory session; surface it
+      // once so it's diagnosable. The next user decision re-persists our state
+      // atomically over the bad file (persistLocked's re-read catch), self-healing.
+      this.log.appendLine(
+        `[ERROR] Session file is corrupt and was not loaded (${(err as Error).message}); ` +
+        `keeping last-known state: ${this.sessionPath}`
+      );
+      this.warnCorruptOnce();
     }
     this._onSessionChange.fire(this.session);
     this.scheduleReconcile();
+  }
+
+  private warnCorruptOnce(): void {
+    if (this.corruptWarned) return;
+    this.corruptWarned = true;
+    vscode.window.showWarningMessage(
+      "Claude Gate: the review session file could not be read (it may be corrupt). " +
+      "Your last-known changes are still shown; the next accept/reject will rewrite the file."
+    );
   }
 
   // Log a warning (every load, for diagnostics) if the session file is bloated,
@@ -503,14 +549,40 @@ export class SessionManager {
     }
   }
 
+  // Self-heal a bloated session: auto-trim the oldest accepted records down to
+  // the byte budget (the accepted log is almost always what grows), then persist.
+  // If trimming didn't help (bloat lives in pending/rejected), fall back to the
+  // one-shot "clear it manually" warning. Runs only when checkSessionSize() flags
+  // the file as oversized, so the O(n) byte scan is rare, not per-load.
+  private healOversized(): void {
+    if (!this.session) return;
+    const before = new Set(this.session.accepted.map((r) => r.id));
+    const dropped = capAcceptedBytes(this.session, MAX_ACCEPTED_BYTES);
+    if (dropped > 0) {
+      const kept = new Set(this.session.accepted.map((r) => r.id));
+      const droppedIds = new Set([...before].filter((id) => !kept.has(id)));
+      this.log.appendLine(`[INFO] Trimmed ${dropped} oldest accepted record(s) to bound session file size.`);
+      // Tombstone the trimmed ids so the dual-writer merge in persist() does not
+      // resurrect them from the still-large on-disk copy (byte-cap is below the
+      // count cap, so mergeFreshCaptures wouldn't otherwise re-drop them).
+      this.persist({ droppedAcceptedIds: droppedIds }); // atomic rewrite → healthy size
+      this.warnOversizedOnce(dropped);
+    } else {
+      this.warnOversizedOnce(0);
+    }
+  }
+
   // Surface the bloat to the user, but only once per activation — loadSession
   // runs on every fs.watch event, so a popup here would otherwise spam.
-  private warnOversizedOnce(): void {
+  private warnOversizedOnce(dropped: number): void {
     if (this.oversizeWarned) return;
     this.oversizeWarned = true;
     vscode.window.showWarningMessage(
-      "Claude Gate: this workspace's review history is unusually large and may slow the panel. " +
-      "Clear the Accepted or Rejected list to shrink it."
+      dropped > 0
+        ? `Claude Gate: the review history was very large, so the ${dropped} oldest accepted ` +
+          `record(s) were trimmed to keep the panel responsive.`
+        : "Claude Gate: this workspace's review history is unusually large and may slow the panel. " +
+          "Clear the Accepted or Rejected list to shrink it."
     );
   }
 
@@ -526,7 +598,7 @@ export class SessionManager {
     }
     // Same anti-resurrection guard as reconcilePending: the merge must not re-add
     // an entry we just pruned from the stale on-disk copy (would loop persist).
-    if (pruned.size > 0) this.persist(pruned);
+    if (pruned.size > 0) this.persist({ prunedFiles: pruned });
   }
 
   // Prune temp files Claude created then deleted, after a grace delay so a
@@ -561,7 +633,7 @@ export class SessionManager {
     // Pass the pruned set so the dual-writer merge in persist() does not resurrect
     // these entries from the stale on-disk copy — otherwise the prune never sticks
     // and persist spins forever (nonstop UI reload).
-    if (pruned.size > 0) this.persist(pruned);
+    if (pruned.size > 0) this.persist({ prunedFiles: pruned });
     // Give still-young no-op entries their full per-entry grace instead of the
     // shared timer's remaining time (closes the burst-coalescing hole).
     if (youngNoOp) this.scheduleReconcile();
@@ -569,11 +641,19 @@ export class SessionManager {
 
   // Read a file's current content, or null if it cannot be read. Used to
   // checkpoint the review baseline at approve/reject time.
+  //
+  // Decodes STRICTLY as UTF-8: Node's readFileSync(path, "utf-8") silently
+  // replaces invalid bytes with U+FFFD, so a binary / non-UTF-8 file would be
+  // captured (and later written back on restore) as irreversibly corrupted
+  // mojibake. Reading as a Buffer and decoding with { fatal: true } instead
+  // returns null for anything that isn't valid UTF-8 text — matching hook.py's
+  // strict-decode skip, so such files are treated as unreadable, never mangled.
   private readFileOrNull(filePath: string): string | null {
     try {
-      return fs.readFileSync(filePath, "utf-8");
+      const buf = fs.readFileSync(filePath);
+      return new TextDecoder("utf-8", { fatal: true }).decode(buf);
     } catch {
-      return null;
+      return null; // unreadable (permissions) or not valid UTF-8 (binary)
     }
   }
 
@@ -619,15 +699,16 @@ export class SessionManager {
     try { fs.unlinkSync(this.lockPath); } catch { /* already gone */ }
   }
 
-  // `prunedThisCycle` (path → capturedAt) lets a caller that just deliberately
-  // removed no-op entries tell the dual-writer merge below not to resurrect them
-  // from the still-stale on-disk copy (see mergeFreshCaptures).
-  private persist(prunedThisCycle?: Map<string, string | undefined>): void {
+  // `guards` lets a caller that just deliberately removed entries (a pruned no-op
+  // pending file, or a cleared/reverted/reapplied decision record) tell the
+  // dual-writer merge below not to resurrect them from the still-stale on-disk
+  // copy (see mergeFreshCaptures / MergeGuards).
+  private persist(guards?: MergeGuards): void {
     if (!this.session) return;
 
     const lock = this.acquireLock();
     try {
-      this.persistLocked(prunedThisCycle);
+      this.persistLocked(guards);
     } finally {
       this.releaseLock(lock);
     }
@@ -635,7 +716,7 @@ export class SessionManager {
   }
 
   // The read-modify-write body of persist(), run while holding the advisory lock.
-  private persistLocked(prunedThisCycle?: Map<string, string | undefined>): void {
+  private persistLocked(guards?: MergeGuards): void {
     if (!this.session) return;
 
     // Dual-writer guard: always re-read the on-disk copy and merge in any hook
@@ -649,7 +730,7 @@ export class SessionManager {
     // nothing changed, so always reconciling is both correct and inexpensive.
     try {
       const disk = migrateSession(JSON.parse(fs.readFileSync(this.sessionPath, "utf-8"))).session;
-      this.session = mergeFreshCaptures(this.session, disk, prunedThisCycle);
+      this.session = mergeFreshCaptures(this.session, disk, guards);
     } catch {
       // no readable/parseable disk copy → write our own state (never lose it)
     }

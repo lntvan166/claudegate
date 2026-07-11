@@ -49,6 +49,25 @@ export function capAcceptedLog(session: Session): boolean {
   return true;
 }
 
+// The count cap alone doesn't bound the file SIZE: a few accepts of large files
+// can push the session file past the size warning long before 500 records. When
+// that happens, drop the OLDEST accepted records until the serialized log fits
+// `maxBytes`, keeping the recent history a user actually acts on. Returns the
+// number dropped. O(n) — only run when the file is actually oversized (rare), not
+// on every load.
+export function capAcceptedBytes(session: Session, maxBytes: number): number {
+  const recs = session.accepted;
+  let total = 0;
+  let keepFrom = 0; // keep recs[keepFrom..]
+  for (let i = recs.length - 1; i >= 0; i--) {
+    total += Buffer.byteLength(JSON.stringify(recs[i]));
+    if (total > maxBytes) { keepFrom = i + 1; break; }
+  }
+  if (keepFrom === 0) return 0;
+  session.accepted = recs.slice(keepFrom);
+  return keepFrom;
+}
+
 // A pending entry is a real change unless its baseline already equals the
 // current disk content (no-op / failed edit). diskContent === null means the
 // file is absent on disk.
@@ -79,9 +98,20 @@ export function shouldPruneNoOp(
 }
 
 // Merge hook-captured pending entries that landed on disk since we loaded, so a
-// concurrent hook write is not lost when the extension persists. Only files{}
-// is reconciled (the hook's sole territory); mine's accepted[]/rejected{} are
-// authoritative.
+// concurrent hook write is not lost when the extension persists.
+//
+// This also unions accepted[]/rejected{} from disk. There is NOT a single
+// extension writer of the decision log: the v1.6.0 nested-worktree feature runs
+// a SessionManager for each attached worktree root, and the worktree's own VS
+// Code window runs its own SessionManager for the same root — both hash to the
+// same session file and both persist user decisions. Treating mine's
+// accepted[]/rejected{} as authoritative (write-back verbatim) therefore lets
+// the last writer silently clobber the other window's accept/reject records
+// (irreversible loss of the review log). We reconcile them: accepted[] is unioned
+// by record id (append-only, so union-by-id + re-cap is safe), and rejected{} is
+// merged latest-decision-per-path. A files{} entry we still show as pending but
+// which the other window has since decided (a disk decision strictly newer than
+// our capture) is dropped, so a file can't appear in both Pending and the log.
 //
 // A disk pending entry absent from mine.files is either (a) a hook capture we
 // never consumed, or (b) an entry the user already accepted/rejected (so we
@@ -103,11 +133,54 @@ export function shouldPruneNoOp(
 // (persist ≈ every RECONCILE_GRACE_MS, reloading the UI nonstop). We suppress
 // only the EXACT stale entry (matched by capturedAt); a genuinely fresh
 // re-capture carries a newer capturedAt and still merges, so no hook write is lost.
+// Records/paths the caller deliberately removed from `mine` in this same persist
+// cycle. The on-disk copy the merge re-reads still contains them, so without these
+// tombstones the union below would resurrect the just-removed entry, undo the
+// clear/revert/reapply, and (because the caller then persists) can spin an endless
+// rewrite loop. Each set suppresses only the exact removed record; a genuinely
+// fresh record from another window is never in these sets and still merges.
+export interface MergeGuards {
+  prunedFiles?: Map<string, string | undefined>; // path → capturedAt of a just-pruned pending entry
+  droppedAcceptedIds?: Set<string>;              // accepted record ids removed this cycle
+  droppedRejectedPaths?: Set<string>;            // rejected paths removed this cycle
+}
+
 export function mergeFreshCaptures(
   mine: Session,
   disk: Session,
-  prunedThisCycle?: Map<string, string | undefined>,
+  guards?: MergeGuards,
 ): Session {
+  const prunedThisCycle = guards?.prunedFiles;
+  // Union the decision log first, so the files{} reconcile below sees the other
+  // window's decisions too. accepted[] is append-only → union by id, then re-cap.
+  const seenAccepted = new Set(mine.accepted.map((r) => r.id));
+  let unionedAccept = false;
+  for (const rec of disk.accepted) {
+    if (seenAccepted.has(rec.id)) continue;
+    if (guards?.droppedAcceptedIds?.has(rec.id)) continue; // we just removed it this cycle
+    mine.accepted.push(rec);
+    seenAccepted.add(rec.id);
+    unionedAccept = true;
+  }
+  if (unionedAccept) {
+    // Keep a deterministic oldest-first order so capAcceptedLog drops the oldest.
+    mine.accepted.sort((a, b) => {
+      const da = Date.parse(a.decidedAt), db = Date.parse(b.decidedAt);
+      if (Number.isNaN(da) || Number.isNaN(db) || da === db) return 0;
+      return da - db;
+    });
+    capAcceptedLog(mine);
+  }
+  // rejected{} is latest-per-path → take disk's record when it is newer (or when
+  // we hold none for that path).
+  for (const [path, rec] of Object.entries(disk.rejected)) {
+    if (guards?.droppedRejectedPaths?.has(path)) continue; // we just cleared/reapplied it this cycle
+    const ours = mine.rejected[path];
+    if (!ours) { mine.rejected[path] = rec; continue; }
+    const dOurs = Date.parse(ours.decidedAt), dDisk = Date.parse(rec.decidedAt);
+    if (!Number.isNaN(dDisk) && (Number.isNaN(dOurs) || dDisk > dOurs)) mine.rejected[path] = rec;
+  }
+
   for (const [path, entry] of Object.entries(disk.files)) {
     if (mine.files[path]) continue;          // we already know this path
     if (!entry.capturedAt) continue;         // no timestamp → cannot prove it's a real capture
@@ -116,17 +189,7 @@ export function mergeFreshCaptures(
     if (Number.isNaN(captured)) continue;    // unparseable → cannot reason; leave it
 
     // Latest decision (accept or reject) we hold for this path, if any.
-    let decidedAtMs = -Infinity;
-    for (const rec of mine.accepted) {
-      if (rec.path !== path) continue;
-      const d = Date.parse(rec.decidedAt);
-      if (!Number.isNaN(d) && d > decidedAtMs) decidedAtMs = d;
-    }
-    const rejected = mine.rejected[path];
-    if (rejected) {
-      const d = Date.parse(rejected.decidedAt);
-      if (!Number.isNaN(d) && d > decidedAtMs) decidedAtMs = d;
-    }
+    const decidedAtMs = latestDecisionMs(mine, path);
 
     // Merge unless a decision STRICTLY newer than this capture supersedes it.
     // On an exact tie (captured === decidedAt) we keep: a genuinely-decided
@@ -136,7 +199,34 @@ export function mergeFreshCaptures(
     // it would be data loss.
     if (captured >= decidedAtMs) mine.files[path] = entry;
   }
+
+  // Drop any pending entry the other window has since decided: a decision record
+  // strictly newer than our capture supersedes it (symmetric to the add rule
+  // above, which keeps the capture on a tie). Prevents a file appearing in both
+  // Pending and the accepted/rejected log after a concurrent decision.
+  for (const [path, entry] of Object.entries(mine.files)) {
+    const captured = entry.capturedAt ? Date.parse(entry.capturedAt) : NaN;
+    if (Number.isNaN(captured)) continue; // no capture time → can't compare; leave it
+    if (latestDecisionMs(mine, path) > captured) delete mine.files[path];
+  }
   return mine;
+}
+
+// The most-recent decision (accept or reject) timestamp we hold for a path, in ms,
+// or -Infinity when there is none.
+function latestDecisionMs(session: Session, path: string): number {
+  let ms = -Infinity;
+  for (const rec of session.accepted) {
+    if (rec.path !== path) continue;
+    const d = Date.parse(rec.decidedAt);
+    if (!Number.isNaN(d) && d > ms) ms = d;
+  }
+  const rejected = session.rejected[path];
+  if (rejected) {
+    const d = Date.parse(rejected.decidedAt);
+    if (!Number.isNaN(d) && d > ms) ms = d;
+  }
+  return ms;
 }
 
 export function acceptEntry(session: Session, path: string, after: string | null, decidedAt: string): void {
@@ -153,6 +243,9 @@ export function acceptEntry(session: Session, path: string, after: string | null
   });
   capAcceptedLog(session); // bound the log; drops oldest if over the cap
   delete session.files[path];
+  // The latest decision for this path is now "accepted"; drop any prior reject so
+  // the file can't sit in both the Accepted log and the Rejected panel at once.
+  delete session.rejected[path];
 }
 
 export function rejectEntry(session: Session, path: string, after: string | null, decidedAt: string, reason?: string): void {

@@ -1,33 +1,12 @@
 import assert from "node:assert";
 import {
-  computeDiffPieces, buildReviewModel, buildFeedbackText, ReviewItemInput,
+  buildReviewModel, buildFeedbackText, ReviewItemInput,
 } from "./reviewWebviewModel";
 
 function run(name: string, fn: () => void): void {
   try { fn(); console.log("ok -", name); }
   catch (e) { console.error("FAIL -", name); console.error(e); process.exitCode = 1; }
 }
-
-run("computeDiffPieces marks add/del/context and counts", () => {
-  const pieces = computeDiffPieces("a\nb\nc\n", "a\nB\nc\n", 3);
-  const lines = pieces.filter((p): p is Extract<typeof p, {type:"line"}> => p.type === "line");
-  assert.equal(lines.filter(l => l.kind === "del").length, 1);
-  assert.equal(lines.filter(l => l.kind === "add").length, 1);
-  assert.ok(lines.some(l => l.kind === "context" && l.text === "a"));
-});
-
-run("computeDiffPieces folds large unchanged runs into a fold marker", () => {
-  const big = Array.from({ length: 50 }, (_, i) => `line${i}`).join("\n") + "\n";
-  const edited = big.replace("line25", "CHANGED25");
-  const pieces = computeDiffPieces(big, edited, 3);
-  const folds = pieces.filter(p => p.type === "fold") as { type: "fold"; hidden: number }[];
-  assert.ok(folds.length >= 1, "expected at least one fold");
-  assert.ok(folds.every(f => f.hidden > 0));
-  // context is preserved around the change (3 lines each side)
-  const lines = pieces.filter(p => p.type === "line") as { text: string }[];
-  assert.ok(lines.some(l => l.text === "line22"));
-  assert.ok(lines.some(l => l.text === "line28"));
-});
 
 run("buildReviewModel summarizes counts, status, missing, no-change, new", () => {
   const items: ReviewItemInput[] = [

@@ -2,7 +2,7 @@ import * as assert from "assert";
 import {
   hasRealChange, shouldPruneNoOp, acceptEntry, rejectEntry, migrateSession,
   makeRecordId, Session, FileEntry, mergeFreshCaptures,
-  MAX_ACCEPTED_RECORDS, capAcceptedLog,
+  MAX_ACCEPTED_RECORDS, capAcceptedLog, capAcceptedBytes,
 } from "./reviewModel";
 
 function base(): Session {
@@ -235,7 +235,7 @@ console.log("ok - makeRecordId");
   {
     const mine = sess({});
     const disk = sess({ "/n": pend("N", iso(T)) }); // baseline==disk no-op still on disk
-    mergeFreshCaptures(mine, disk, new Map([["/n", iso(T)]]));
+    mergeFreshCaptures(mine, disk, { prunedFiles: new Map([["/n", iso(T)]]) });
     assert.equal(mine.files["/n"], undefined, "just-pruned no-op not resurrected by merge");
   }
   // …but a genuinely fresh RE-capture to a just-pruned path (newer capturedAt)
@@ -244,10 +244,103 @@ console.log("ok - makeRecordId");
   {
     const mine = sess({});
     const disk = sess({ "/n": pend("N2", iso(T + 100)) }); // hook re-captured after prune
-    mergeFreshCaptures(mine, disk, new Map([["/n", iso(T)]]));
+    mergeFreshCaptures(mine, disk, { prunedFiles: new Map([["/n", iso(T)]]) });
     assert.ok(mine.files["/n"], "fresh re-capture (newer capturedAt) still merged despite prune");
   }
   console.log("ok - mergeFreshCaptures (dual-writer reconcile)");
+
+  // DATA-LOSS (nested-worktree clobber): two extension windows own the same
+  // session file (the attached-worktree manager + the worktree's own window).
+  // A decision persisted by the other window lives only on disk when we persist;
+  // the merge MUST union accepted[]/rejected{} from disk or we overwrite (lose) it.
+  {
+    // disk holds an accept record we don't have in memory → union it in
+    const mine = sess({}, [{ id: "d::/mine", path: "/mine", before: "A", after: "B", decidedAt: iso(T) }]);
+    const disk = sess({}, [{ id: "d::/other", path: "/other", before: "C", after: "D", decidedAt: iso(T + 100) }]);
+    mergeFreshCaptures(mine, disk);
+    const ids = mine.accepted.map(r => r.id).sort();
+    assert.deepEqual(ids, ["d::/mine", "d::/other"], "other window's accept record unioned, not clobbered");
+  }
+  {
+    // same accept id present on both sides → not duplicated
+    const rec = { id: "d::/f", path: "/f", before: "A", after: "B", decidedAt: iso(T) };
+    const mine = sess({}, [{ ...rec }]);
+    const disk = sess({}, [{ ...rec }]);
+    mergeFreshCaptures(mine, disk);
+    assert.equal(mine.accepted.length, 1, "identical accept record not duplicated on union");
+  }
+  {
+    // disk holds a NEWER reject for a path than mine → disk's wins (latest-per-path)
+    const mine = sess({});
+    mine.rejected["/r"] = { id: "old::/r", path: "/r", before: "R", after: "R1", decidedAt: iso(T) };
+    const disk = sess({});
+    disk.rejected["/r"] = { id: "new::/r", path: "/r", before: "R", after: "R2", decidedAt: iso(T + 100) };
+    mergeFreshCaptures(mine, disk);
+    assert.equal(mine.rejected["/r"].after, "R2", "newer reject from other window wins");
+  }
+  {
+    // disk holds a reject for a path mine never rejected → unioned in
+    const mine = sess({});
+    const disk = sess({});
+    disk.rejected["/r"] = { id: "d::/r", path: "/r", before: "R", after: "R2", decidedAt: iso(T) };
+    mergeFreshCaptures(mine, disk);
+    assert.ok(mine.rejected["/r"], "other window's reject record unioned in");
+  }
+  {
+    // the other window ACCEPTED a file we still show as pending → the newer
+    // decision from disk must drop it from our files{} (no double display)
+    const mine = sess({ "/f": pend("A", iso(T)) });
+    const disk = sess({}, [{ id: "d::/f", path: "/f", before: "A", after: "B", decidedAt: iso(T + 100) }]);
+    mergeFreshCaptures(mine, disk);
+    assert.equal(mine.files["/f"], undefined, "file decided in the other window drops from our pending");
+    assert.equal(mine.accepted.length, 1, "and its accept record is adopted");
+  }
+  console.log("ok - mergeFreshCaptures unions accepted[]/rejected{} (worktree clobber)");
+
+  // RESURRECTION guard: a decision the caller deliberately removed THIS cycle
+  // (clear/revert/reapply) is still on the disk copy persist re-reads. The union
+  // must not resurrect it, or clears never stick and persist can loop.
+  {
+    // clearAccepted: mine emptied it, disk still has the record → stays gone
+    const mine = sess({});
+    const disk = sess({}, [{ id: "d::/a", path: "/a", before: "A", after: "B", decidedAt: iso(T) }]);
+    mergeFreshCaptures(mine, disk, { droppedAcceptedIds: new Set(["d::/a"]) });
+    assert.equal(mine.accepted.length, 0, "just-cleared accept not resurrected");
+  }
+  {
+    // …but a DIFFERENT accept the other window added (not in the dropped set)
+    // must still survive the clear.
+    const mine = sess({});
+    const disk = sess({}, [
+      { id: "d::/a", path: "/a", before: "A", after: "B", decidedAt: iso(T) },      // we cleared this
+      { id: "d::/b", path: "/b", before: "C", after: "D", decidedAt: iso(T + 100) },// other window added
+    ]);
+    mergeFreshCaptures(mine, disk, { droppedAcceptedIds: new Set(["d::/a"]) });
+    assert.deepEqual(mine.accepted.map(r => r.id), ["d::/b"], "concurrent accept survives our clear");
+  }
+  {
+    // clearRejected / reapply: mine dropped the path, disk still has it → stays gone
+    const mine = sess({});
+    const disk = sess({});
+    disk.rejected["/r"] = { id: "d::/r", path: "/r", before: "R", after: "R2", decidedAt: iso(T) };
+    mergeFreshCaptures(mine, disk, { droppedRejectedPaths: new Set(["/r"]) });
+    assert.equal(mine.rejected["/r"], undefined, "just-cleared reject not resurrected");
+  }
+  console.log("ok - mergeFreshCaptures does not resurrect just-removed decisions");
+
+  // I3: accepting a file that was previously rejected clears the stale reject
+  // record, so it can't linger in both the Accepted log and the Rejected panel.
+  {
+    const s = base();
+    s.files["/f"] = { originalContent: "A", reviewStatus: "pending" };
+    rejectEntry(s, "/f", "X", iso(T));
+    assert.ok(s.rejected["/f"], "rejected first");
+    s.files["/f"] = { originalContent: "A", reviewStatus: "pending" }; // re-edited → pending again
+    acceptEntry(s, "/f", "B", iso(T + 100));
+    assert.equal(s.rejected["/f"], undefined, "accept clears the prior reject record");
+    assert.equal(s.accepted.length, 1, "accept still logged");
+  }
+  console.log("ok - acceptEntry clears a prior reject for the same path (I3)");
 }
 
 // migrateSession.changed — a well-formed current-model session must report
@@ -325,6 +418,33 @@ console.log("ok - makeRecordId");
   rejectEntry(session, "/w/b.ts", "new", "2026-07-10T00:00:00.000Z");
   assert.equal(session.rejected["/w/b.ts"].reason, undefined);
   console.log("ok - rejectEntry omits reason when none is given");
+}
+
+// capAcceptedBytes: bound the accepted log by SIZE (not just count). A handful of
+// large-file accepts can blow past the file-size warning long before the 500-record
+// count cap, so we drop oldest records until the log fits the byte budget.
+{
+  const s = base();
+  const big = "x".repeat(10_000);
+  for (let i = 0; i < 20; i++) {
+    s.accepted.push({ id: `${i}`, path: `/f${i}`, before: null, after: big, decidedAt: `t${i}` });
+  }
+  const before = s.accepted.length;
+  const dropped = capAcceptedBytes(s, 50_000); // ~5 records worth
+  assert.ok(dropped > 0, "over-budget log is trimmed");
+  assert.ok(s.accepted.length < before, "records dropped");
+  assert.equal(s.accepted[s.accepted.length - 1].id, "19", "newest record kept");
+  assert.equal(s.accepted[0].id, String(before - s.accepted.length), "dropped from the OLDEST end");
+  assert.ok(Buffer.byteLength(JSON.stringify(s.accepted)) <= 50_000, "result fits the byte budget");
+  console.log("ok - capAcceptedBytes trims oldest-first to a byte budget");
+}
+{
+  // under budget → no change
+  const s = base();
+  s.accepted.push({ id: "1", path: "/f", before: null, after: "small", decidedAt: "t" });
+  assert.equal(capAcceptedBytes(s, 1_000_000), 0, "under budget → nothing dropped");
+  assert.equal(s.accepted.length, 1);
+  console.log("ok - capAcceptedBytes is a no-op under budget");
 }
 
 console.log("done");

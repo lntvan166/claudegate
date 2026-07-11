@@ -17,36 +17,74 @@ type HookSyncAction = "none" | "installed" | "updated";
  * Idempotency is load-bearing: Claude Code snapshots hook config at session
  * start and treats any later change to settings.json as untrusted, silently
  * disabling those hooks until the session restarts. So we must NOT rewrite the
- * file when the claudegate entry is already present and byte-identical —
- * doing so kills capture for every already-running session at once.
- * See docs/2026-07-06-hook-not-firing-in-running-session-bug.md.
+ * file for a cosmetic (formatting-only) difference when the claudegate entry is
+ * already correct — doing so kills capture for every already-running session at
+ * once. `changed` therefore reflects a SEMANTIC change (entry added or repaired),
+ * never a reformat. See docs/2026-07-06-hook-not-firing-in-running-session-bug.md.
+ *
+ * Data safety: a non-empty file that does not parse as a JSON object is NOT
+ * reset to `{}` (that silently destroyed the user's whole Claude config —
+ * model, permissions, other hooks, MCP servers). Instead `parseError` is set
+ * and `content` echoes the original bytes so the caller refuses to write.
  */
 export function computeSettingsPatch(
   raw: string,
   hookCommand: string
-): { content: string; changed: boolean } {
-  let settings: Record<string, unknown> = {};
-  try {
-    settings = raw ? JSON.parse(raw) : {};
-  } catch {
-    // File absent or malformed — start fresh
-    settings = {};
+): { content: string; changed: boolean; parseError?: boolean } {
+  const trimmed = raw.trim();
+  let settings: Record<string, unknown>;
+  if (!trimmed) {
+    settings = {}; // absent/empty file → fresh install (not corruption)
+  } else {
+    try {
+      const parsed = JSON.parse(raw);
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        return { content: raw, changed: false, parseError: true }; // not an object → refuse
+      }
+      settings = parsed as Record<string, unknown>;
+    } catch {
+      return { content: raw, changed: false, parseError: true }; // malformed → refuse (never wipe)
+    }
   }
 
   if (!settings.hooks) settings.hooks = {};
   const hooks = settings.hooks as Record<string, unknown[]>;
   if (!hooks.PreToolUse) hooks.PreToolUse = [];
+  const preToolUse = hooks.PreToolUse as Array<{ matcher?: string; hooks?: Array<{ type?: string; command?: unknown }> }>;
 
-  const alreadyInstalled = JSON.stringify(hooks.PreToolUse).includes("claudegate");
-  if (!alreadyInstalled) {
-    hooks.PreToolUse.push({
+  // "Ours" = any PreToolUse entry that references a claudegate wrapper path.
+  const isOurs = (h: unknown) => JSON.stringify(h).includes("claudegate");
+  const ours = preToolUse.filter(isOurs);
+  const correct = ours.some(
+    (h) => Array.isArray(h.hooks) && h.hooks.some((x) => x.command === hookCommand)
+  );
+
+  let changed = false;
+  if (correct) {
+    // Already registered with the exact command → no semantic change. Return the
+    // reformatted content but leave `changed` false so the caller preserves the
+    // on-disk bytes (and hook trust for running sessions).
+  } else if (ours.length > 0) {
+    // Stale claudegate registration (e.g. an old/wrong wrapper path after the
+    // home dir moved, or a .sh/.bat mismatch) → repair in place to the correct
+    // command rather than leaving capture silently broken.
+    for (const h of ours) {
+      if (!Array.isArray(h.hooks)) continue;
+      for (const x of h.hooks) {
+        if (typeof x.command === "string" && x.command.includes("claudegate")) x.command = hookCommand;
+      }
+    }
+    changed = true;
+  } else {
+    preToolUse.push({
       matcher: "^(Write|Edit|MultiEdit)$",
       hooks: [{ type: "command", command: hookCommand }],
     });
+    changed = true;
   }
 
   const content = JSON.stringify(settings, null, 2);
-  return { content, changed: content !== raw };
+  return { content, changed };
 }
 
 /**
@@ -293,9 +331,14 @@ export class HookInstaller {
   }
 
   // Registers the hook in ~/.claude/settings.json. Returns true only when the
-  // file was actually written — a no-op (entry already present, byte-identical)
-  // returns false so callers can avoid the misleading "restart your sessions"
-  // notice and, crucially, so running Claude Code sessions keep their hook trust.
+  // file was actually written — a no-op (entry already correct) returns false so
+  // callers avoid the misleading "restart your sessions" notice and, crucially,
+  // so running Claude Code sessions keep their hook trust.
+  //
+  // Data safety: this file holds the user's entire Claude Code config. If it does
+  // not parse we REFUSE to write (never clobber it), and before our first write
+  // we back it up and write atomically (temp + rename) so an interrupted write
+  // can't truncate it.
   private patchClaudeSettings(): boolean {
     const claudeDir = path.dirname(this.claudeSettingsPath);
     fs.mkdirSync(claudeDir, { recursive: true });
@@ -307,14 +350,45 @@ export class HookInstaller {
       raw = "";
     }
 
-    const { content, changed } = computeSettingsPatch(raw, this.hookWrapperDest);
+    const { content, changed, parseError } = computeSettingsPatch(raw, this.hookWrapperDest);
+    if (parseError) {
+      this.log.appendLine(
+        `[ERROR] ${this.claudeSettingsPath} is not valid JSON; refusing to overwrite it (your config is untouched).`
+      );
+      vscode.window.showErrorMessage(
+        "Claude Gate: your ~/.claude/settings.json is not valid JSON, so the hook was NOT installed — " +
+        "your configuration was left untouched. Fix the JSON, then run Setup Hook again."
+      );
+      return false;
+    }
     if (!changed) return false;
 
-    fs.writeFileSync(this.claudeSettingsPath, content, "utf-8");
+    // Back up the existing config before our first modification.
+    if (raw.trim()) {
+      try {
+        fs.copyFileSync(this.claudeSettingsPath, `${this.claudeSettingsPath}.claudegate.bak`);
+      } catch (err) {
+        this.log.appendLine(`[WARN] could not back up settings.json: ${(err as Error).message}`);
+      }
+    }
+    this.writeFileAtomic(this.claudeSettingsPath, content);
     // Record our own write so the trust-invalidation watcher doesn't flag it
     // (setup() shows its own restart notice when it actually writes).
     this.lastKnownSettingsRaw = content;
     return true;
+  }
+
+  // Write via a temp file + rename so an interrupted write can't leave a
+  // truncated/corrupt settings.json.
+  private writeFileAtomic(filePath: string, content: string): void {
+    const tmp = `${filePath}.${crypto.randomBytes(6).toString("hex")}.tmp`;
+    try {
+      fs.writeFileSync(tmp, content, "utf-8");
+      fs.renameSync(tmp, filePath);
+    } catch (err) {
+      try { fs.unlinkSync(tmp); } catch { /* ignore cleanup error */ }
+      throw err;
+    }
   }
 
   private readSettingsRaw(): string {

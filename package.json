@@ -2,7 +2,7 @@
   "name": "claudegate",
   "displayName": "Claude Gate",
   "description": "Review Claude Code's file changes in a native diff panel — accept or reject each edit. The PreToolUse hook captures all Claude Code edits (terminal CLI and in-editor extension); the filesystem watcher is an optional fallback for non-Claude agents and is off by default.",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "publisher": "lntvan166",
   "icon": "media/icon.png",
   "engines": {
@@ -72,7 +72,13 @@
     "viewsWelcome": [
       {
         "view": "claudegate.pendingPanel",
-        "contents": "No changes captured yet.\n\nFor Claude Code, make sure the hook is set up.\n[Setup Hook](command:claudegate.setupHook)\n\nUsing a non-Claude agent (Cursor Composer, Codex), or still nothing showing?\n[Enable file watcher](command:claudegate.enableFileWatcher)"
+        "contents": "✓ All caught up — no pending changes to review.\n\nClaude's next edit will appear here automatically.",
+        "when": "claudegate.acceptedCount > 0 || claudegate.rejectedCount > 0"
+      },
+      {
+        "view": "claudegate.pendingPanel",
+        "contents": "No changes captured yet.\n\nFor Claude Code, make sure the hook is set up.\n[Setup Hook](command:claudegate.setupHook)\n\nUsing a non-Claude agent (Cursor Composer, Codex), or still nothing showing?\n[Enable file watcher](command:claudegate.enableFileWatcher)",
+        "when": "!(claudegate.acceptedCount > 0 || claudegate.rejectedCount > 0)"
       }
     ],
     "commands": [
@@ -230,11 +236,6 @@
       {
         "command": "claudegate.reviewAllPending",
         "title": "Claude Gate: Review All Pending",
-        "icon": "$(diff-multiple)"
-      },
-      {
-        "command": "claudegate.reviewChanges",
-        "title": "Claude Gate: Review Changes",
         "icon": "$(diff-multiple)"
       },
       {
@@ -497,15 +498,6 @@
     "configuration": {
       "title": "Claude Gate",
       "properties": {
-        "claudegate.review.diffMode": {
-          "type": "string",
-          "enum": [
-            "split",
-            "unified"
-          ],
-          "default": "split",
-          "markdownDescription": "Diff layout in the **Review Changes** panel: `split` (side-by-side, original ↔ current) or `unified` (single column, GitHub-style). The panel's toggle updates this."
-        },
         "claudegate.fileWatcher.enabled": {
           "type": "boolean",
           "default": false,

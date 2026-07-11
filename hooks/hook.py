@@ -248,4 +248,14 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # Fail open, always. The hook runs synchronously before every Claude
+    # Write/Edit/MultiEdit; an uncaught exception here would print a traceback to
+    # the user on every edit (and a non-zero exit could block the write). Any
+    # unexpected error — an unwritable ~/.claudegate, a full disk, a malformed
+    # workspace-roots.json that parses but isn't a list — must degrade to "no
+    # capture", never to a broken editing experience. SystemExit (our own
+    # sys.exit(0) paths) is not an Exception, so it propagates untouched.
+    try:
+        main()
+    except Exception:
+        sys.exit(0)

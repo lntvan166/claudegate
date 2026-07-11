@@ -195,6 +195,8 @@ vsce login <publisher-id>      # requires Azure DevOps PAT with Marketplace → 
 vsce publish                   # publishes the current package.json version
 ```
 
+The release also publishes to **Open VSX** (`ovsx publish`) so Cursor/VSCodium/Windsurf auto-update. The Open VSX token is stored as the **`OVSX_PAT`** environment variable (set in `~/.zshrc`); `ovsx` reads it automatically, so no need to pass `-p`. Never commit the token value — only reference the `OVSX_PAT` name.
+
 The `.vscodeignore` file controls what gets packaged. vsce reads `.vscodeignore` (not `.vsixignore`). Keep dev-only directories (`.superpowers/`, `docs/`, `.claude/`, `.qodo/`) listed there.
 
 ---

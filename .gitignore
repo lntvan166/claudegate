@@ -1,6 +1,7 @@
 out/
 node_modules/
 *.vsix
+.vscode/
 .vscode-test/
 .superpowers/
 .qodo

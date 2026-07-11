@@ -237,6 +237,17 @@ class HookBaselineTest(unittest.TestCase):
         self.run_hook()  # check=True → also asserts a 0 exit (didn't error/block)
         self.assertIn(self.file, self.read_session()["files"], "captured despite held lock")
 
+    def test_fail_open_on_malformed_workspace_roots(self):
+        # workspace-roots.json is valid JSON but not a list (e.g. a bare number).
+        # Iterating it raises TypeError outside the load guard; the top-level
+        # fail-open must swallow it and exit 0 rather than crashing with a
+        # traceback on the user's edit. check=True asserts the clean 0 exit.
+        with open(os.path.join(self.claudegate, "workspace-roots.json"), "w") as f:
+            f.write("123")
+        with open(self.file, "w") as f:
+            f.write("v0")
+        self.run_hook()  # must not raise CalledProcessError
+
     def test_steals_stale_lock(self):
         # A lock left by a crashed writer (old mtime) is stolen, and released.
         lock_path = self.session_file + ".lock"

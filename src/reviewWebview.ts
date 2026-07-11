@@ -111,7 +111,13 @@ export class ReviewWebviewPanel {
   }
 
   private readOrNull(fp: string): string | null {
-    try { return fs.readFileSync(fp, "utf-8"); } catch { return null; }
+    // Strict UTF-8 decode (see SessionManager.readFileOrNull): a binary file
+    // must render as "no text to show", never as U+FFFD mojibake in the diff.
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(fs.readFileSync(fp));
+    } catch {
+      return null;
+    }
   }
 
   private render(): void {
@@ -119,7 +125,6 @@ export class ReviewWebviewPanel {
     this.panel.webview.postMessage({
       type: "render",
       model: buildReviewModel(items),
-      diffMode: vscode.workspace.getConfiguration("claudegate").get<string>("review.diffMode", "split"),
       feedbackText: buildFeedbackText(items),
     });
   }
@@ -146,11 +151,6 @@ export class ReviewWebviewPanel {
         if (answer === "Revert All") for (const mgr of this.allManagers()) mgr.rejectAll();
         break;
       }
-      case "setDiffMode":
-        if (m.mode === "split" || m.mode === "unified")
-          await vscode.workspace.getConfiguration("claudegate").update("review.diffMode", m.mode,
-            (vscode.workspace.workspaceFolders?.length ?? 0) > 0 ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global);
-        break;
       case "copyFeedback": {
         await vscode.env.clipboard.writeText(buildFeedbackText(this.items()));
         vscode.window.showInformationMessage("Claude Gate: review feedback copied to clipboard.");
@@ -158,7 +158,16 @@ export class ReviewWebviewPanel {
       }
       case "openNative": {
         const target = m.path ? this.relToAbs.get(m.path) : undefined;
-        if (target) await vscode.commands.executeCommand("claudegate.openDiff", target);
+        if (!target) break;
+        const s = this.managerFor(target).getSession();
+        if (s?.files[target]) {
+          // Pending → the original-vs-current diff.
+          await vscode.commands.executeCommand("claudegate.openDiff", target);
+        } else {
+          // Decided → the frozen before→after of its latest record.
+          const rec = s?.rejected[target] ?? [...(s?.accepted ?? [])].reverse().find((r) => r.path === target);
+          if (rec) await vscode.commands.executeCommand("claudegate.openReviewRecord", rec.id);
+        }
         break;
       }
     }

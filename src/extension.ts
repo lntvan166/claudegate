@@ -14,12 +14,11 @@ import {
 import { WorktreeSessionRegistry } from "./worktreeSessionRegistry";
 import { HookInstaller } from "./hookInstaller";
 import { SettingsTreeProvider, SettingsItem } from "./settingsPanel";
-import { ClaudeGateContentProvider, SCHEME, openReviewRecord } from "./diffProvider";
-import { ReviewWebviewPanel } from "./reviewWebview";
+import { ClaudeGateContentProvider, SCHEME, openReviewRecord, originalUri } from "./diffProvider";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
 import { DocumentTracker } from "./documentTracker";
 import { persistWorkspaceRoots } from "./workspaceRoots";
-import { isInWorkspace, isExcluded, setExcludeMatcher, setProtectedMatcher } from "./workspaceScope";
+import { isInWorkspace, isExcluded, isProtected, setExcludeMatcher, setProtectedMatcher } from "./workspaceScope";
 import { ExcludeMatcher, DEFAULT_EXCLUDES } from "./excludeMatcher";
 
 
@@ -52,6 +51,13 @@ async function promptRevertReason(basename: string): Promise<{ ok: boolean; reas
   });
   if (input === undefined) return { ok: false };          // Esc / dismissed → cancel
   return { ok: true, reason: input.trim() || undefined }; // submitted (empty allowed) → revert
+}
+
+// Modal confirmation for a bulk action that clears history or rewrites many files
+// on disk. Returns true only if the user picked the confirming action.
+async function confirmBulk(message: string, action: string): Promise<boolean> {
+  const answer = await vscode.window.showWarningMessage(message, { modal: true }, action);
+  return answer === action;
 }
 
 function refreshActiveFilePendingContext(managerFor: (p?: string) => SessionManager): void {
@@ -129,6 +135,49 @@ export function activate(context: vscode.ExtensionContext): void {
     // else the primary window session.
     const managerFor = (p?: string): SessionManager =>
       (p ? worktreeRegistry.managerFor(p) : null) ?? sessionManager;
+
+    // ── "Review All Pending" — native multi-file diff editor ────────────────
+    // Opens every pending change in VS Code's built-in multi-diff editor for a
+    // one-pass review. Worktree-aware: aggregates pending files across the
+    // primary session AND every attached nested worktree. Each resource is the
+    // triple [file, original(read-only claudegate: doc), file] — the left side
+    // resolves through managerFor(), so a worktree file shows ITS own baseline.
+    const allManagers = (): SessionManager[] =>
+      [sessionManager, ...worktreeRegistry.getManagers().values()];
+    const pendingReviewPaths = (): string[] => {
+      const paths: string[] = [];
+      for (const mgr of allManagers()) {
+        const s = mgr.getSession();
+        if (!s) continue;
+        for (const [fp, e] of Object.entries(s.files)) {
+          if (e.reviewStatus === "pending" && isInWorkspace(fp) && !isExcluded(fp) && mgr.hasRealPendingChange(fp)) {
+            paths.push(fp);
+          }
+        }
+      }
+      // Protected files first, then alphabetical — a stable, predictable order.
+      return paths.sort((a, b) => (Number(isProtected(b)) - Number(isProtected(a))) || a.localeCompare(b));
+    };
+    const isPendingMultiDiffOpen = (): boolean =>
+      vscode.window.tabGroups.all.some((g) => g.tabs.some((t) => t.label.startsWith("Claude Gate: Pending")));
+    const closePendingMultiDiff = async (): Promise<void> => {
+      const stale = vscode.window.tabGroups.all
+        .flatMap((group) => group.tabs)
+        .filter((tab) => tab.label.startsWith("Claude Gate: Pending"));
+      if (stale.length > 0) await vscode.window.tabGroups.close(stale);
+    };
+    const openPendingMultiDiff = async (paths: string[]): Promise<void> => {
+      const resourceList = paths.map((fp) => [vscode.Uri.file(fp), originalUri(fp), vscode.Uri.file(fp)]);
+      try {
+        await vscode.commands.executeCommand("vscode.changes", `Claude Gate: Pending (${paths.length})`, resourceList);
+      } catch (err) {
+        log.appendLine(`[WARN] reviewAllPending: vscode.changes failed: ${(err as Error).message}`);
+        vscode.window.showWarningMessage(
+          "Claude Gate: the multi-file diff view isn't available in this VS Code version."
+        );
+      }
+    };
+
     const hookInstaller  = new HookInstaller(context, log);
     void hookInstaller.syncHookIfNeeded().then(() => {
       hookInstaller.warnIfHookNotRegisteredInSettings();
@@ -211,9 +260,18 @@ export function activate(context: vscode.ExtensionContext): void {
         settingsProvider.refresh();
       }),
 
-      vscode.commands.registerCommand("claudegate.clearSession", () =>
-        sessionManager.clearSession()
-      ),
+      vscode.commands.registerCommand("claudegate.clearSession", async () => {
+        const s = sessionManager.getSession();
+        if (!s) return;
+        const pending = Object.keys(s.files).length;
+        if (!(await confirmBulk(
+          pending > 0
+            ? `Clear this review session? ${pending} pending change(s) will stop being tracked (files on disk are left as-is).`
+            : "Clear this review session, including its accepted/rejected history?",
+          "Clear Session"
+        ))) return;
+        sessionManager.clearSession();
+      }),
 
       // ── Pending file actions ──
       vscode.commands.registerCommand(
@@ -302,13 +360,24 @@ export function activate(context: vscode.ExtensionContext): void {
         (item: FolderItem) => sessionManager.revertAcceptedFolder(item.folderPath)
       ),
 
-      vscode.commands.registerCommand("claudegate.revertAcceptedAll", () =>
-        sessionManager.revertAcceptedAll()
-      ),
+      vscode.commands.registerCommand("claudegate.revertAcceptedAll", async () => {
+        const count = sessionManager.getSession()?.accepted.length ?? 0;
+        if (count === 0) return;
+        if (!(await confirmBulk(`Revert all ${count} accepted file(s) back to pending review?`, "Revert All"))) return;
+        sessionManager.revertAcceptedAll();
+        vscode.window.showInformationMessage(`Claude Gate: reverted ${count} file(s) to pending.`);
+      }),
 
-      vscode.commands.registerCommand("claudegate.clearAccepted", () =>
-        sessionManager.clearAccepted()
-      ),
+      vscode.commands.registerCommand("claudegate.clearAccepted", async () => {
+        const count = sessionManager.getSession()?.accepted.length ?? 0;
+        if (count === 0) return;
+        if (!(await confirmBulk(
+          `Permanently clear ${count} record(s) from the Accepted history? This cannot be undone.`,
+          "Clear History"
+        ))) return;
+        sessionManager.clearAccepted();
+        vscode.window.showInformationMessage(`Claude Gate: cleared ${count} accepted record(s).`);
+      }),
 
       // ── Rejected file/folder actions ──
       vscode.commands.registerCommand("claudegate.reapplyFile", (item: any) => {
@@ -321,9 +390,15 @@ export function activate(context: vscode.ExtensionContext): void {
         (item: FolderItem) => sessionManager.reapplyFolder(item.folderPath)
       ),
 
-      vscode.commands.registerCommand("claudegate.reapplyAll", () =>
-        sessionManager.reapplyAll()
-      ),
+      vscode.commands.registerCommand("claudegate.reapplyAll", async () => {
+        const count = Object.keys(sessionManager.getSession()?.rejected ?? {}).length;
+        if (count === 0) return;
+        if (!(await confirmBulk(
+          `Re-apply Claude's version to all ${count} rejected file(s) on disk?`,
+          "Re-apply All"
+        ))) return;
+        sessionManager.reapplyAll();
+      }),
 
       // ── Bulk pending actions ──
       vscode.commands.registerCommand("claudegate.acceptAll", async () => {
@@ -333,8 +408,12 @@ export function activate(context: vscode.ExtensionContext): void {
               ([fp, e]) => e.reviewStatus === "pending" && isInWorkspace(fp) && !isExcluded(fp)
             )
           : [];
+        if (pending.length === 0) return;
         sessionManager.acceptAll();
         await Promise.all(pending.map(([fp]) => closeDiffEditor(fp)));
+        // Accept keeps files as-is (non-destructive), so no modal — just confirm
+        // what happened, mirroring the feedback Reject All already gives.
+        vscode.window.showInformationMessage(`Claude Gate: accepted ${pending.length} file(s).`);
       }),
 
       vscode.commands.registerCommand("claudegate.rejectAll", async () => {
@@ -357,9 +436,16 @@ export function activate(context: vscode.ExtensionContext): void {
         }
       }),
 
-      vscode.commands.registerCommand("claudegate.clearRejected", () =>
-        sessionManager.clearRejected()
-      ),
+      vscode.commands.registerCommand("claudegate.clearRejected", async () => {
+        const count = Object.keys(sessionManager.getSession()?.rejected ?? {}).length;
+        if (count === 0) return;
+        if (!(await confirmBulk(
+          `Permanently clear ${count} record(s) from the Rejected history? This cannot be undone.`,
+          "Clear History"
+        ))) return;
+        sessionManager.clearRejected();
+        vscode.window.showInformationMessage(`Claude Gate: cleared ${count} rejected record(s).`);
+      }),
 
       // ── View mode toggle (all panels) ──
       vscode.commands.registerCommand("claudegate.viewAsTree", () => {
@@ -457,12 +543,17 @@ export function activate(context: vscode.ExtensionContext): void {
         }
       }),
 
-      vscode.commands.registerCommand("claudegate.reviewAllPending", () =>
-        ReviewWebviewPanel.showOrReveal(context, sessionManager, worktreeRegistry)
-      ),
-      vscode.commands.registerCommand("claudegate.reviewChanges", () =>
-        ReviewWebviewPanel.showOrReveal(context, sessionManager, worktreeRegistry)
-      ),
+      vscode.commands.registerCommand("claudegate.reviewAllPending", async () => {
+        const paths = pendingReviewPaths();
+        // Reuse the existing multi-diff tab instead of stacking a new one.
+        await closePendingMultiDiff();
+        if (paths.length === 0) {
+          vscode.window.showInformationMessage("Claude Gate: no pending changes to review.");
+          return;
+        }
+        await openPendingMultiDiff(paths);
+      }),
+
       vscode.commands.registerCommand(
         "claudegate.openWorktreeWindow",
         (item: WorktreeGroupItem) => {
@@ -489,6 +580,24 @@ export function activate(context: vscode.ExtensionContext): void {
         refreshActiveFilePendingContext(managerFor)
       )
     );
+
+    // Keep an open "Review All Pending" multi-diff in sync: when the session
+    // changes (a file accepted/rejected — worktree changes fan in here via
+    // notifyChanged), rebuild it with the current pending set, or close it once
+    // everything is reviewed. The multi-diff's resource list is static, so it
+    // must be reopened to reflect changes.
+    let multiDiffRefreshing = false;
+    sessionManager.onSessionChange(async () => {
+      if (multiDiffRefreshing || !isPendingMultiDiffOpen()) return;
+      multiDiffRefreshing = true;
+      try {
+        const paths = pendingReviewPaths();
+        await closePendingMultiDiff();
+        if (paths.length > 0) await openPendingMultiDiff(paths);
+      } finally {
+        multiDiffRefreshing = false;
+      }
+    });
 
     sessionManager.onSessionChange((session) => {
       refreshActiveFilePendingContext(managerFor);

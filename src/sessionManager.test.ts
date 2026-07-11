@@ -369,9 +369,9 @@ function readSession(sp: string): any {
 // from the stale on-disk copy every cycle, so removed>0 fired persist forever
 // (≈ every RECONCILE_GRACE_MS) — the file was rewritten nonstop and the UI
 // reloaded without end. We assert the entry is gone and the file stops changing.
-// oversized-session guard: a bloated session file still loads (the user keeps
-// their pending changes) and a WARN is logged so the bloat is visible; the popup
-// path (showWarningMessage) must not throw during load.
+// oversized-session self-heal: a bloated session file still loads (the user keeps
+// their pending changes), a WARN is logged so the bloat is visible, and the
+// oldest accepted records are auto-trimmed to bound the file size.
 {
   const { ws, sp } = newEnv();
   const fp = path.join(ws, "big.ts");
@@ -381,7 +381,7 @@ function readSession(sp: string): any {
   fs.writeFileSync(sp, JSON.stringify({
     sessionId: "t", status: "active",
     files: { [fp]: { originalContent: "OLD", reviewStatus: "pending" } },
-    // three ~2 MB blobs → ~6 MB file, over SESSION_SIZE_WARN_BYTES, under the cap
+    // three ~2 MB blobs → ~6 MB file, over SESSION_SIZE_WARN_BYTES
     accepted: [0, 1, 2].map((i) => ({ id: "r" + i, path: fp, before: null, after: huge, decidedAt: "t" + i })),
     rejected: {},
   }));
@@ -392,8 +392,11 @@ function readSession(sp: string): any {
   assert.ok(sm.getSession(), "oversized session still loads");
   assert.ok(sm.getSession()!.files[fp], "pending entry preserved from a large session");
   assert.ok(lines.some((l) => l.includes("[WARN]") && l.includes("large")), "large-session WARN logged");
+  assert.ok(sm.getSession()!.accepted.length < 3, "oldest accepted records auto-trimmed");
+  assert.equal(sm.getSession()!.accepted[sm.getSession()!.accepted.length - 1].id, "r2", "newest kept");
+  assert.ok(fs.statSync(sp).size < 5_000_000, "self-heal rewrote the file under the warn threshold");
   sm.stopWatching();
-  console.log("ok - oversized session loads with a size warning");
+  console.log("ok - oversized session self-heals (trims oldest accepted)");
 }
 
 (async () => {
@@ -422,6 +425,42 @@ function readSession(sp: string): any {
   assert.equal(readSession(sp).files[noop], undefined, "prune stays applied (not resurrected)");
   sm.stopWatching();
   console.log("ok - settled no-op prune sticks; no nonstop-rewrite loop");
+
+  // C4: a file whose on-disk content is not valid UTF-8 (binary) must not be
+  // captured as a lossy mojibake string — reading it returns null (treated as
+  // unreadable), matching hook.py's strict-decode skip, so we never store or
+  // later write back U+FFFD-corrupted bytes.
+  {
+    const { ws, sp } = newEnv();
+    const fp = path.join(ws, "img.bin");
+    fs.writeFileSync(fp, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x00, 0xab])); // invalid UTF-8
+    const sm = new SessionManager(fakeLog, ws);
+    sm.startWatching();
+    sm.trackFileChange(fp, "TEXT-BASELINE");
+    sm.acceptFile(fp);
+    const s = readSession(sp);
+    assert.equal(s.accepted.length, 1, "accepted record written");
+    assert.equal(s.accepted[0].after, null, "binary 'after' stored as null, not corrupted mojibake");
+    sm.stopWatching();
+    console.log("ok - binary/non-UTF-8 content is not captured as mojibake");
+  }
+
+  // corruption: an unparseable session file must not crash the load, must be
+  // logged as corrupt (not silently swallowed), and — crucially — must be
+  // distinguished from a normal absent file (ENOENT), which is not an error.
+  {
+    const { ws, sp } = newEnv();
+    fs.mkdirSync(path.dirname(sp), { recursive: true });
+    fs.writeFileSync(sp, "{ this is not valid json");
+    const lines: string[] = [];
+    const capLog = { appendLine: (l: string) => lines.push(l) } as any;
+    const sm = new SessionManager(capLog, ws);
+    sm.startWatching(); // loadSession runs synchronously; must not throw
+    assert.equal(sm.getSession(), null, "corrupt first load → null (no prior good state to keep)");
+    assert.ok(lines.some((l) => l.includes("[ERROR]") && l.includes("corrupt")), "corruption surfaced in the log");
+    sm.stopWatching();
+    console.log("ok - corrupt session file is logged, not silently swallowed");
+  }
 
   console.log("done");
 })().catch((e) => { console.error(e); process.exit(1); });
