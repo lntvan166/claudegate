@@ -21,6 +21,7 @@ export function Toolbar(p: Props) {
         <i class="p" style={{ width: pct(p.counts.pending) }} />
       </div>
       <span class="cg-tally">{p.reviewedCount} of {p.totalCount} reviewed</span>
+      <span class="cg-kbd">j/k move · Enter open · a keep · x reject</span>
       <span class="cg-spacer" />
       <div class="cg-seg" role="group" aria-label="Diff layout">
         <button class={p.diffMode === "unified" ? "on" : ""} aria-pressed={p.diffMode === "unified"}

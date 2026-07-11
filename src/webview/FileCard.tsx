@@ -1,23 +1,29 @@
-import { useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { DiffView } from "./DiffView";
 import type { PayloadFile, DiffMode } from "./types";
 
 interface Props {
   file: PayloadFile;
   diffMode: DiffMode;
+  focused?: boolean;
   onKeep(path: string): void;
   onReject(path: string, reason?: string): void;
   onOpenNative(path: string): void;
 }
 
-export function FileCard({ file: f, diffMode, onKeep, onReject, onOpenNative }: Props) {
+export function FileCard({ file: f, diffMode, focused, onKeep, onReject, onOpenNative }: Props) {
   const [collapsed, setCollapsed] = useState(f.status !== "pending");
   const [noteOpen, setNoteOpen] = useState(false);
   const [note, setNote] = useState("");
+  const headRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (focused) headRef.current?.scrollIntoView({ block: "nearest" });
+  }, [focused]);
 
   return (
-    <div class="cg-file">
-      <div class="cg-fhead">
+    <div class={"cg-file" + (focused ? " focused" : "")}>
+      <div class="cg-fhead" ref={headRef} tabIndex={0}>
         <button class="cg-chev" aria-label={collapsed ? "Expand" : "Collapse"}
                 onClick={() => setCollapsed(c => !c)}>{collapsed ? "▸" : "▾"}</button>
         {f.isProtected && <span class="cg-warn" title="Protected file">⚠</span>}

@@ -1,5 +1,5 @@
 import { render } from "preact";
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { vscode } from "./vscodeApi";
 import { Toolbar } from "./Toolbar";
 import { FileCard } from "./FileCard";
@@ -16,6 +16,10 @@ function App() {
   const [diffMode, setDiffMode] = useState<DiffMode>(
     (vscode.getState<{ diffMode?: DiffMode }>()?.diffMode) ?? "split"
   );
+  const [focused, setFocused] = useState(0);
+  const focusedRef = useRef(0);
+
+  useEffect(() => { focusedRef.current = focused; }, [focused]);
 
   useEffect(() => {
     const onMsg = (e: MessageEvent) => {
@@ -24,9 +28,27 @@ function App() {
         setFiles(m.files); setReviewed(m.reviewedCount); setTotal(m.totalCount); setFeedbackText(m.feedbackText);
       }
     };
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement;
+      if (t && t.matches && t.matches("input, textarea")) return; // let inputs handle keys
+      setFiles((cur) => {
+        if (!cur.length) return cur;
+        const i = Math.min(Math.max(focusedRef.current, 0), cur.length - 1);
+        const f = cur[i];
+        switch (e.key) {
+          case "j": case "ArrowDown": setFocused(Math.min(i + 1, cur.length - 1)); e.preventDefault(); break;
+          case "k": case "ArrowUp": setFocused(Math.max(i - 1, 0)); e.preventDefault(); break;
+          case "a": if (f.status === "pending") vscode.postMessage({ type: "keep", path: f.relPath }); e.preventDefault(); break;
+          case "x": if (f.status === "pending") vscode.postMessage({ type: "undo", path: f.relPath }); e.preventDefault(); break;
+          case "Enter": vscode.postMessage({ type: "openNative", path: f.relPath }); e.preventDefault(); break;
+        }
+        return cur;
+      });
+    };
     window.addEventListener("message", onMsg);
+    window.addEventListener("keydown", onKey);
     vscode.postMessage({ type: "ready" });
-    return () => window.removeEventListener("message", onMsg);
+    return () => { window.removeEventListener("message", onMsg); window.removeEventListener("keydown", onKey); };
   }, []);
 
   const changeMode = (m: DiffMode) => { setDiffMode(m); vscode.setState({ diffMode: m }); };
@@ -49,8 +71,8 @@ function App() {
                onKeepAll={() => vscode.postMessage({ type: "keepAll" })}
                onRejectAll={() => vscode.postMessage({ type: "undoAll" })} />
       <div class="cg-files">
-        {files.map(f => (
-          <FileCard key={f.relPath} file={f} diffMode={diffMode}
+        {files.map((f, index) => (
+          <FileCard key={f.relPath} file={f} diffMode={diffMode} focused={focused === index}
                     onKeep={(p) => vscode.postMessage({ type: "keep", path: p })}
                     onReject={(p, reason) => vscode.postMessage({ type: "undo", path: p, reason })}
                     onOpenNative={(p) => vscode.postMessage({ type: "openNative", path: p })} />

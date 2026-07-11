@@ -14,6 +14,7 @@ body { margin: 0; color: var(--vscode-foreground); background: var(--vscode-edit
   padding: 8px 12px; background: var(--vscode-sideBar-background); border-bottom: 1px solid var(--vscode-panel-border); }
 .cg-title b { color: var(--cg-keep); }
 .cg-tally { color: var(--vscode-descriptionForeground); font-size: 11.5px; }
+.cg-kbd { color: var(--vscode-descriptionForeground); font-size: 11px; }
 .cg-spacer { flex: 1; }
 .cg-rail { display: flex; width: 160px; height: 7px; border-radius: 4px; overflow: hidden; background: var(--vscode-panel-border); }
 .cg-rail i { display: block; height: 100%; } .cg-rail .k { background: var(--cg-keep); } .cg-rail .r { background: var(--cg-undo); } .cg-rail .p { background: #6a6a6a; }
@@ -26,6 +27,7 @@ body { margin: 0; color: var(--vscode-foreground); background: var(--vscode-edit
 .cg-btn.undo { color: var(--cg-undo); border-color: rgba(248,81,73,.35); }
 
 .cg-file { border-bottom: 1px solid var(--vscode-panel-border); }
+.cg-file.focused > .cg-fhead { outline: 2px solid var(--cg-focus); outline-offset: -2px; }
 .cg-fhead { display: flex; align-items: center; gap: 9px; padding: 8px 12px; background: var(--vscode-sideBarSectionHeader-background); }
 .cg-chev { background: none; border: 0; color: var(--vscode-descriptionForeground); cursor: pointer; }
 .cg-fn { font-weight: 600; }
