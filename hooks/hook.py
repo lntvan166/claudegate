@@ -195,6 +195,13 @@ def log_event(event: str, detail: str = "") -> None:
     try:
         if not os.path.exists(HOOKLOG_SENTINEL):
             return
+        # For the top-level fail-open handler, derive the exception repr here —
+        # inside this guard — so a raising __repr__ can't escape to the caller.
+        if event == "error" and not detail:
+            try:
+                detail = repr(sys.exc_info()[1])
+            except Exception:
+                detail = "<unrepresentable>"
         try:
             if os.path.getsize(HOOKLOG_FILE) > HOOKLOG_MAX_BYTES:
                 os.remove(HOOKLOG_FILE)
@@ -292,5 +299,8 @@ if __name__ == "__main__":
     try:
         main()
     except Exception:
-        log_event("error", repr(sys.exc_info()[1]))
+        # Compute repr() inside log_event's own guard, not here — an exception
+        # with a raising __repr__ evaluated as an argument would escape this
+        # handler and break fail-open. log_event swallows everything internally.
+        log_event("error")
         sys.exit(0)

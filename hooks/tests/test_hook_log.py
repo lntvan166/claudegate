@@ -79,6 +79,20 @@ class HookLogTest(unittest.TestCase):
         self.assertLess(os.path.getsize(self.logfile), 1_000_000, "log truncated past the cap")
         self.assertIn("captured", open(self.logfile).read())
 
+    def test_error_path_logged_and_fails_open(self):
+        # workspace-roots.json is valid JSON but a non-iterable (a bare number):
+        # it parses, so it isn't caught by the loader's guard, then `for root in
+        # roots` raises TypeError — an unexpected error that must hit the
+        # top-level fail-open handler, log an `error` line, and still exit 0.
+        self.enable_log()
+        with open(os.path.join(self.cg, "workspace-roots.json"), "w") as f:
+            f.write("5")
+        p = os.path.join(self.root, "a.txt")
+        open(p, "w").write("v0")
+        self.run_hook(p)  # check=True asserts exit 0 (fail open)
+        body = open(self.logfile).read()
+        self.assertIn("error", body, "top-level handler logged an error line")
+
     def test_logging_failure_never_breaks_hook(self):
         # Sentinel present but the log path is unwritable (a directory) — the
         # hook must still exit 0 and capture normally.

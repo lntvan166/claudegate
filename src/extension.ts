@@ -275,6 +275,12 @@ export function activate(context: vscode.ExtensionContext): void {
       treeDataProvider: settingsProvider,
     });
     context.subscriptions.push(settingsView);
+    // The Settings Hook row reads ~/.claude/settings.json directly, so an
+    // external edit that breaks/repairs registration fires no config event.
+    // onHealthChange DOES fire on the settings.json watchFile change, so refresh
+    // the tree from it too — otherwise the status-bar chip updates but the row
+    // shows stale status until the next config event. (Spec A.)
+    context.subscriptions.push(hookInstaller.onHealthChange(() => settingsProvider.refresh()));
 
     // ── History panel (view-only archives from Clear Session) ───────────────
     const historyProvider = new HistoryTreeProvider(workspacePath ?? null);
