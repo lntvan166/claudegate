@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import { SessionManager } from "./sessionManager";
 import { WorktreeSessionRegistry } from "./worktreeSessionRegistry";
-import { buildReviewModel, buildFeedbackText, ReviewItemInput } from "./reviewWebviewModel";
+import { buildReviewModel, buildReviewPayload, buildFeedbackText, ReviewItemInput } from "./reviewWebviewModel";
 import { isInWorkspace, isExcluded, isProtected } from "./workspaceScope";
 
 export class ReviewWebviewPanel {
@@ -122,9 +122,12 @@ export class ReviewWebviewPanel {
 
   private render(): void {
     const items = this.items();
+    const { files, reviewedCount, totalCount } = buildReviewPayload(items);
     this.panel.webview.postMessage({
       type: "render",
-      model: buildReviewModel(items),
+      files,
+      reviewedCount,
+      totalCount,
       feedbackText: buildFeedbackText(items),
     });
   }

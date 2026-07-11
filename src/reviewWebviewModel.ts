@@ -53,6 +53,47 @@ export function buildReviewModel(items: ReviewItemInput[]): ReviewModel {
   return { files, reviewedCount, totalCount: items.length };
 }
 
+export interface ReviewPayloadFile {
+  relPath: string;
+  before: string | null;
+  after: string | null;
+  status: "pending" | "kept" | "undone";
+  isNew: boolean;
+  isProtected: boolean;
+  added: number;
+  removed: number;
+  missing: boolean;
+  noChange: boolean;
+  reason?: string;
+}
+
+export function buildReviewPayload(
+  items: ReviewItemInput[]
+): { files: ReviewPayloadFile[]; reviewedCount: number; totalCount: number } {
+  const files: ReviewPayloadFile[] = items.map((it) => {
+    const missing = it.after === null;
+    const before = it.before ?? "";
+    const after = it.after ?? "";
+    const noChange = !missing && before === after;
+    const counts = missing ? { added: 0, removed: 0 } : countChanges(before, after);
+    return {
+      relPath: it.relPath,
+      before: it.before,
+      after: it.after,
+      status: it.status,
+      isNew: it.isNew,
+      isProtected: it.isProtected,
+      added: counts.added,
+      removed: counts.removed,
+      missing,
+      noChange,
+      ...(it.reason ? { reason: it.reason } : {}),
+    };
+  });
+  const reviewedCount = items.filter((i) => i.status !== "pending").length;
+  return { files, reviewedCount, totalCount: items.length };
+}
+
 export function buildFeedbackText(items: ReviewItemInput[]): string {
   const kept = items.filter((i) => i.status === "kept");
   const undone = items.filter((i) => i.status === "undone");

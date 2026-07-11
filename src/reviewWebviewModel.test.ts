@@ -1,6 +1,6 @@
 import assert from "node:assert";
 import {
-  buildReviewModel, buildFeedbackText, ReviewItemInput,
+  buildReviewModel, buildFeedbackText, buildReviewPayload, ReviewItemInput,
 } from "./reviewWebviewModel";
 
 function run(name: string, fn: () => void): void {
@@ -52,6 +52,24 @@ run("buildFeedbackText omits sections with no members", () => {
   assert.ok(text.includes("KEPT:"));
   assert.ok(!text.includes("REVERTED"));
   assert.ok(!text.includes("Still reviewing"));
+});
+
+run("buildReviewPayload passes before/after through and computes counts/flags", () => {
+  const items: ReviewItemInput[] = [
+    { relPath: "a.ts", before: "x\n", after: "y\n", status: "pending", isNew: false, isProtected: false },
+    { relPath: "gone.ts", before: "q\n", after: null, status: "pending", isNew: false, isProtected: false },
+    { relPath: "same.ts", before: "z\n", after: "z\n", status: "pending", isNew: false, isProtected: false },
+    { relPath: "k.ts", before: "a\n", after: "b\n", status: "kept", isNew: false, isProtected: true },
+  ];
+  const { files, reviewedCount, totalCount } = buildReviewPayload(items);
+  assert.equal(totalCount, 4);
+  assert.equal(reviewedCount, 1);
+  const a = files.find(f => f.relPath === "a.ts")!;
+  assert.equal(a.before, "x\n"); assert.equal(a.after, "y\n");
+  assert.ok(a.added >= 1 && a.removed >= 1);
+  assert.equal(files.find(f => f.relPath === "gone.ts")!.missing, true);
+  assert.equal(files.find(f => f.relPath === "same.ts")!.noChange, true);
+  assert.equal(files.find(f => f.relPath === "k.ts")!.isProtected, true);
 });
 
 console.log("done");
