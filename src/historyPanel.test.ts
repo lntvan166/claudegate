@@ -50,13 +50,16 @@ console.log("ok - history tree provider renders, scopes, and refreshes");
 // tree grouping: records nested under folders become folder nodes → leaves
 {
   const d2 = fs.mkdtempSync(path.join(os.tmpdir(), "cg-hist2-"));
-  const ws2 = "/ws/proj";
+  // Native paths: the folder-tree filter (historyPanel getChildren) does a raw
+  // startsWith(folderPath + path.sep) on record paths, so the fixture must use
+  // OS-native separators to group correctly on Windows as well as POSIX.
+  const ws2 = path.resolve("/ws/proj");
   fs.writeFileSync(path.join(d2, "s.json"), JSON.stringify({
     sessionId: "2026-07-10T00:00:00.000Z", workspacePath: ws2, files: {},
     accepted: [
-      { id: "k1", path: "/ws/proj/src/a.ts", before: "1", after: "2", decidedAt: "t" },
-      { id: "k2", path: "/ws/proj/src/util/b.ts", before: "1", after: "2", decidedAt: "t" },
-      { id: "k3", path: "/ws/proj/top.ts", before: "1", after: "2", decidedAt: "t" },
+      { id: "k1", path: path.join(ws2, "src", "a.ts"), before: "1", after: "2", decidedAt: "t" },
+      { id: "k2", path: path.join(ws2, "src", "util", "b.ts"), before: "1", after: "2", decidedAt: "t" },
+      { id: "k3", path: path.join(ws2, "top.ts"), before: "1", after: "2", decidedAt: "t" },
     ],
     rejected: {},
   }));
