@@ -6,6 +6,7 @@ type SettingsKind =
   | "groupBySession"
   | "autoAdvance"
   | "history"
+  | "hookLog"
   | "excludeHeader"
   | "excludePattern"
   | "excludeAdd"
@@ -34,7 +35,8 @@ export class SettingsTreeProvider implements vscode.TreeDataProvider<SettingsIte
           e.affectsConfiguration("claudegate.fileWatcher.enabled") ||
           e.affectsConfiguration("claudegate.groupBySession") ||
           e.affectsConfiguration("claudegate.autoAdvance") ||
-          e.affectsConfiguration("claudegate.history.enabled")
+          e.affectsConfiguration("claudegate.history.enabled") ||
+          e.affectsConfiguration("claudegate.hookLog.enabled")
         ) {
           this.refresh();
         }
@@ -53,6 +55,7 @@ export class SettingsTreeProvider implements vscode.TreeDataProvider<SettingsIte
         { kind: "groupBySession" },
         { kind: "autoAdvance" },
         { kind: "history" },
+        { kind: "hookLog" },
         { kind: "excludeHeader" },
         { kind: "protected" },
         { kind: "hook" },
@@ -116,6 +119,19 @@ export class SettingsTreeProvider implements vscode.TreeDataProvider<SettingsIte
           ? "Clear Session archives the review log for the History panel. Click to turn off."
           : "Clear Session permanently deletes the review log. Click to turn archiving on.";
         ti.command = { command: "claudegate.toggleHistoryEnabled", title: "Toggle Session History" };
+        return ti;
+      }
+      case "hookLog": {
+        const on = vscode.workspace
+          .getConfiguration("claudegate")
+          .get<boolean>("hookLog.enabled", false);
+        const ti = new vscode.TreeItem("Hook Log");
+        ti.description = on ? "On" : "Off";
+        ti.iconPath = new vscode.ThemeIcon(on ? "output" : "circle-slash");
+        ti.tooltip = on
+          ? "Writing hook decisions to ~/.claudegate/hook.log. Click to turn off."
+          : "Turn on to diagnose why edits aren't captured (writes ~/.claudegate/hook.log).";
+        ti.command = { command: "claudegate.toggleHookLog", title: "Toggle Hook Log" };
         return ti;
       }
       case "excludeHeader": {

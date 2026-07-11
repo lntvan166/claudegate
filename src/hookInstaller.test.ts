@@ -1,5 +1,5 @@
 import * as assert from "assert";
-import { computeSettingsPatch, shouldWarnTrustInvalidation } from "./hookInstaller";
+import { computeSettingsPatch, shouldWarnTrustInvalidation, hookHealthFrom, buildVerifyReport } from "./hookInstaller";
 
 const CMD = "/home/me/.claudegate/hook.sh";
 const ENTRY = {
@@ -130,6 +130,40 @@ const registered = computeSettingsPatch("", CMD).content; // contains "claudegat
 {
   assert.equal(shouldWarnTrustInvalidation(registered, "{}"), false, "claudegate removed → no warn");
   console.log("ok - no warning when claudegate entry is removed (uninstall)");
+}
+
+// ── hookHealthFrom precedence ────────────────────────────────────────────────
+// hookHealthFrom precedence: not-installed → not-registered → trust-invalidated → stale → ok
+{
+  const S = (o: Partial<{scriptInstalled:boolean;registered:boolean;upToDate:boolean}>) =>
+    ({ scriptInstalled: true, registered: true, upToDate: true, ...o });
+  assert.equal(hookHealthFrom(S({ scriptInstalled: false }), false), "not-installed");
+  assert.equal(hookHealthFrom(S({ registered: false }), false), "not-registered");
+  assert.equal(hookHealthFrom(S({}), true), "trust-invalidated", "runtime trust flag outranks a healthy status");
+  assert.equal(hookHealthFrom(S({ upToDate: false }), false), "stale");
+  assert.equal(hookHealthFrom(S({}), false), "ok");
+  // a not-installed hook can't be trust-invalidated — install state wins
+  assert.equal(hookHealthFrom(S({ scriptInstalled: false }), true), "not-installed");
+  console.log("ok - hookHealthFrom maps status + trust flag to health state");
+}
+
+// ── buildVerifyReport ────────────────────────────────────────────────────────
+{
+  const pass = buildVerifyReport([
+    { label: "hook.py installed", ok: true },
+    { label: "registered", ok: true },
+  ]);
+  assert.equal(pass.ok, true);
+  assert.ok(pass.lines.every((l) => l.startsWith("✓ ")), "all-pass lines are checkmarks");
+
+  const mixed = buildVerifyReport([
+    { label: "hook.py installed", ok: true },
+    { label: "registered", ok: false, detail: "not in settings.json" },
+  ]);
+  assert.equal(mixed.ok, false);
+  assert.ok(mixed.lines.some((l) => l === "✗ registered — not in settings.json"), "failing line shows detail");
+  assert.ok(mixed.lines.some((l) => l === "✓ hook.py installed"));
+  console.log("ok - buildVerifyReport formats per-check lines + overall ok");
 }
 
 console.log("all hookInstaller tests passed");

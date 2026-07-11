@@ -109,6 +109,26 @@ export interface HookStatus {
   upToDate: boolean;
 }
 
+export type HookHealth = "ok" | "not-installed" | "not-registered" | "stale" | "trust-invalidated";
+
+export interface VerifyCheck { label: string; ok: boolean; detail?: string; }
+
+// Map install status + the runtime trust-invalidation signal to one health
+// state. Install problems win (a missing hook can't be "trust-invalidated");
+// then registration; then a mid-session settings.json change; then staleness.
+export function hookHealthFrom(status: HookStatus, trustInvalidated: boolean): HookHealth {
+  if (!status.scriptInstalled) return "not-installed";
+  if (!status.registered) return "not-registered";
+  if (trustInvalidated) return "trust-invalidated";
+  if (!status.upToDate) return "stale";
+  return "ok";
+}
+
+export function buildVerifyReport(checks: VerifyCheck[]): { ok: boolean; lines: string[] } {
+  const lines = checks.map((c) => (c.ok ? `✓ ${c.label}` : `✗ ${c.label}${c.detail ? ` — ${c.detail}` : ""}`));
+  return { ok: checks.every((c) => c.ok), lines };
+}
+
 const HOOK_SYNC_NOTIFIED_KEY = "claudegate.hookSyncNotifiedForHash";
 const HOOK_SETTINGS_WARNED_KEY = "claudegate.hookSettingsWarned";
 
@@ -120,12 +140,16 @@ export class HookInstaller {
   // (baseline + our own writes), and whether we've already warned this session.
   private lastKnownSettingsRaw: string | null = null;
   private trustWarningShown = false;
+  private trustInvalidated = false;
+  private readonly _onHealthChange = new vscode.EventEmitter<HookHealth>();
+  readonly onHealthChange = this._onHealthChange.event;
 
   private readonly claudegateDir     = path.join(os.homedir(), ".claudegate");
   private readonly hookPyDest        = path.join(os.homedir(), ".claudegate", "hook.py");
   private readonly hookShDest        = path.join(os.homedir(), ".claudegate", "hook.sh");
   private readonly hookBatDest       = path.join(os.homedir(), ".claudegate", "hook.bat");
   private readonly claudeSettingsPath = path.join(os.homedir(), ".claude", "settings.json");
+  private readonly hookLogSentinel = path.join(this.claudegateDir, "hooklog.enabled");
 
   private get hookWrapperDest(): string {
     return this.isWindows ? this.hookBatDest : this.hookShDest;
@@ -145,6 +169,10 @@ export class HookInstaller {
       this.installHookPy();
       this.installHookWrapper();
       const settingsChanged = this.patchClaudeSettings();
+
+      this.trustInvalidated = false;
+      this.trustWarningShown = false;
+      this.fireHealth();
 
       this.log.appendLine(
         `[INFO] Hook installed successfully.${settingsChanged ? "" : " (settings.json unchanged)"}`
@@ -308,6 +336,32 @@ export class HookInstaller {
     return { scriptInstalled, registered, upToDate };
   }
 
+  getHealth(): HookHealth {
+    return hookHealthFrom(this.getStatus(), this.trustInvalidated);
+  }
+
+  private fireHealth(): void {
+    this._onHealthChange.fire(this.getHealth());
+  }
+
+  hookLogPath(): string {
+    return path.join(this.claudegateDir, "hook.log");
+  }
+
+  // The hook reads this sentinel (not VS Code config) to decide whether to log.
+  setHookLogEnabled(enabled: boolean): void {
+    try {
+      if (enabled) {
+        fs.mkdirSync(this.claudegateDir, { recursive: true });
+        fs.writeFileSync(this.hookLogSentinel, "", "utf-8");
+      } else {
+        fs.rmSync(this.hookLogSentinel, { force: true });
+      }
+    } catch (err) {
+      this.log.appendLine(`[WARN] could not toggle hook log: ${(err as Error).message}`);
+    }
+  }
+
   private installHookPy(): void {
     const sourcePath = this.bundledHookSourcePath();
     if (!fs.existsSync(sourcePath)) {
@@ -413,13 +467,30 @@ export class HookInstaller {
     this.lastKnownSettingsRaw = this.readSettingsRaw();
 
     const onChange = (): void => {
-      if (this.trustWarningShown) return;
       const current = this.readSettingsRaw();
-      if (!shouldWarnTrustInvalidation(this.lastKnownSettingsRaw ?? "", current)) {
-        this.lastKnownSettingsRaw = current;
+      // fs.watchFile fires on any stat change, including a byte-identical
+      // rewrite (a formatter/tool re-saving the same content bumps mtime). That
+      // is NOT a real change: bail before touching state, so it can't falsely
+      // clear an active trust-invalidation (which would drop the persistent
+      // status-bar warning while running sessions are still untrusted).
+      if (current === this.lastKnownSettingsRaw) return;
+      const shouldWarn = shouldWarnTrustInvalidation(this.lastKnownSettingsRaw ?? "", current);
+      this.lastKnownSettingsRaw = current;
+
+      if (!shouldWarn) {
+        // A real change that isn't a trust invalidation — the claudegate entry
+        // was removed (an uninstall, handled by the not-registered health
+        // state), not a mid-session edit. Clear so a future invalidation
+        // re-warns. (Genuine recovery from invalidation is via Setup Hook.)
+        this.trustInvalidated = false;
+        this.trustWarningShown = false;
+        this.fireHealth();
         return;
       }
-      this.lastKnownSettingsRaw = current;
+
+      this.trustInvalidated = true;
+      this.fireHealth();
+      if (this.trustWarningShown) return;
       this.trustWarningShown = true;
       this.log.appendLine(
         "[WARN] ~/.claude/settings.json changed while running — hook trust invalidated for open sessions."
@@ -453,61 +524,54 @@ export class HookInstaller {
   }
 
   verify(): void {
-    const issues: string[] = [];
+    const checks: VerifyCheck[] = [];
+    const scriptOk = fs.existsSync(this.hookPyDest);
+    checks.push({ label: "hook.py installed", ok: scriptOk,
+      detail: scriptOk ? undefined : "run Setup Hook" });
+    const wrapperOk = fs.existsSync(this.hookWrapperDest);
+    checks.push({ label: `hook.${this.isWindows ? "bat" : "sh"} installed`, ok: wrapperOk,
+      detail: wrapperOk ? undefined : "run Setup Hook" });
 
-    if (!fs.existsSync(this.hookPyDest)) {
-      issues.push("hook.py not found in ~/.claudegate");
-    }
-    if (!fs.existsSync(this.hookWrapperDest)) {
-      issues.push(`hook.${this.isWindows ? "bat" : "sh"} not found in ~/.claudegate`);
-    }
-
-    if (fs.existsSync(this.hookPyDest)) {
+    if (scriptOk) {
       // Smoke-test the hook against a throwaway cwd that matches no workspace
       // root, then delete the session file it creates so verification doesn't
       // pollute ~/.claudegate/sessions.
-      const probeDir = path.join(
-        os.tmpdir(),
-        `claudegate-verify-${crypto.randomBytes(4).toString("hex")}`
-      );
+      let runOk = true; let runDetail: string | undefined;
+      const probeDir = path.join(os.tmpdir(), `claudegate-verify-${crypto.randomBytes(4).toString("hex")}`);
       try {
         child_process.execSync(`${this.pythonCmd} "${this.hookPyDest}"`, {
-          input: JSON.stringify({
-            tool_name: "Write",
-            cwd: probeDir,
-            tool_input: { file_path: "test.txt" },
-          }),
+          input: JSON.stringify({ tool_name: "Write", cwd: probeDir, tool_input: { file_path: "test.txt" } }),
           stdio: ["pipe", "ignore", "pipe"],
         });
       } catch (err) {
-        const detail = (err as { stderr?: Buffer }).stderr?.toString().trim();
-        issues.push(
-          `hook.py crashes under ${this.pythonCmd}${detail ? `: ${detail.split("\n").pop()}` : ""}`
-        );
+        runOk = false;
+        const d = (err as { stderr?: Buffer }).stderr?.toString().trim();
+        runDetail = `crashes under ${this.pythonCmd}${d ? `: ${d.split("\n").pop()}` : ""}`;
       } finally {
         // Mirror hook.py's hashing (normcase + abspath, lower-case on Windows).
         const resolved = path.resolve(probeDir);
         const normalized = this.isWindows ? resolved.toLowerCase() : resolved;
         const hash = crypto.createHash("md5").update(normalized).digest("hex");
-        try {
-          fs.unlinkSync(path.join(this.claudegateDir, "sessions", `${hash}.json`));
-        } catch { /* nothing to clean up */ }
+        try { fs.unlinkSync(path.join(this.claudegateDir, "sessions", `${hash}.json`)); } catch { /* nothing to clean up */ }
       }
+      checks.push({ label: "hook runs", ok: runOk, detail: runDetail });
     }
 
-    try {
-      const settings = JSON.parse(fs.readFileSync(this.claudeSettingsPath, "utf-8"));
-      if (!JSON.stringify(settings).includes("claudegate")) {
-        issues.push("Hook not registered in ~/.claude/settings.json");
-      }
-    } catch {
-      issues.push("Cannot read ~/.claude/settings.json");
-    }
+    let registered = false;
+    try { registered = JSON.stringify(JSON.parse(fs.readFileSync(this.claudeSettingsPath, "utf-8"))).includes("claudegate"); }
+    catch { /* unreadable/missing → not registered */ }
+    checks.push({ label: "registered in ~/.claude/settings.json", ok: registered,
+      detail: registered ? undefined : "run Setup Hook" });
 
-    if (issues.length === 0) {
-      vscode.window.showInformationMessage("Claude Gate: All checks passed!");
-    } else {
-      vscode.window.showErrorMessage(`Claude Gate issues: ${issues.join(" · ")}`);
-    }
+    const report = buildVerifyReport(checks);
+    this.fireHealth();
+    const body = report.lines.join("\n");
+    const actions = report.ok ? [] : ["Setup Hook"];
+    if (fs.existsSync(this.hookLogSentinel)) actions.push("Open Hook Log");
+    const show = report.ok ? vscode.window.showInformationMessage : vscode.window.showWarningMessage;
+    void show(`Claude Gate — hook check:\n${body}`, { modal: false }, ...actions).then((a) => {
+      if (a === "Setup Hook") void this.setup();
+      else if (a === "Open Hook Log") void vscode.commands.executeCommand("claudegate.openHookLog");
+    });
   }
 }

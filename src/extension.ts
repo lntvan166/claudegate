@@ -196,12 +196,47 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(hookInstaller.watchSettingsForTrustInvalidation());
     const documentTracker = new DocumentTracker(sessionManager, workspacePath, log);
 
+    // Keep the hook.py sentinel file in sync with the hookLog.enabled setting
+    // (the hook only checks a file on disk, not VS Code config, on each fire).
+    const syncHookLogSentinel = () =>
+      hookInstaller.setHookLogEnabled(
+        vscode.workspace.getConfiguration("claudegate").get<boolean>("hookLog.enabled", false)
+      );
+    syncHookLogSentinel();
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (e.affectsConfiguration("claudegate.hookLog.enabled")) syncHookLogSentinel();
+      })
+    );
+
     const badgeBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
     badgeBar.text    = "$(shield) 0";
     badgeBar.tooltip = "Claude Gate: 0 pending file(s) — click to open review panel";
     badgeBar.command = "claudegate.pendingPanel.focus";
     badgeBar.show();
     context.subscriptions.push(badgeBar);
+
+    // Hook-health status chip: hidden when healthy, surfaces a warning with a
+    // one-click fix (Setup Hook / Verify Setup) when the hook needs attention.
+    const hookHealthBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
+    context.subscriptions.push(hookHealthBar);
+    const HEALTH_TEXT: Record<string, string> = {
+      "not-installed": "hook not installed",
+      "not-registered": "hook not registered",
+      "stale": "hook update available",
+      "trust-invalidated": "restart Claude sessions",
+    };
+    const renderHookHealth = (health: string) => {
+      if (health === "ok") { hookHealthBar.hide(); return; }
+      hookHealthBar.text = `$(warning) Claude Gate`;
+      hookHealthBar.tooltip = `Claude Gate: ${HEALTH_TEXT[health] ?? health} — click for details`;
+      hookHealthBar.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
+      hookHealthBar.command = health === "not-installed" || health === "not-registered"
+        ? "claudegate.setupHook" : "claudegate.verifyHook";
+      hookHealthBar.show();
+    };
+    context.subscriptions.push(hookInstaller.onHealthChange(renderHookHealth));
+    renderHookHealth(hookInstaller.getHealth());
 
     const pendingProvider  = new FilteredTreeProvider(sessionManager, "pending",  "tree", worktreeRegistry);
     const acceptedProvider = new FilteredTreeProvider(sessionManager, "accepted", "tree");
@@ -240,6 +275,12 @@ export function activate(context: vscode.ExtensionContext): void {
       treeDataProvider: settingsProvider,
     });
     context.subscriptions.push(settingsView);
+    // The Settings Hook row reads ~/.claude/settings.json directly, so an
+    // external edit that breaks/repairs registration fires no config event.
+    // onHealthChange DOES fire on the settings.json watchFile change, so refresh
+    // the tree from it too — otherwise the status-bar chip updates but the row
+    // shows stale status until the next config event. (Spec A.)
+    context.subscriptions.push(hookInstaller.onHealthChange(() => settingsProvider.refresh()));
 
     // ── History panel (view-only archives from Clear Session) ───────────────
     const historyProvider = new HistoryTreeProvider(workspacePath ?? null);
@@ -510,6 +551,22 @@ export function activate(context: vscode.ExtensionContext): void {
       }),
 
       vscode.commands.registerCommand("claudegate.verifyHook", () => hookInstaller.verify()),
+
+      vscode.commands.registerCommand("claudegate.openHookLog", async () => {
+        const p = hookInstaller.hookLogPath();
+        if (!fs.existsSync(p) || fs.statSync(p).size === 0) {
+          vscode.window.showInformationMessage(
+            "Claude Gate: no hook log yet — enable Hook Log in Settings, then make a Claude edit."
+          );
+          return;
+        }
+        await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(p)));
+      }),
+
+      vscode.commands.registerCommand("claudegate.toggleHookLog", async () => {
+        const cur = vscode.workspace.getConfiguration("claudegate").get<boolean>("hookLog.enabled", false);
+        await updateClaudegateConfig("hookLog.enabled", !cur);
+      }),
 
       vscode.commands.registerCommand("claudegate.openProtectedSettings", () =>
         vscode.commands.executeCommand("workbench.action.openSettings", "claudegate.protected")
