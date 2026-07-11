@@ -468,13 +468,20 @@ export class HookInstaller {
 
     const onChange = (): void => {
       const current = this.readSettingsRaw();
+      // fs.watchFile fires on any stat change, including a byte-identical
+      // rewrite (a formatter/tool re-saving the same content bumps mtime). That
+      // is NOT a real change: bail before touching state, so it can't falsely
+      // clear an active trust-invalidation (which would drop the persistent
+      // status-bar warning while running sessions are still untrusted).
+      if (current === this.lastKnownSettingsRaw) return;
       const shouldWarn = shouldWarnTrustInvalidation(this.lastKnownSettingsRaw ?? "", current);
       this.lastKnownSettingsRaw = current;
 
       if (!shouldWarn) {
-        // No trust-invalidating change detected (either nothing changed since
-        // our last look, or the claudegate entry was removed — an uninstall,
-        // not an invalidation). Clear so a future invalidation can re-warn.
+        // A real change that isn't a trust invalidation — the claudegate entry
+        // was removed (an uninstall, handled by the not-registered health
+        // state), not a mid-session edit. Clear so a future invalidation
+        // re-warns. (Genuine recovery from invalidation is via Setup Hook.)
         this.trustInvalidated = false;
         this.trustWarningShown = false;
         this.fireHealth();
