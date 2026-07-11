@@ -11,7 +11,9 @@ import { workspace as stubWorkspace } from "./test-stubs/vscode";
 const fakeLog = { appendLine() {} } as any;
 
 function sessionPathFor(home: string, ws: string): string {
-  const hash = crypto.createHash("md5").update(path.resolve(ws)).digest("hex");
+  const resolved = path.resolve(ws);
+  const normalized = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  const hash = crypto.createHash("md5").update(normalized).digest("hex");
   return path.join(home, ".claudegate", "sessions", `${hash}.json`);
 }
 
@@ -19,6 +21,7 @@ function sessionPathFor(home: string, ws: string): string {
   setExcludeMatcher(new ExcludeMatcher()); // nothing excluded
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cg-home-"));
   process.env.HOME = home;
+  process.env.USERPROFILE = home; // Windows: os.homedir() reads USERPROFILE, not $HOME
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cg-root-"));
   // parent window sees only `root`; worktree files live under it → in-workspace.
   stubWorkspace.workspaceFolders = [{ uri: { fsPath: root } }];

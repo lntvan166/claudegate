@@ -20,7 +20,9 @@ import { workspace as stubWorkspace } from "./test-stubs/vscode";
 const fakeLog = { appendLine() {} } as unknown as import("vscode").OutputChannel;
 
 function md5(s: string): string {
-  return crypto.createHash("md5").update(path.resolve(s)).digest("hex");
+  const resolved = path.resolve(s);
+  const normalized = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  return crypto.createHash("md5").update(normalized).digest("hex");
 }
 
 function writeSession(home: string, wsPath: string, files: Record<string, unknown>): void {
@@ -33,6 +35,7 @@ function writeSession(home: string, wsPath: string, files: Record<string, unknow
 function makeFixture(): { home: string; root: string; ws: string; wsFile: string } {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cg-guihome-"));
   process.env.HOME = home; // SessionManager reads os.homedir() → $HOME on POSIX
+  process.env.USERPROFILE = home; // Windows: os.homedir() reads USERPROFILE, not $HOME
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cg-guiroot-"));
   fs.mkdirSync(path.join(root, ".git", "worktrees", "ws-feature"), { recursive: true }); // .git is a DIR (main repo)
   const ws = path.join(root, "ws-feature");

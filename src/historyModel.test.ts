@@ -1,4 +1,5 @@
 import * as assert from "assert";
+import * as path from "path";
 import { summarizeArchive, archiveMatchesWorkspace, findArchiveRecord, formatBytes } from "./historyModel";
 
 const archive = {
@@ -43,11 +44,18 @@ const archive = {
   assert.equal(archiveMatchesWorkspace(archive, "/other"), false, "workspacePath mismatch → no fallback");
   console.log("ok - archiveMatchesWorkspace honors embedded workspacePath");
 }
-// legacy archive (no workspacePath) → record-path inference
+// legacy archive (no workspacePath) → record-path inference.
+// Build native paths: isPathUnder resolves the root but compares the raw record
+// path, so on Windows the fixture must use OS-native separators to match.
 {
-  const legacy = { ...archive } as any; delete legacy.workspacePath;
-  assert.equal(archiveMatchesWorkspace(legacy, "/ws/project"), true, "record under root → match");
-  assert.equal(archiveMatchesWorkspace(legacy, "/elsewhere"), false);
+  const root = path.resolve("/ws/project");
+  const legacy = {
+    sessionId: "s", files: {},
+    accepted: [{ id: "t1", path: path.join(root, "a.ts"), before: "1", after: "2", decidedAt: "t1" }],
+    rejected: {},
+  } as any;
+  assert.equal(archiveMatchesWorkspace(legacy, root), true, "record under root → match");
+  assert.equal(archiveMatchesWorkspace(legacy, path.resolve("/elsewhere")), false);
   console.log("ok - archiveMatchesWorkspace infers from record paths for legacy archives");
 }
 // win32 case-fold
