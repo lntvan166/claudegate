@@ -2,7 +2,7 @@ import { render } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import { vscode } from "./vscodeApi";
 import { Toolbar } from "./Toolbar";
-import { DiffView } from "./DiffView";
+import { FileCard } from "./FileCard";
 import type { PayloadFile, RenderMessage, DiffMode } from "./types";
 import "react-diff-view/style/index.css";
 import "./theme.css";
@@ -50,20 +50,10 @@ function App() {
                onRejectAll={() => vscode.postMessage({ type: "undoAll" })} />
       <div class="cg-files">
         {files.map(f => (
-          <div class="cg-file" key={f.relPath}>
-            <div class="cg-fhead">
-              <span class="cg-fn">{f.relPath}</span>
-              <span class="cg-cnt"><span class="a">+{f.added}</span> <span class="d">−{f.removed}</span></span>
-              <span class="cg-spacer" />
-              {f.status === "pending"
-                ? <>
-                    <button class="cg-btn undo" onClick={() => vscode.postMessage({ type: "undo", path: f.relPath })}>Reject</button>
-                    <button class="cg-btn keep" onClick={() => vscode.postMessage({ type: "keep", path: f.relPath })}>Keep</button>
-                  </>
-                : <span class={`cg-status ${f.status}`}>{f.status === "kept" ? "✓ kept" : "✗ rejected"}</span>}
-            </div>
-            {f.status === "pending" && <DiffView before={f.before} after={f.after} relPath={f.relPath} viewType={diffMode} />}
-          </div>
+          <FileCard key={f.relPath} file={f} diffMode={diffMode}
+                    onKeep={(p) => vscode.postMessage({ type: "keep", path: p })}
+                    onReject={(p, reason) => vscode.postMessage({ type: "undo", path: p, reason })}
+                    onOpenNative={(p) => vscode.postMessage({ type: "openNative", path: p })} />
         ))}
       </div>
       {feedbackOpen && (
