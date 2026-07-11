@@ -20,6 +20,10 @@ CLAUDEGATE_DIR = os.path.expanduser("~/.claudegate")
 SESSIONS_DIR   = os.path.join(CLAUDEGATE_DIR, "sessions")
 WORKSPACE_ROOTS_FILE = os.path.join(CLAUDEGATE_DIR, "workspace-roots.json")
 
+HOOKLOG_SENTINEL = os.path.join(CLAUDEGATE_DIR, "hooklog.enabled")
+HOOKLOG_FILE     = os.path.join(CLAUDEGATE_DIR, "hook.log")
+HOOKLOG_MAX_BYTES = 1_000_000  # rolling debug aid; reset past this
+
 # Advisory lock shared with the extension to serialize read-modify-write of the
 # session file, so this hook cannot overwrite the extension's accepted/rejected
 # log from a snapshot loaded microseconds before the user accepted a file.
@@ -183,6 +187,27 @@ def save_session(session: dict, session_file: str) -> None:
     os.replace(tmp, session_file)
 
 
+def log_event(event: str, detail: str = "") -> None:
+    """Append a diagnostic line to ~/.claudegate/hook.log, but ONLY when the
+    extension has created the sentinel (claudegate.hookLog.enabled=true).
+    Best-effort and fully guarded: the hook must never break because logging
+    failed. Self-truncates once the file passes the size cap."""
+    try:
+        if not os.path.exists(HOOKLOG_SENTINEL):
+            return
+        try:
+            if os.path.getsize(HOOKLOG_FILE) > HOOKLOG_MAX_BYTES:
+                os.remove(HOOKLOG_FILE)
+        except OSError:
+            pass
+        ts = datetime.now(timezone.utc).isoformat()
+        line = f"{ts} {event}{(' ' + detail) if detail else ''}\n"
+        with open(HOOKLOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass  # logging must never break the fail-open hook
+
+
 def main() -> None:
     try:
         hook_input = json.load(sys.stdin)
@@ -203,6 +228,7 @@ def main() -> None:
 
     workspace_root = workspace_root_for_file(file_path, cwd)
     if workspace_root is None:
+        log_event("skip-no-root", file_path)
         sys.exit(0)
     # A nested git worktree owns its own session deterministically, regardless of
     # which windows are open (fail-open: falls back to workspace_root on any error).
@@ -215,11 +241,16 @@ def main() -> None:
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 original_content: str | None = f.read()
-        except (OSError, UnicodeDecodeError):
-            # Exists but unreadable (permissions, etc) or not UTF-8 text (binary).
-            # We cannot safely baseline or later restore it, and must NOT record
-            # it as a null "new" file — that would let a reject delete the user's
-            # real file. Skip capture (a non-zero exit could also block the edit).
+        except UnicodeDecodeError:
+            # Not UTF-8 text (binary). We cannot safely baseline or later
+            # restore it, and must NOT record it as a null "new" file — that
+            # would let a reject delete the user's real file. Skip capture (a
+            # non-zero exit could also block the edit).
+            log_event("skip-binary", file_path)
+            sys.exit(0)
+        except OSError:
+            # Exists but unreadable (permissions, etc). Same reasoning as above.
+            log_event("skip-unreadable", file_path)
             sys.exit(0)
     else:
         original_content = None  # genuinely new — Claude is creating it
@@ -242,7 +273,10 @@ def main() -> None:
             if session.get("status") == "reviewed":
                 session["status"] = "active"
             save_session(session, session_file)
-        # else: an existing pending entry keeps its frozen baseline (no-op)
+            log_event("captured", file_path)
+        else:
+            # An existing pending entry keeps its frozen baseline (no-op).
+            log_event("skip-already-pending", file_path)
     finally:
         release_lock(fd, lock_path)
 
@@ -258,4 +292,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception:
+        log_event("error", repr(sys.exc_info()[1]))
         sys.exit(0)
