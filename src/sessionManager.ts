@@ -46,6 +46,7 @@ export class SessionManager {
   private readonly sessionFilename: string;
   private readonly watchDir: string;
   private readonly claudegateDir: string;
+  private readonly workspaceRoot: string | null;
   private session: Session | null = null;
   private watcher: fs.FSWatcher | null = null;
   private reconcileTimer: ReturnType<typeof setTimeout> | null = null;
@@ -69,10 +70,12 @@ export class SessionManager {
       this.sessionFilename = `${hash}.json`;
       this.watchDir   = path.join(this.claudegateDir, "sessions");
       this.sessionPath = path.join(this.watchDir, this.sessionFilename);
+      this.workspaceRoot = resolved;
     } else {
       this.sessionFilename = "session.json";
       this.watchDir   = this.claudegateDir;
       this.sessionPath = path.join(this.claudegateDir, "session.json");
+      this.workspaceRoot = null;
     }
   }
 
@@ -471,11 +474,12 @@ export class SessionManager {
     this.persist({ droppedRejectedPaths: new Set(paths) });
   }
 
-  clearSession(): void {
+  clearSession(opts: { archive?: boolean } = {}): void {
     if (!this.session) return;
-    // Never destroy the session without a backup: if archiving a real on-disk
-    // file failed, abort the clear and keep the user's history intact.
-    if (!this.archiveSession()) {
+    const archive = opts.archive !== false;
+    // Never destroy the session without a backup — unless the user explicitly
+    // disabled history (claudegate.history.enabled=false → archive:false).
+    if (archive && !this.archiveSession()) {
       vscode.window.showErrorMessage(
         "Claude Gate: couldn't back up the review session, so it was NOT cleared — your history is intact. " +
         "See the Claude Gate Output channel for details."
@@ -783,9 +787,10 @@ export class SessionManager {
     }
   }
 
-  // Copy the on-disk session into history/ as a backup. Returns true when the
-  // session is safely backed up OR there is nothing on disk to lose; false only
-  // when a real file exists but the copy failed (so clearSession can abort).
+  // Write the session into history/ as a browsable archive (History panel).
+  // Embeds workspacePath so the panel can scope archives per workspace.
+  // Returns true when safely archived OR there is nothing on disk to lose;
+  // false only when a real file exists but the write failed.
   private archiveSession(): boolean {
     if (!this.session) return true;
     if (!fs.existsSync(this.sessionPath)) return true; // in-memory only → nothing to lose
@@ -793,7 +798,11 @@ export class SessionManager {
       const historyDir = path.join(this.claudegateDir, "history");
       fs.mkdirSync(historyDir, { recursive: true });
       const safeName = this.session.sessionId.replace(/[:.]/g, "-");
-      fs.copyFileSync(this.sessionPath, path.join(historyDir, `${safeName}.json`));
+      const payload = JSON.stringify(
+        { ...this.session, ...(this.workspaceRoot ? { workspacePath: this.workspaceRoot } : {}) },
+        null, 2
+      );
+      this.atomicWrite(path.join(historyDir, `${safeName}.json`), payload);
       return true;
     } catch (err) {
       this.log.appendLine(`[WARN] ` + `Could not archive session: ${(err as Error).message}`);

@@ -498,5 +498,42 @@ function readSession(sp: string): any {
     console.log("ok - clearSession aborts (no delete) when archive fails");
   }
 
+  // history archives embed workspacePath so the History panel can scope them
+  {
+    const { ws, home } = newEnv();
+    const fp = path.join(ws, "h.ts");
+    fs.writeFileSync(fp, "NEW");
+    const sm = new SessionManager(fakeLog, ws);
+    sm.startWatching();
+    sm.trackFileChange(fp, "OLD");
+    sm.acceptFile(fp);
+    sm.clearSession();
+    const historyDir = path.join(home, ".claudegate", "history");
+    const files = fs.readdirSync(historyDir);
+    assert.equal(files.length, 1, "one archive written");
+    const arc = JSON.parse(fs.readFileSync(path.join(historyDir, files[0]), "utf-8"));
+    assert.equal(arc.workspacePath, path.resolve(ws), "archive embeds resolved workspacePath");
+    assert.equal(arc.accepted.length, 1, "archive carries the review log");
+    sm.stopWatching();
+    console.log("ok - clearSession archive embeds workspacePath");
+  }
+
+  // clearSession({archive:false}) skips the backup AND the abort guard
+  {
+    const { ws, sp, home } = newEnv();
+    const fp = path.join(ws, "n.ts");
+    fs.writeFileSync(fp, "NEW");
+    const sm = new SessionManager(fakeLog, ws);
+    sm.startWatching();
+    sm.trackFileChange(fp, "OLD");
+    // block the history dir (mkdir would fail) — with archive:false it must not matter
+    fs.writeFileSync(path.join(home, ".claudegate", "history"), "not a dir");
+    sm.clearSession({ archive: false });
+    assert.equal(sm.getSession(), null, "session cleared in memory despite blocked history dir");
+    assert.ok(!fs.existsSync(sp), "session file deleted without a backup (explicit opt-out)");
+    sm.stopWatching();
+    console.log("ok - clearSession({archive:false}) skips backup and guard");
+  }
+
   console.log("done");
 })().catch((e) => { console.error(e); process.exit(1); });
