@@ -45,6 +45,3 @@ manual-test-seed.py
 # Misc
 *.vsix
 test.txt
-
-# Webview build sourcemaps (dev-only)
-media/review/*.map

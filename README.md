@@ -75,7 +75,6 @@ With a ClaudeGate diff focused, press **Cmd+Enter** to accept or **Cmd+Backspace
 - **Workspace-aware filtering** — files modified outside the current workspace (e.g. `~/.claude/settings.json`) are hidden from the review panel
 - **Pending count badge** on the sidebar panel header
 - **Session history** archived to `~/.claudegate/history/`
-- **Review Changes panel (beta)** — enable `claudegate.reviewPanel.enabled`, then run `Claude Gate: Review Changes (Panel — beta)` to review every pending change in one scrollable panel with per-file keep/reject, revert notes, and a Feedback-to-AI log. The native `Review All Pending` multi-diff remains the default.
 
 ---
 

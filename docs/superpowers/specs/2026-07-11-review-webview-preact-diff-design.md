@@ -1,7 +1,13 @@
 # All-in-one Review webview — Preact + react-diff-view
 
 **Date:** 2026-07-11
-**Status:** approved (design)
+**Status:** WITHDRAWN (2026-07-11) — built, reviewed, and manually verified, then
+removed by maintainer decision: the native multi-diff (focus-based per-file
+actions + `Copy Feedback to AI`) covers the need with 100% editor fidelity,
+and no stable API exists for per-pane actions (`multiDiffEditor/resource/title`
+is still proposed). Revisit only if that proposal is finalized. The
+implementation survives in git history on `feat/review-webview` (through
+commit 91581aa).
 
 ## Problem
 
