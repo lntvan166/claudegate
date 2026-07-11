@@ -188,6 +188,18 @@
         "title": "Claude Gate: Toggle Group by Session"
       },
       {
+        "command": "claudegate.toggleAutoAdvance",
+        "title": "Claude Gate: Toggle Auto-advance"
+      },
+      {
+        "command": "claudegate.verifyHook",
+        "title": "Claude Gate: Verify Setup"
+      },
+      {
+        "command": "claudegate.openProtectedSettings",
+        "title": "Claude Gate: Edit Protected Patterns"
+      },
+      {
         "command": "claudegate.addExcludePattern",
         "title": "Claude Gate: Add Exclude Pattern",
         "icon": "$(add)"
@@ -570,6 +582,36 @@
         "key": "ctrl+shift+backspace",
         "mac": "cmd+backspace",
         "when": "claudegate.activeFileIsPending"
+      }
+    ],
+    "walkthroughs": [
+      {
+        "id": "claudegate.getStarted",
+        "title": "Get Started with Claude Gate",
+        "description": "Capture Claude Code's file changes and review each edit in a native diff.",
+        "steps": [
+          {
+            "id": "claudegate.setup",
+            "title": "Set up the capture hook",
+            "description": "Install the one-time PreToolUse hook so Claude's edits are captured.\n[Setup Hook](command:claudegate.setupHook)",
+            "media": { "markdown": "media/walkthrough/setup.md" },
+            "completionEvents": ["onCommand:claudegate.setupHook"]
+          },
+          {
+            "id": "claudegate.verify",
+            "title": "Verify it's working",
+            "description": "Run a health check to confirm capture works end-to-end.\n[Verify Setup](command:claudegate.verifyHook)",
+            "media": { "markdown": "media/walkthrough/verify.md" },
+            "completionEvents": ["onCommand:claudegate.verifyHook"]
+          },
+          {
+            "id": "claudegate.review",
+            "title": "Review changes",
+            "description": "Open the Pending panel and review Claude's edits in the native diff.\n[Review All Pending](command:claudegate.reviewAllPending)",
+            "media": { "markdown": "media/walkthrough/review.md" },
+            "completionEvents": ["onCommand:claudegate.reviewAllPending"]
+          }
+        ]
       }
     ]
   },

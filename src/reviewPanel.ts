@@ -85,7 +85,11 @@ export class WorktreeGroupItem extends vscode.TreeItem {
     this.resourceUri  = vscode.Uri.file(worktreeRoot);
     this.description  = `${pendingCount} pending`;
     this.tooltip      = new vscode.MarkdownString(
-      `**Git worktree**\n\n${worktreeRoot}\n\n${pendingCount} pending file(s) · shown here and in the worktree's own window`
+      `**Git worktree** — a nested worktree with its own review scope.\n\n` +
+      `\`${worktreeRoot}\`\n\n` +
+      `${pendingCount} pending file(s). These also appear in **Review All Pending** and in the worktree's own ` +
+      `window — accept/reject in either place and the decision syncs to both.\n\n` +
+      `Use the **Open Worktree in New Window** action (hover this row) to open it directly.`
     );
     this.contextValue = "claudegate.worktreeGroup";
     this.iconPath     = new vscode.ThemeIcon("git-branch");

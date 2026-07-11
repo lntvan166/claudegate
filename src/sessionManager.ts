@@ -470,7 +470,15 @@ export class SessionManager {
 
   clearSession(): void {
     if (!this.session) return;
-    this.archiveSession();
+    // Never destroy the session without a backup: if archiving a real on-disk
+    // file failed, abort the clear and keep the user's history intact.
+    if (!this.archiveSession()) {
+      vscode.window.showErrorMessage(
+        "Claude Gate: couldn't back up the review session, so it was NOT cleared — your history is intact. " +
+        "See the Claude Gate Output channel for details."
+      );
+      return;
+    }
     try {
       fs.unlinkSync(this.sessionPath);
     } catch { /* already gone */ }
@@ -772,15 +780,21 @@ export class SessionManager {
     }
   }
 
-  private archiveSession(): void {
-    if (!this.session) return;
+  // Copy the on-disk session into history/ as a backup. Returns true when the
+  // session is safely backed up OR there is nothing on disk to lose; false only
+  // when a real file exists but the copy failed (so clearSession can abort).
+  private archiveSession(): boolean {
+    if (!this.session) return true;
+    if (!fs.existsSync(this.sessionPath)) return true; // in-memory only → nothing to lose
     try {
       const historyDir = path.join(this.claudegateDir, "history");
       fs.mkdirSync(historyDir, { recursive: true });
       const safeName = this.session.sessionId.replace(/[:.]/g, "-");
       fs.copyFileSync(this.sessionPath, path.join(historyDir, `${safeName}.json`));
+      return true;
     } catch (err) {
       this.log.appendLine(`[WARN] ` + `Could not archive session: ${(err as Error).message}`);
+      return false;
     }
   }
 }

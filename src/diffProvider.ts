@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import * as path from "path";
 import { diffLines } from "diff";
 import { SessionManager } from "./sessionManager";
+import { fileEntryFor } from "./reviewModel";
 import { countChanges, formatChangeCount } from "./changeCount";
 
 export const SCHEME = "claudegate";
@@ -47,8 +48,10 @@ export class ClaudeGateContentProvider
 
     // Look up by fsPath (the session key). On Windows uri.path is "/c:/…" while
     // the key is "c:\…", so uri.path would miss; uri.fsPath matches on all OSes.
+    // Even fsPath can differ in drive-letter case from the hook-stored key
+    // (Uri.file lowercases it), so use fileEntryFor's case-tolerant lookup.
     const owner = this.resolveManager(uri.fsPath).getSession();
-    const entry = owner?.files[uri.fsPath];
+    const entry = owner ? fileEntryFor(owner.files, uri.fsPath) : undefined;
     if (!entry) return "";
     return entry.originalContent ?? "// New file — no original content";
   }

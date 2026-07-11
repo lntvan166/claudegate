@@ -33,6 +33,25 @@ export function makeRecordId(decidedAt: string, path: string): string {
   return `${decidedAt}::${path}`;
 }
 
+// Look up a pending entry by path, tolerating drive-letter/case differences on
+// case-insensitive filesystems (Windows). `vscode.Uri.file(p).fsPath` lowercases
+// the drive letter, so a URI-derived path (e.g. `c:\Foo`) can miss an exact
+// object-key match against the hook-stored key (`C:\Foo`) even though they name
+// the same file — leaving the diff's original pane blank. Exact match first
+// (fast, always correct), then a case-folded scan on win32 only.
+export function fileEntryFor(
+  files: Record<string, FileEntry>,
+  filePath: string,
+  caseInsensitive: boolean = process.platform === "win32"
+): FileEntry | undefined {
+  const exact = files[filePath];
+  if (exact) return exact;
+  if (!caseInsensitive) return undefined;
+  const target = filePath.toLowerCase();
+  for (const key in files) if (key.toLowerCase() === target) return files[key];
+  return undefined;
+}
+
 // Upper bound on the append-only accepted[] log. Past this, the OLDEST records
 // are dropped first (they lose their "Revert Accepted" undo, but the recent
 // history a user actually acts on is always kept). The cap keeps the per-workspace

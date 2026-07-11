@@ -2,7 +2,7 @@ import * as assert from "assert";
 import {
   hasRealChange, shouldPruneNoOp, acceptEntry, rejectEntry, migrateSession,
   makeRecordId, Session, FileEntry, mergeFreshCaptures,
-  MAX_ACCEPTED_RECORDS, capAcceptedLog, capAcceptedBytes,
+  MAX_ACCEPTED_RECORDS, capAcceptedLog, capAcceptedBytes, fileEntryFor,
 } from "./reviewModel";
 
 function base(): Session {
@@ -445,6 +445,16 @@ console.log("ok - makeRecordId");
   assert.equal(capAcceptedBytes(s, 1_000_000), 0, "under budget → nothing dropped");
   assert.equal(s.accepted.length, 1);
   console.log("ok - capAcceptedBytes is a no-op under budget");
+}
+
+// fileEntryFor: drive-letter/case tolerance for URI-derived path lookups (Windows).
+{
+  const files: Record<string, FileEntry> = { "C:\\Foo\\Bar.ts": { originalContent: "x", reviewStatus: "pending" } };
+  assert.ok(fileEntryFor(files, "C:\\Foo\\Bar.ts", true), "exact match");
+  assert.ok(fileEntryFor(files, "c:\\foo\\bar.ts", true), "case-insensitive match (win32): lowercased drive/path still resolves");
+  assert.equal(fileEntryFor(files, "c:\\foo\\bar.ts", false), undefined, "case-sensitive (posix): differing case misses");
+  assert.equal(fileEntryFor(files, "C:\\Other.ts", true), undefined, "unknown path → undefined");
+  console.log("ok - fileEntryFor tolerates drive-letter case on win32");
 }
 
 console.log("done");

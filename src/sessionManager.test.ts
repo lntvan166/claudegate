@@ -462,5 +462,41 @@ function readSession(sp: string): any {
     console.log("ok - corrupt session file is logged, not silently swallowed");
   }
 
+  // clearSession archives to history/ then deletes the session file.
+  {
+    const { ws, sp, home } = newEnv();
+    const fp = path.join(ws, "c.ts");
+    fs.writeFileSync(fp, "NEW");
+    const sm = new SessionManager(fakeLog, ws);
+    sm.startWatching();
+    sm.trackFileChange(fp, "OLD");
+    assert.ok(fs.existsSync(sp), "session file exists before clear");
+    sm.clearSession();
+    assert.equal(sm.getSession(), null, "session cleared in memory");
+    assert.ok(!fs.existsSync(sp), "session file deleted");
+    const historyDir = path.join(home, ".claudegate", "history");
+    assert.ok(fs.existsSync(historyDir) && fs.readdirSync(historyDir).length >= 1, "archived a backup to history/");
+    sm.stopWatching();
+    console.log("ok - clearSession archives then deletes");
+  }
+
+  // clearSession must NOT destroy the session if the backup couldn't be written.
+  {
+    const { ws, sp, home } = newEnv();
+    const fp = path.join(ws, "d.ts");
+    fs.writeFileSync(fp, "NEW");
+    const sm = new SessionManager(fakeLog, ws);
+    sm.startWatching();
+    sm.trackFileChange(fp, "OLD");
+    // Block archiving: occupy the history directory path with a regular file so
+    // mkdir fails → archive fails.
+    fs.writeFileSync(path.join(home, ".claudegate", "history"), "not a dir");
+    sm.clearSession();
+    assert.ok(fs.existsSync(sp), "session file preserved when the backup fails");
+    assert.ok(sm.getSession(), "in-memory session preserved when the backup fails");
+    sm.stopWatching();
+    console.log("ok - clearSession aborts (no delete) when archive fails");
+  }
+
   console.log("done");
 })().catch((e) => { console.error(e); process.exit(1); });

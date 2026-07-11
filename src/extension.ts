@@ -40,13 +40,15 @@ function getActivePendingFilePath(managerFor: (p?: string) => SessionManager): s
     : undefined;
 }
 
-// Replaces the old yes/no revert confirm with an optional reason capture: the
-// input box IS the confirmation (submit = revert, Esc = cancel). Empty reason
+// Replaces the old yes/no reject confirm with an optional reason capture: the
+// input box IS the confirmation (submit = reject, Esc = cancel). Empty reason
 // is allowed. The reason feeds the "Feedback to AI" log via ReviewRecord.reason.
-async function promptRevertReason(basename: string): Promise<{ ok: boolean; reason?: string }> {
+// ("Reject" = discard Claude's change and restore the original; distinct from the
+// Accepted panel's "Revert to Pending", which un-accepts a kept file.)
+async function promptRejectReason(basename: string): Promise<{ ok: boolean; reason?: string }> {
   const input = await vscode.window.showInputBox({
-    title: `Revert "${basename}" to its original content`,
-    prompt: "Reason to feed back to AI (optional) — leave blank to just revert. Press Esc to cancel.",
+    title: `Reject "${basename}" — restore its original content`,
+    prompt: "Reason to feed back to AI (optional) — leave blank to just reject. Press Esc to cancel.",
     placeHolder: "e.g. don't drop legacyDropoff — still called by the batch job",
   });
   if (input === undefined) return { ok: false };          // Esc / dismissed → cancel
@@ -289,7 +291,7 @@ export function activate(context: vscode.ExtensionContext): void {
         async (item?: FileReviewItem | { filePath: string }) => {
           const filePath = item?.filePath ?? getActivePendingFilePath(managerFor);
           if (!filePath) return;
-          const { ok, reason } = await promptRevertReason(path.basename(filePath));
+          const { ok, reason } = await promptRejectReason(path.basename(filePath));
           if (ok) {
             managerFor(filePath).rejectFile(filePath, reason);
             await closeDiffEditor(filePath);
@@ -309,7 +311,7 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.commands.registerCommand("claudegate.rejectCurrent", async () => {
         const fp = getActivePendingFilePath(managerFor);
         if (!fp) return;
-        const { ok, reason } = await promptRevertReason(path.basename(fp));
+        const { ok, reason } = await promptRejectReason(path.basename(fp));
         if (!ok) return;
         managerFor(fp).rejectFile(fp, reason);
         await closeDiffEditor(fp);
@@ -338,11 +340,11 @@ export function activate(context: vscode.ExtensionContext): void {
             .map(([fp]) => fp);
           if (pendingFiles.length === 0) return;
           const answer = await vscode.window.showWarningMessage(
-            `Revert ${pendingFiles.length} file(s) in "${path.basename(item.folderPath)}" to their original content?`,
+            `Reject ${pendingFiles.length} file(s) in "${path.basename(item.folderPath)}"? This restores their original content.`,
             { modal: false },
-            "Revert"
+            "Reject"
           );
-          if (answer === "Revert") {
+          if (answer === "Reject") {
             mgr.rejectFolder(item.folderPath);
             await Promise.all(pendingFiles.map((fp) => closeDiffEditor(fp)));
           }
@@ -420,11 +422,11 @@ export function activate(context: vscode.ExtensionContext): void {
         const pending = sessionManager.getPendingCount();
         if (pending === 0) return;
         const answer = await vscode.window.showWarningMessage(
-          `Revert all ${pending} pending file(s) to their original content?`,
+          `Reject all ${pending} pending file(s)? This restores their original content.`,
           { modal: true },
-          "Revert All"
+          "Reject All"
         );
-        if (answer === "Revert All") {
+        if (answer === "Reject All") {
           const session = sessionManager.getSession();
           const files = session
             ? Object.entries(session.files).filter(
@@ -478,6 +480,17 @@ export function activate(context: vscode.ExtensionContext): void {
         const cur = vscode.workspace.getConfiguration("claudegate").get<boolean>("groupBySession", false);
         await updateClaudegateConfig("groupBySession", !cur);
       }),
+
+      vscode.commands.registerCommand("claudegate.toggleAutoAdvance", async () => {
+        const cur = vscode.workspace.getConfiguration("claudegate").get<boolean>("autoAdvance", true);
+        await updateClaudegateConfig("autoAdvance", !cur);
+      }),
+
+      vscode.commands.registerCommand("claudegate.verifyHook", () => hookInstaller.verify()),
+
+      vscode.commands.registerCommand("claudegate.openProtectedSettings", () =>
+        vscode.commands.executeCommand("workbench.action.openSettings", "claudegate.protected")
+      ),
 
       vscode.commands.registerCommand("claudegate.addExcludePattern", async () => {
         const input = await vscode.window.showInputBox({
