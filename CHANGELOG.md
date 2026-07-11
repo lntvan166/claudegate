@@ -7,6 +7,29 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.8.0] — 2026-07-12
+
+### Added
+
+- **A Session History panel — your cleared reviews are no longer gone for good.** *Clear Session* already archived the session to `~/.claudegate/history/`; now there's a dedicated **History** panel in the Claude Gate sidebar that shows those archives, each grouped by session and rendered as a **folder tree** of the files you accepted and rejected. It's **view-only** — click any record to open its diff — with **Clear History** (all) and per-session **delete** controls. The panel is workspace-scoped, so you only see the history for the project you're in, and it stays hidden until you have at least one archived session.
+- **Turn history off entirely.** A new **`claudegate.history.enabled`** setting (default on) — mirrored as a toggle row in the Settings panel — stops *Clear Session* from writing archives, for anyone who'd rather keep nothing on disk.
+- **A persistent hook-health indicator in the status bar.** When capture is broken — hook not installed, not registered in `settings.json`, out of date, or its trust invalidated by a mid-session settings edit — a `⚠ Claude Gate` chip now appears and *stays* until the problem is fixed, instead of a single dismissable toast you might miss. Clicking it jumps to Setup Hook or Verify Setup as appropriate; it clears the moment the hook is healthy again.
+- **An opt-in Hook Log for diagnosing "why wasn't this captured?".** A new **`claudegate.hookLog.enabled`** setting (default off, with a Settings row and **Toggle Hook Log** command) makes the capture hook append its per-edit decisions — `captured`, `skip-binary`, `skip-no-root`, `skip-unreadable`, `skip-already-pending`, `error` — to `~/.claudegate/hook.log`. **Open Hook Log** opens the file. It's a local, bounded (self-truncating ~1 MB) rolling debug aid — no network, no telemetry — and the hook stays fail-open even if logging itself fails.
+
+### Changed
+
+- **Verify Setup now shows a per-check breakdown.** Instead of a flat "all passed" / issue list, it reports each probe on its own line — `✓ hook.py installed`, `✗ registered — not in settings.json`, and so on — with a **Setup Hook** action when anything fails and an **Open Hook Log** action when the log is enabled.
+
+### Fixed
+
+- **A cosmetic re-save of `~/.claude/settings.json` no longer drops the hook-health warning.** A byte-identical rewrite (e.g. a formatter bumping the file's mtime) used to look like a settings change and could clear an active trust-invalidation signal while running sessions were still untrusted. The watcher now ignores a no-op rewrite and keeps the warning up until the hook is genuinely healthy again.
+
+### Notes
+
+- **Re-run `Claude Gate: Setup Hook` after updating.** This release changes `hooks/hook.py` (opt-in diagnostic logging); the updated hook is only picked up when you re-run Setup Hook.
+
+---
+
 ## [1.7.0] — 2026-07-11
 
 ### Added
