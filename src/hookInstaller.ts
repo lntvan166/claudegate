@@ -109,6 +109,26 @@ export interface HookStatus {
   upToDate: boolean;
 }
 
+export type HookHealth = "ok" | "not-installed" | "not-registered" | "stale" | "trust-invalidated";
+
+export interface VerifyCheck { label: string; ok: boolean; detail?: string; }
+
+// Map install status + the runtime trust-invalidation signal to one health
+// state. Install problems win (a missing hook can't be "trust-invalidated");
+// then registration; then a mid-session settings.json change; then staleness.
+export function hookHealthFrom(status: HookStatus, trustInvalidated: boolean): HookHealth {
+  if (!status.scriptInstalled) return "not-installed";
+  if (!status.registered) return "not-registered";
+  if (trustInvalidated) return "trust-invalidated";
+  if (!status.upToDate) return "stale";
+  return "ok";
+}
+
+export function buildVerifyReport(checks: VerifyCheck[]): { ok: boolean; lines: string[] } {
+  const lines = checks.map((c) => (c.ok ? `✓ ${c.label}` : `✗ ${c.label}${c.detail ? ` — ${c.detail}` : ""}`));
+  return { ok: checks.every((c) => c.ok), lines };
+}
+
 const HOOK_SYNC_NOTIFIED_KEY = "claudegate.hookSyncNotifiedForHash";
 const HOOK_SETTINGS_WARNED_KEY = "claudegate.hookSettingsWarned";
 
