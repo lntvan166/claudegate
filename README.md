@@ -12,6 +12,10 @@ Stop flying blind when Claude modifies your codebase. Claude Gate captures every
 
 ![Claude Gate in action](media/ClaudeGateDemo.png)
 
+**Review All Pending** — every pending change in one native multi-file diff (full syntax highlighting, word-level diffs). Click into a file, then ✓/✗ in the title bar or `Cmd+Enter` / `Cmd+Backspace`:
+
+![Review All Pending — native multi-diff](media/ReviewAllPending.png)
+
 ---
 
 ## Quick Start
