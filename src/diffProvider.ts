@@ -1,9 +1,11 @@
 import * as vscode from "vscode";
 import * as path from "path";
+import * as fs from "fs";
 import { diffLines } from "diff";
 import { SessionManager } from "./sessionManager";
 import { fileEntryFor } from "./reviewModel";
 import { countChanges, formatChangeCount } from "./changeCount";
+import { findArchiveRecord, HistoryRecordRef } from "./historyModel";
 
 export const SCHEME = "claudegate";
 
@@ -35,6 +37,14 @@ export class ClaudeGateContentProvider
     // Record URIs carry the real file path (so the editor infers the language
     // for syntax highlighting) plus a `rec` query identifying the record.
     const params = new URLSearchParams(uri.query);
+    const hist = params.get("hist");
+    if (hist) {
+      const raw = loadArchive(hist);
+      const rec = raw ? findArchiveRecord(raw, params.get("rec") ?? "") : null;
+      if (!rec) return "";
+      return (params.get("side") === "after" ? rec.after : rec.before) ?? "";
+    }
+
     const recId = params.get("rec");
     if (recId) {
       // Accepted/rejected records are shown only for the primary session.
@@ -69,6 +79,36 @@ export function recordUri(filePath: string, id: string, side: "before" | "after"
 
 export function originalUri(filePath: string): vscode.Uri {
   return vscode.Uri.file(filePath).with({ scheme: SCHEME });
+}
+
+// ─── History archives (view-only) ───────────────────────────────────────────
+// Archives are immutable once written, so a simple per-path cache is safe.
+const archiveCache = new Map<string, unknown>();
+function loadArchive(file: string): unknown | null {
+  if (archiveCache.has(file)) return archiveCache.get(file)!;
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, "utf-8"));
+    archiveCache.set(file, raw);
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
+// URI keeps the real file path so the editor picks the right language; `hist`
+// + `rec` route content resolution to the archive instead of the live session.
+export function historyRecordUri(archiveFile: string, rec: { id: string; path: string }, side: "before" | "after"): vscode.Uri {
+  const q = new URLSearchParams({ hist: archiveFile, rec: rec.id, side });
+  return vscode.Uri.file(rec.path).with({ scheme: SCHEME, query: q.toString() });
+}
+
+export async function openHistoryRecord(archiveFile: string, rec: HistoryRecordRef): Promise<void> {
+  await vscode.commands.executeCommand(
+    "vscode.diff",
+    historyRecordUri(archiveFile, rec, "before"),
+    historyRecordUri(archiveFile, rec, "after"),
+    `Claude Gate (history): ${path.basename(rec.path)} (${rec.kind})`
+  );
 }
 
 // ─── Open diff ───────────────────────────────────────────────────────────────
