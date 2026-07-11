@@ -251,6 +251,11 @@
         "icon": "$(diff-multiple)"
       },
       {
+        "command": "claudegate.reviewChangesPanel",
+        "title": "Claude Gate: Review Changes (Panel — beta)",
+        "icon": "$(preview)"
+      },
+      {
         "command": "claudegate.openWorktreeWindow",
         "title": "Open Worktree in New Window",
         "category": "Claude Gate",
@@ -567,6 +572,11 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "Group the review panels by the Claude Code session that produced each change (useful when several sessions run in one workspace). Requires re-running **Setup Hook** so the hook records session ids. Files captured before the update, or by the GUI file watcher, appear under \"Unknown session\"."
+        },
+        "claudegate.reviewPanel.enabled": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Enable the experimental all-in-one **Review Changes** webview panel (per-file keep/reject with notes + Feedback to AI). Off by default; the native multi-file diff (`Review All Pending`) remains the standard review surface."
         }
       }
     },

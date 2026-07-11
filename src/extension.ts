@@ -17,6 +17,7 @@ import { SettingsTreeProvider, SettingsItem } from "./settingsPanel";
 import { ClaudeGateContentProvider, SCHEME, openReviewRecord, originalUri } from "./diffProvider";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
 import { DocumentTracker } from "./documentTracker";
+import { ReviewWebviewPanel } from "./reviewWebview";
 import { persistWorkspaceRoots } from "./workspaceRoots";
 import { isInWorkspace, isExcluded, isProtected, setExcludeMatcher, setProtectedMatcher } from "./workspaceScope";
 import { ExcludeMatcher, DEFAULT_EXCLUDES } from "./excludeMatcher";
@@ -566,6 +567,10 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         await openPendingMultiDiff(paths);
       }),
+
+      vscode.commands.registerCommand("claudegate.reviewChangesPanel", () =>
+        ReviewWebviewPanel.showOrReveal(context, sessionManager, worktreeRegistry)
+      ),
 
       vscode.commands.registerCommand(
         "claudegate.openWorktreeWindow",
