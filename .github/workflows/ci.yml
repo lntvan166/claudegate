@@ -6,6 +6,15 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least privilege: this workflow only reads the repo and uploads an artifact.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref so a busy PR doesn't burn 3-OS matrix minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     strategy:
@@ -13,6 +22,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -39,6 +49,7 @@ jobs:
   package:
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
