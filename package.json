@@ -201,6 +201,15 @@
         "title": "Claude Gate: Verify Setup"
       },
       {
+        "command": "claudegate.openHookLog",
+        "title": "Claude Gate: Open Hook Log",
+        "icon": "$(output)"
+      },
+      {
+        "command": "claudegate.toggleHookLog",
+        "title": "Claude Gate: Toggle Hook Log"
+      },
+      {
         "command": "claudegate.openProtectedSettings",
         "title": "Claude Gate: Edit Protected Patterns"
       },
@@ -615,6 +624,11 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Archive the session to `~/.claudegate/history/` when you run **Clear Session**, so past reviews stay browsable in the History panel. When disabled, Clear Session permanently deletes the review log."
+        },
+        "claudegate.hookLog.enabled": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Write a diagnostic log of the capture hook's decisions to `~/.claudegate/hook.log` (captured / skipped / errors). Useful when Claude's edits aren't being captured. Off by default; the log is a bounded rolling file, kept local."
         }
       }
     },
