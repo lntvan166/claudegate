@@ -18,6 +18,7 @@ import { ClaudeGateContentProvider, SCHEME, openReviewRecord, originalUri } from
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
 import { DocumentTracker } from "./documentTracker";
 import { sessionFeedbackItems, buildFeedbackText } from "./reviewFeedback";
+import { fileEntryFor } from "./reviewModel";
 import { persistWorkspaceRoots } from "./workspaceRoots";
 import { isInWorkspace, isExcluded, isProtected, setExcludeMatcher, setProtectedMatcher } from "./workspaceScope";
 import { ExcludeMatcher, DEFAULT_EXCLUDES } from "./excludeMatcher";
@@ -34,9 +35,12 @@ function getActivePendingFilePath(managerFor: (p?: string) => SessionManager): s
   if (!filePath) return undefined;
   if (!isInWorkspace(filePath) || isExcluded(filePath)) return undefined;
   // Resolve the owning session (primary or the worktree the file belongs to).
+  // Case-tolerant lookup: the editor URI's drive-letter case can differ from
+  // the hook-stored session key on Windows (fileEntryFor handles it).
   const mgr = managerFor(filePath);
-  return mgr.getSession()?.files[filePath]?.reviewStatus === "pending" &&
-    mgr.hasRealPendingChange(filePath)
+  const session = mgr.getSession();
+  const entry = session ? fileEntryFor(session.files, filePath) : undefined;
+  return entry?.reviewStatus === "pending" && mgr.hasRealPendingChange(filePath)
     ? filePath
     : undefined;
 }
@@ -53,7 +57,7 @@ async function promptRejectReason(basename: string): Promise<{ ok: boolean; reas
     placeHolder: "e.g. don't drop legacyDropoff — still called by the batch job",
   });
   if (input === undefined) return { ok: false };          // Esc / dismissed → cancel
-  return { ok: true, reason: input.trim() || undefined }; // submitted (empty allowed) → revert
+  return { ok: true, reason: input.trim() || undefined }; // submitted (empty allowed) → reject
 }
 
 // Modal confirmation for a bulk action that clears history or rewrites many files
@@ -598,7 +602,6 @@ export function activate(context: vscode.ExtensionContext): void {
         await vscode.env.clipboard.writeText(buildFeedbackText(items));
         vscode.window.showInformationMessage("Claude Gate: review feedback copied to clipboard.");
       }),
-
 
       vscode.commands.registerCommand(
         "claudegate.openWorktreeWindow",

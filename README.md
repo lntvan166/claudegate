@@ -4,7 +4,7 @@
 
 Stop flying blind when Claude modifies your codebase. Claude Gate captures every file change before it happens and surfaces each one as a structured diff — the same accept/reject workflow as Cursor's native AI review, but for Claude Code running in any terminal.
 
-> **Note:** Claude Gate supports two modes: the **Claude Code terminal CLI** (`claude` command) via pre-installed hooks, and the **Claude Code VS Code/Cursor GUI extension** via automatic file change detection. GUI mode works best in "pure sessions" where Claude makes changes and you review before editing further — all file changes during a GUI session are captured for review.
+> **Note:** the `PreToolUse` hook captures **all Claude Code edits** — both the terminal CLI (`claude` command) and the in-editor VS Code/Cursor extension run the same hook. An optional filesystem watcher (off by default) exists only as a fallback for **non-Claude** agents like Cursor Composer or Codex.
 
 ---
 
@@ -39,14 +39,14 @@ Use `claude` in your terminal as usual. When Claude modifies files, Claude Gate 
 
 1. The **Claude Gate** icon in the Activity Bar shows three panels: **Pending**, **Accepted**, and **Rejected**
 2. Click any pending file to open VS Code's native diff editor — original on the left, Claude's version on the right
-3. **✓ Accept** and **✕ Reject** inline links appear at the top of the diff — one click, done
+3. **✓ Accept** and **✕ Reject** buttons appear in the editor title bar — one click, done
 4. Accepted files move to the Accepted panel; rejected files are restored to their original content
 5. **Review All Pending** — click the multi-file diff button in the Pending panel title bar (or run `Claude Gate: Review All Pending`) to open every pending change in one scrollable multi-diff tab.
 
 ### The Three Panels
 
 - **Pending** — Files with a real unreviewed change awaiting your decision. Once a file is accepted or rejected, it is removed from Pending. If you later re-edit an already-approved file, a new Pending entry appears with the fresh change.
-- **Accepted** — A persistent log of every file you approved. Each entry shows the diff you accepted (original → approved version). Reversible via **Un-accept** link or right-click menu; un-accepting moves the file back to Pending with the frozen original baseline.
+- **Accepted** — A persistent log of every file you approved. Each entry shows the diff you accepted (original → approved version). Reversible via **Revert to Pending** (inline button or right-click); reverting moves the file back to Pending with the frozen original baseline.
 - **Rejected** — Stores the latest rejected change **per file**. If you reject a file, discard the proposed change, then Claude edits it again, the newer edit replaces the stored rejection. Re-apply a rejected change via the **Re-apply** link or right-click menu, which restores the proposed content to the file and moves it back to Pending.
 
 ### Reviewing with the keyboard
@@ -69,7 +69,7 @@ With a ClaudeGate diff focused, press **Cmd+Enter** to accept or **Cmd+Backspace
 - **Exclude patterns** — `claudegate.exclude` globs (or a folder name) hide generated files from review, non-destructively
 - **Group by session** — optionally group the panels by the Claude session that made each change, for parallel sessions in one workspace
 - **Row file actions** — right-click for Open File, Reveal in Explorer, Copy Path, and Add to Claude Chat
-- **Accept/Reject CodeLens** — inline action links at the top of any pending file, in the diff view and the regular editor
+- **Accept/Reject in the editor title bar** — ✓/✗ buttons appear on any pending file's diff or editor tab, so you can decide without leaving the code
 - **Folder-level actions** — accept or reject an entire directory at once (tree view mode)
 - **Undo your decisions** — re-apply Claude's changes from the Rejected panel; un-accept files back to Pending
 - **Workspace-aware filtering** — files modified outside the current workspace (e.g. `~/.claude/settings.json`) are hidden from the review panel

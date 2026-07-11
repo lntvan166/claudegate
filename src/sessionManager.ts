@@ -7,6 +7,7 @@ import { isInWorkspace, isExcluded } from "./workspaceScope";
 import {
   Session, FileEntry, ReviewRecord, hasRealChange, shouldPruneNoOp, acceptEntry,
   rejectEntry, migrateSession, mergeFreshCaptures, MergeGuards, capAcceptedBytes,
+  fileEntryFor,
 } from "./reviewModel";
 export type { Session, FileEntry, ReviewRecord } from "./reviewModel";
 export type ReviewStatus = "pending" | "accepted" | "rejected"; // panel tab id
@@ -107,8 +108,10 @@ export class SessionManager {
 
   // A pending entry is a "real" change unless its baseline already equals the
   // current disk content (a no-op edit, or an edit that was undone by hand).
+  // Case-tolerant lookup (fileEntryFor): callers may pass URI-derived paths
+  // whose drive-letter case differs from the hook-stored key on Windows.
   hasRealPendingChange(filePath: string): boolean {
-    const entry = this.session?.files[filePath];
+    const entry = this.session ? fileEntryFor(this.session.files, filePath) : undefined;
     if (!entry) return false;
     return hasRealChange(entry.originalContent, this.readFileOrNull(filePath));
   }

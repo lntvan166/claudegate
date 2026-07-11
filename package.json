@@ -327,6 +327,11 @@
           "group": "navigation@5"
         },
         {
+          "command": "claudegate.copyReviewFeedback",
+          "when": "view == claudegate.pendingPanel",
+          "group": "navigation@6"
+        },
+        {
           "command": "claudegate.revertAcceptedAll",
           "when": "view == claudegate.acceptedPanel && claudegate.acceptedCount > 0",
           "group": "navigation@1"
