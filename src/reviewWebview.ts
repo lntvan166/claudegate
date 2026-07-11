@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import { SessionManager } from "./sessionManager";
 import { WorktreeSessionRegistry } from "./worktreeSessionRegistry";
-import { buildReviewModel, buildReviewPayload, buildFeedbackText, ReviewItemInput } from "./reviewWebviewModel";
+import { buildReviewPayload, buildFeedbackText, ReviewItemInput } from "./reviewWebviewModel";
 import { isInWorkspace, isExcluded, isProtected } from "./workspaceScope";
 
 export class ReviewWebviewPanel {

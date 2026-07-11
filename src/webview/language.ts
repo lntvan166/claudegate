@@ -1,7 +1,7 @@
 // Map a file path to a refractor (Prism) language id for syntax highlighting.
 // Unknown extensions fall back to "text" (no highlighting, still renders).
 const EXT_TO_LANG: Record<string, string> = {
-  ts: "typescript", tsx: "tsx", js: "javascript", jsx: "jsx", mjs: "javascript", cjs: "javascript",
+  ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript", mjs: "javascript", cjs: "javascript",
   json: "json", md: "markdown", py: "python", rb: "ruby", go: "go", rs: "rust",
   java: "java", c: "c", h: "c", cpp: "cpp", cc: "cpp", cs: "csharp", php: "php",
   sh: "bash", bash: "bash", zsh: "bash", yml: "yaml", yaml: "yaml", toml: "toml",
