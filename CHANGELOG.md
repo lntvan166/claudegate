@@ -7,6 +7,31 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.7.0] — 2026-07-11
+
+### Added
+
+- **"Copy Feedback to AI" — export your review decisions in one click.** A new command (and 💬 button on the Pending panel title bar) copies a paste-ready summary of everything you kept, everything you rejected (with the reasons you attached), and what's still pending — across the main workspace and any nested git worktrees. Paste it back to Claude so your agent knows exactly what to keep and what to redo differently.
+- **A "Get Started" walkthrough.** New installs get a proper three-step walkthrough (Setup Hook → Verify → Review) in VS Code's Welcome area instead of a chain of one-shot notification toasts.
+- **The Settings panel now covers more of the extension.** Three new rows: an **Auto-advance** toggle (whether the next pending diff opens automatically after a keyboard accept/reject), a **Protected Files** row showing your sensitive-file globs with one-click access to edit them, and a persistent **Verify Setup** health check (previously reachable only from a transient toast).
+- **A one-time tip in Review All Pending.** The multi-file diff's per-file actions are focus-based — click into a file's pane, then use the ✓/✗ title-bar buttons or `Ctrl/Cmd+Enter` / `Ctrl/Cmd+Backspace` — and nothing on screen said so. The first time you open the view, a notice now explains it.
+
+### Fixed
+
+- **Windows: accept/reject buttons can no longer vanish on a drive-letter case mismatch.** File paths coming from the editor (e.g. `c:\…`) can differ in case from the session's stored key (`C:\…`); lookups along the active-editor and diff paths are now case-tolerant on Windows, so the diff always shows its original side and the title-bar ✓/✗ always appear for a pending file.
+- **Clear Session can no longer destroy your review history if its backup fails.** Clearing first archives the session to `~/.claudegate/history/`; if that copy cannot be written, the clear now aborts with an explanation instead of deleting the only copy.
+- **"Reject" is called Reject everywhere.** The reject flow's prompts used to say "Revert", colliding with the Accepted panel's separate "Revert to Pending" (un-accept) action. One name per action now.
+
+### Changed
+
+- **The experimental all-in-one "Review Changes" panel is gone — the native multi-file diff is the answer.** We built a full webview-based review panel this cycle (Preact + a dedicated diff renderer) and retired it after evaluation: VS Code's native multi-diff already gives 100% editor fidelity — real syntax highlighting, word-level diffs, go-to-definition — that no webview can match, and per-file decisions work in it today via the focus-based actions above. Nothing webview-based ships in this release, and the README no longer describes features that don't exist (the "CodeLens" wording now correctly says title-bar buttons).
+
+### Internal
+
+- Dead `.vsixignore` file removed from the package (vsce reads `.vscodeignore`); dependency tree back to a single runtime dependency (`diff`).
+
+---
+
 ## [1.6.1] — 2026-07-11
 
 ### Changed
