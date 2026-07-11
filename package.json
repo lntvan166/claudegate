@@ -251,6 +251,11 @@
         "icon": "$(diff-multiple)"
       },
       {
+        "command": "claudegate.copyReviewFeedback",
+        "title": "Claude Gate: Copy Feedback to AI",
+        "icon": "$(comment)"
+      },
+      {
         "command": "claudegate.reviewChangesPanel",
         "title": "Claude Gate: Review Changes (Panel — beta)",
         "icon": "$(preview)"

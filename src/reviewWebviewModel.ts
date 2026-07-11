@@ -5,6 +5,7 @@
 // The actual diff is shown in VS Code's native diff editor (see diffProvider),
 // so this model never produces rendered diff content — only summary metadata.
 import { countChanges } from "./changeCount";
+import type { Session } from "./reviewModel";
 
 export interface ReviewItemInput {
   relPath: string;                       // workspace-relative, '/'-separated (display + feedback)
@@ -92,6 +93,31 @@ export function buildReviewPayload(
   });
   const reviewedCount = items.filter((i) => i.status !== "pending").length;
   return { files, reviewedCount, totalCount: items.length };
+}
+
+// Build feedback items straight from a Session — used by the "Copy Feedback to
+// AI" command so the feedback log works without the webview being open. Status
+// precedence per path mirrors the webview's items(): a currently-pending entry
+// wins, else the latest reject, else the latest accept. `relPath` maps absolute
+// session paths for display; `inScope` filters out-of-workspace/excluded paths.
+export function sessionFeedbackItems(
+  session: Session,
+  relPath: (absPath: string) => string,
+  inScope: (absPath: string) => boolean
+): ReviewItemInput[] {
+  const byPath = new Map<string, ReviewItemInput>();
+  const add = (abs: string, status: "pending" | "kept" | "undone", reason?: string) => {
+    if (!inScope(abs) || byPath.has(abs)) return;
+    byPath.set(abs, {
+      relPath: relPath(abs), before: null, after: null, status,
+      isNew: false, isProtected: false, ...(reason ? { reason } : {}),
+    });
+  };
+  for (const abs of Object.keys(session.files)) add(abs, "pending");
+  for (const [abs, rec] of Object.entries(session.rejected)) add(abs, "undone", rec.reason);
+  // accepted[] is append-only; iterate newest-first so the latest record wins.
+  for (const rec of [...session.accepted].reverse()) add(rec.path, "kept");
+  return [...byPath.values()];
 }
 
 export function buildFeedbackText(items: ReviewItemInput[]): string {

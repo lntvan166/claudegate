@@ -1,7 +1,9 @@
 import assert from "node:assert";
 import {
   buildReviewModel, buildFeedbackText, buildReviewPayload, ReviewItemInput,
+  sessionFeedbackItems,
 } from "./reviewWebviewModel";
+import type { Session } from "./reviewModel";
 
 function run(name: string, fn: () => void): void {
   try { fn(); console.log("ok -", name); }
@@ -70,6 +72,32 @@ run("buildReviewPayload passes before/after through and computes counts/flags", 
   assert.equal(files.find(f => f.relPath === "gone.ts")!.missing, true);
   assert.equal(files.find(f => f.relPath === "same.ts")!.noChange, true);
   assert.equal(files.find(f => f.relPath === "k.ts")!.isProtected, true);
+});
+
+run("sessionFeedbackItems maps pending/accepted/rejected into feedback items", () => {
+  const session: Session = {
+    sessionId: "s", status: "active",
+    files: { "/ws/a.ts": { originalContent: "x", reviewStatus: "pending" } },
+    accepted: [
+      { id: "1::/ws/k.ts", path: "/ws/k.ts", before: "a", after: "b", decidedAt: "t1" },
+      { id: "2::/out/skip.ts", path: "/out/skip.ts", before: "a", after: "b", decidedAt: "t2" },
+    ],
+    rejected: {
+      "/ws/r.ts": { id: "3::/ws/r.ts", path: "/ws/r.ts", before: "a", after: "b", decidedAt: "t3", reason: "why" },
+    },
+  };
+  const items = sessionFeedbackItems(session, (p) => p.replace("/ws/", ""), (p) => p.startsWith("/ws/"));
+  const by = (rp: string) => items.find((i) => i.relPath === rp)!;
+  assert.equal(by("a.ts").status, "pending");
+  assert.equal(by("k.ts").status, "kept");
+  assert.equal(by("r.ts").status, "undone");
+  assert.equal(by("r.ts").reason, "why", "reject reason carried into feedback");
+  assert.ok(!items.some((i) => i.relPath.includes("skip")), "out-of-scope paths filtered");
+  // the feedback text builder consumes these directly
+  const text = buildFeedbackText(items);
+  assert.ok(text.includes("KEPT:\n- k.ts"));
+  assert.ok(text.includes("- r.ts — why"));
+  assert.ok(text.includes("Still reviewing:\n- a.ts"));
 });
 
 console.log("done");

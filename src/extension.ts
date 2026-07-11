@@ -18,6 +18,7 @@ import { ClaudeGateContentProvider, SCHEME, openReviewRecord, originalUri } from
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
 import { DocumentTracker } from "./documentTracker";
 import { ReviewWebviewPanel } from "./reviewWebview";
+import { sessionFeedbackItems, buildFeedbackText } from "./reviewWebviewModel";
 import { persistWorkspaceRoots } from "./workspaceRoots";
 import { isInWorkspace, isExcluded, isProtected, setExcludeMatcher, setProtectedMatcher } from "./workspaceScope";
 import { ExcludeMatcher, DEFAULT_EXCLUDES } from "./excludeMatcher";
@@ -566,6 +567,37 @@ export function activate(context: vscode.ExtensionContext): void {
           return;
         }
         await openPendingMultiDiff(paths);
+        // One-time discoverability hint: the per-file actions in this view are
+        // focus-based (click into a file's pane), which nothing on screen says.
+        const HINT_KEY = "claudegate.multiDiffHintShown";
+        if (!context.globalState.get<boolean>(HINT_KEY)) {
+          void context.globalState.update(HINT_KEY, true);
+          vscode.window.showInformationMessage(
+            "Claude Gate: click into a file's diff, then use the ✓/✗ title buttons — or " +
+            "⌘Enter to keep and ⌘⌫ to reject (asks for an optional note). " +
+            "Run “Copy Feedback to AI” anytime to export your decisions."
+          );
+        }
+      }),
+
+      vscode.commands.registerCommand("claudegate.copyReviewFeedback", async () => {
+        // Aggregate the review log across the primary session and every attached
+        // worktree, in workspace scope, and copy the AI-ready summary.
+        const items = allManagers().flatMap((mgr) => {
+          const s = mgr.getSession();
+          if (!s) return [];
+          return sessionFeedbackItems(
+            s,
+            (abs) => vscode.workspace.asRelativePath(abs, false).split(/[\\/]/).join("/"),
+            (abs) => isInWorkspace(abs) && !isExcluded(abs)
+          );
+        });
+        if (items.length === 0) {
+          vscode.window.showInformationMessage("Claude Gate: nothing reviewed yet — no feedback to copy.");
+          return;
+        }
+        await vscode.env.clipboard.writeText(buildFeedbackText(items));
+        vscode.window.showInformationMessage("Claude Gate: review feedback copied to clipboard.");
       }),
 
       vscode.commands.registerCommand("claudegate.reviewChangesPanel", () =>
