@@ -20,6 +20,7 @@ function newEnv() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cg-home-"));
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), "cg-ws-"));
   process.env.HOME = home; // SessionManager reads os.homedir() → $HOME on POSIX
+  process.env.USERPROFILE = home; // Windows: os.homedir() reads USERPROFILE, not $HOME
   return { home, ws, sp: sessionPathFor(home, ws) };
 }
 function readSession(sp: string): any {
