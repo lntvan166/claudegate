@@ -19,16 +19,34 @@ export class HistorySessionItem extends vscode.TreeItem {
   }
 }
 
+// A directory node grouping records under `folderPath` within one archive
+// (tree view). Its children are re-derived in getChildren from the archive's
+// record set, so the item stays cheap.
+export class HistoryFolderItem extends vscode.TreeItem {
+  constructor(
+    public readonly archiveFile: string,
+    public readonly folderPath: string
+  ) {
+    super(path.basename(folderPath), vscode.TreeItemCollapsibleState.Expanded);
+    this.resourceUri = vscode.Uri.file(folderPath);
+    this.iconPath = new vscode.ThemeIcon("folder");
+    this.contextValue = "claudegate.historyFolder";
+  }
+}
+
 export class HistoryRecordItem extends vscode.TreeItem {
   constructor(
     public readonly archiveFile: string,
     public readonly record: HistoryRecordRef,
     workspaceRoot: string | null
   ) {
-    super(workspaceRoot ? path.relative(workspaceRoot, record.path) : record.path);
+    // Leaf label is the basename — the folder ancestry gives the path context;
+    // the full workspace-relative path lives in the tooltip.
+    super(path.basename(record.path));
+    const rel = workspaceRoot ? path.relative(workspaceRoot, record.path) : record.path;
     this.iconPath = new vscode.ThemeIcon(record.kind === "kept" ? "check" : "close");
     this.description = record.kind;
-    this.tooltip = record.reason ? `${record.kind} — ${record.reason}` : record.kind;
+    this.tooltip = `${rel} — ${record.kind}${record.reason ? ` — ${record.reason}` : ""}`;
     this.command = {
       command: "claudegate.openHistoryRecord",
       title: "Open History Diff",
@@ -37,7 +55,7 @@ export class HistoryRecordItem extends vscode.TreeItem {
   }
 }
 
-type Item = HistorySessionItem | HistoryRecordItem;
+type Item = HistorySessionItem | HistoryFolderItem | HistoryRecordItem;
 
 export class HistoryTreeProvider implements vscode.TreeDataProvider<Item> {
   private readonly _onDidChangeTreeData = new vscode.EventEmitter<void>();
@@ -97,8 +115,42 @@ export class HistoryTreeProvider implements vscode.TreeDataProvider<Item> {
   getChildren(element?: Item): Item[] {
     if (!element) return this.summaries.map((s) => new HistorySessionItem(s));
     if (element instanceof HistorySessionItem) {
-      return element.summary.records.map((r) => new HistoryRecordItem(element.summary.file, r, this.workspaceRoot));
+      // Top of a session's tree: group its records under the workspace root.
+      return this.directChildren(element.summary.records, this.workspaceRoot ?? "", element.summary.file);
+    }
+    if (element instanceof HistoryFolderItem) {
+      const summary = this.summaries.find((s) => s.file === element.archiveFile);
+      if (!summary) return [];
+      const under = summary.records.filter((r) => r.path.startsWith(element.folderPath + path.sep));
+      return this.directChildren(under, element.folderPath, element.archiveFile);
     }
     return [];
+  }
+
+  // One level of the folder tree: records directly in `parentPath` become leaves;
+  // deeper records collapse into a folder node for their next path segment
+  // (folders first, then files — the same shape as the Pending/Accepted panels).
+  // With no workspace root, or a record that isn't under parentPath, we can't
+  // form a sensible relative path, so the record renders as a flat leaf.
+  private directChildren(records: HistoryRecordRef[], parentPath: string, archiveFile: string): Item[] {
+    const folders: HistoryFolderItem[] = [];
+    const leaves: HistoryRecordItem[] = [];
+    const seen = new Set<string>();
+    for (const r of records) {
+      const rel = parentPath ? path.relative(parentPath, r.path) : r.path;
+      const parts = rel.split(path.sep);
+      if (!parentPath || parts.length === 1 || rel.startsWith("..")) {
+        leaves.push(new HistoryRecordItem(archiveFile, r, this.workspaceRoot));
+      } else {
+        const folderPath = path.join(parentPath, parts[0]);
+        if (!seen.has(folderPath)) {
+          seen.add(folderPath);
+          folders.push(new HistoryFolderItem(archiveFile, folderPath));
+        }
+      }
+    }
+    folders.sort((a, b) => a.folderPath.localeCompare(b.folderPath));
+    // records keep the summary's order (newest accept first, then rejected)
+    return [...folders, ...leaves];
   }
 }
