@@ -64,6 +64,11 @@
           "when": "claudegate.rejectedCount > 0"
         },
         {
+          "id": "claudegate.historyPanel",
+          "name": "History",
+          "when": "claudegate.historyCount > 0"
+        },
+        {
           "id": "claudegate.settingsPanel",
           "name": "Settings"
         }
@@ -260,6 +265,20 @@
         "title": "Open Worktree in New Window",
         "category": "Claude Gate",
         "icon": "$(empty-window)"
+      },
+      {
+        "command": "claudegate.clearHistory",
+        "title": "Claude Gate: Clear History",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "claudegate.deleteHistorySession",
+        "title": "Delete Archived Session",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "claudegate.toggleHistoryEnabled",
+        "title": "Claude Gate: Toggle Session History"
       }
     ],
     "menus": {
@@ -350,6 +369,11 @@
           "command": "claudegate.clearRejected",
           "when": "view == claudegate.rejectedPanel && claudegate.rejectedCount > 0",
           "group": "navigation@2"
+        },
+        {
+          "command": "claudegate.clearHistory",
+          "when": "view == claudegate.historyPanel && claudegate.historyCount > 0",
+          "group": "navigation@1"
         }
       ],
       "view/item/context": [
@@ -431,6 +455,11 @@
         {
           "command": "claudegate.openWorktreeWindow",
           "when": "view == claudegate.pendingPanel && viewItem == claudegate.worktreeGroup",
+          "group": "inline@1"
+        },
+        {
+          "command": "claudegate.deleteHistorySession",
+          "when": "view == claudegate.historyPanel && viewItem == claudegate.historySession",
           "group": "inline@1"
         }
       ],
@@ -514,6 +543,10 @@
         {
           "command": "claudegate.openWorktreeWindow",
           "when": "false"
+        },
+        {
+          "command": "claudegate.deleteHistorySession",
+          "when": "false"
         }
       ]
     },
@@ -577,6 +610,11 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "Group the review panels by the Claude Code session that produced each change (useful when several sessions run in one workspace). Requires re-running **Setup Hook** so the hook records session ids. Files captured before the update, or by the GUI file watcher, appear under \"Unknown session\"."
+        },
+        "claudegate.history.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Archive the session to `~/.claudegate/history/` when you run **Clear Session**, so past reviews stay browsable in the History panel. When disabled, Clear Session permanently deletes the review log."
         }
       }
     },

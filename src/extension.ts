@@ -14,7 +14,9 @@ import {
 import { WorktreeSessionRegistry } from "./worktreeSessionRegistry";
 import { HookInstaller } from "./hookInstaller";
 import { SettingsTreeProvider, SettingsItem } from "./settingsPanel";
-import { ClaudeGateContentProvider, SCHEME, openReviewRecord, originalUri } from "./diffProvider";
+import { ClaudeGateContentProvider, SCHEME, openReviewRecord, openHistoryRecord, originalUri } from "./diffProvider";
+import { HistoryTreeProvider, HistorySessionItem } from "./historyPanel";
+import { formatBytes } from "./historyModel";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
 import { DocumentTracker } from "./documentTracker";
 import { sessionFeedbackItems, buildFeedbackText } from "./reviewFeedback";
@@ -239,6 +241,21 @@ export function activate(context: vscode.ExtensionContext): void {
     });
     context.subscriptions.push(settingsView);
 
+    // ── History panel (view-only archives from Clear Session) ───────────────
+    const historyProvider = new HistoryTreeProvider(workspacePath ?? null);
+    historyProvider.start();
+    const historyView = vscode.window.createTreeView("claudegate.historyPanel", {
+      treeDataProvider: historyProvider,
+    });
+    const updateHistoryContext = () =>
+      vscode.commands.executeCommand("setContext", "claudegate.historyCount", historyProvider.getCount());
+    context.subscriptions.push(
+      historyView,
+      { dispose: () => historyProvider.stop() },
+      historyProvider.onDidChangeTreeData(updateHistoryContext)
+    );
+    updateHistoryContext();
+
     const openNextPending = async (): Promise<void> => {
       const session = sessionManager.getSession();
       const next = session
@@ -270,14 +287,15 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.commands.registerCommand("claudegate.clearSession", async () => {
         const s = sessionManager.getSession();
         if (!s) return;
+        const historyOn = vscode.workspace.getConfiguration("claudegate").get<boolean>("history.enabled", true);
         const pending = Object.keys(s.files).length;
-        if (!(await confirmBulk(
-          pending > 0
-            ? `Clear this review session? ${pending} pending change(s) will stop being tracked (files on disk are left as-is).`
-            : "Clear this review session, including its accepted/rejected history?",
-          "Clear Session"
-        ))) return;
-        sessionManager.clearSession();
+        const base = pending > 0
+          ? `Clear this review session? ${pending} pending change(s) will stop being tracked (files on disk are left as-is).`
+          : "Clear this review session, including its accepted/rejected history?";
+        const message = historyOn ? base : `${base}\n\nHistory saving is off — this permanently deletes the review log.`;
+        if (!(await confirmBulk(message, "Clear Session"))) return;
+        sessionManager.clearSession({ archive: historyOn });
+        historyProvider.refresh();
       }),
 
       // ── Pending file actions ──
@@ -614,6 +632,42 @@ export function activate(context: vscode.ExtensionContext): void {
           );
         }
       ),
+
+      // ── History panel actions ──
+      vscode.commands.registerCommand("claudegate.clearHistory", async () => {
+        const files = historyProvider.matchingFiles();
+        if (files.length === 0) {
+          vscode.window.showInformationMessage("Claude Gate: no archived sessions for this workspace.");
+          return;
+        }
+        if (!(await confirmBulk(
+          `Permanently delete ${files.length} archived session(s) (${formatBytes(historyProvider.totalBytes())})? This cannot be undone.`,
+          "Delete History"
+        ))) return;
+        for (const f of files) {
+          try { fs.unlinkSync(f); } catch (err) { log.appendLine(`[WARN] clearHistory: ${(err as Error).message}`); }
+        }
+        historyProvider.refresh();
+        vscode.window.showInformationMessage(`Claude Gate: deleted ${files.length} archived session(s).`);
+      }),
+
+      vscode.commands.registerCommand("claudegate.deleteHistorySession", async (item: HistorySessionItem) => {
+        if (!item?.summary) return;
+        if (!(await confirmBulk(`Delete archived session "${item.summary.label}"? This cannot be undone.`, "Delete"))) return;
+        try { fs.unlinkSync(item.summary.file); } catch (err) {
+          vscode.window.showErrorMessage(`Claude Gate: could not delete the archive — ${(err as Error).message}`);
+        }
+        historyProvider.refresh();
+      }),
+
+      vscode.commands.registerCommand("claudegate.openHistoryRecord", (archiveFile: string, rec: any) =>
+        openHistoryRecord(archiveFile, rec)
+      ),
+
+      vscode.commands.registerCommand("claudegate.toggleHistoryEnabled", async () => {
+        const cur = vscode.workspace.getConfiguration("claudegate").get<boolean>("history.enabled", true);
+        await updateClaudegateConfig("history.enabled", !cur);
+      }),
     );
 
     registerOpenDiff(context, managerFor);

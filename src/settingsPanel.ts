@@ -5,6 +5,7 @@ type SettingsKind =
   | "watcher"
   | "groupBySession"
   | "autoAdvance"
+  | "history"
   | "excludeHeader"
   | "excludePattern"
   | "excludeAdd"
@@ -32,7 +33,8 @@ export class SettingsTreeProvider implements vscode.TreeDataProvider<SettingsIte
           e.affectsConfiguration("claudegate.protected") ||
           e.affectsConfiguration("claudegate.fileWatcher.enabled") ||
           e.affectsConfiguration("claudegate.groupBySession") ||
-          e.affectsConfiguration("claudegate.autoAdvance")
+          e.affectsConfiguration("claudegate.autoAdvance") ||
+          e.affectsConfiguration("claudegate.history.enabled")
         ) {
           this.refresh();
         }
@@ -50,6 +52,7 @@ export class SettingsTreeProvider implements vscode.TreeDataProvider<SettingsIte
         { kind: "watcher" },
         { kind: "groupBySession" },
         { kind: "autoAdvance" },
+        { kind: "history" },
         { kind: "excludeHeader" },
         { kind: "protected" },
         { kind: "hook" },
@@ -100,6 +103,19 @@ export class SettingsTreeProvider implements vscode.TreeDataProvider<SettingsIte
         ti.iconPath = new vscode.ThemeIcon(on ? "arrow-right" : "primitive-dot");
         ti.tooltip = `After accepting/rejecting a diff with the keyboard, ${on ? "stop" : "open the next pending file"}`;
         ti.command = { command: "claudegate.toggleAutoAdvance", title: "Toggle Auto-advance" };
+        return ti;
+      }
+      case "history": {
+        const on = vscode.workspace
+          .getConfiguration("claudegate")
+          .get<boolean>("history.enabled", true);
+        const ti = new vscode.TreeItem("Session History");
+        ti.description = on ? "On" : "Off";
+        ti.iconPath = new vscode.ThemeIcon("history");
+        ti.tooltip = on
+          ? "Clear Session archives the review log for the History panel. Click to turn off."
+          : "Clear Session permanently deletes the review log. Click to turn archiving on.";
+        ti.command = { command: "claudegate.toggleHistoryEnabled", title: "Toggle Session History" };
         return ti;
       }
       case "excludeHeader": {
