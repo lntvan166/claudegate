@@ -594,22 +594,34 @@
             "id": "claudegate.setup",
             "title": "Set up the capture hook",
             "description": "Install the one-time PreToolUse hook so Claude's edits are captured.\n[Setup Hook](command:claudegate.setupHook)",
-            "media": { "markdown": "media/walkthrough/setup.md" },
-            "completionEvents": ["onCommand:claudegate.setupHook"]
+            "media": {
+              "markdown": "media/walkthrough/setup.md"
+            },
+            "completionEvents": [
+              "onCommand:claudegate.setupHook"
+            ]
           },
           {
             "id": "claudegate.verify",
             "title": "Verify it's working",
             "description": "Run a health check to confirm capture works end-to-end.\n[Verify Setup](command:claudegate.verifyHook)",
-            "media": { "markdown": "media/walkthrough/verify.md" },
-            "completionEvents": ["onCommand:claudegate.verifyHook"]
+            "media": {
+              "markdown": "media/walkthrough/verify.md"
+            },
+            "completionEvents": [
+              "onCommand:claudegate.verifyHook"
+            ]
           },
           {
             "id": "claudegate.review",
             "title": "Review changes",
             "description": "Open the Pending panel and review Claude's edits in the native diff.\n[Review All Pending](command:claudegate.reviewAllPending)",
-            "media": { "markdown": "media/walkthrough/review.md" },
-            "completionEvents": ["onCommand:claudegate.reviewAllPending"]
+            "media": {
+              "markdown": "media/walkthrough/review.md"
+            },
+            "completionEvents": [
+              "onCommand:claudegate.reviewAllPending"
+            ]
           }
         ]
       }
@@ -617,8 +629,10 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run bundle",
-    "bundle": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --platform=node --minify",
-    "compile": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --platform=node --sourcemap",
+    "bundle:webview": "esbuild src/webview/main.tsx --bundle --outfile=media/review/review.js --format=iife --jsx=automatic --jsx-import-source=preact --alias:react=preact/compat --alias:react-dom=preact/compat --loader:.css=css --minify",
+    "compile:webview": "esbuild src/webview/main.tsx --bundle --outfile=media/review/review.js --format=iife --jsx=automatic --jsx-import-source=preact --alias:react=preact/compat --alias:react-dom=preact/compat --loader:.css=css --sourcemap",
+    "bundle": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --platform=node --minify && npm run bundle:webview",
+    "compile": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --platform=node --sourcemap && npm run compile:webview",
     "watch": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --platform=node --sourcemap --watch",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext ts",
@@ -629,6 +643,7 @@
   "devDependencies": {
     "@types/diff": "^8.0.0",
     "@types/node": "^20.0.0",
+    "@types/react": "^18.3.31",
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",
@@ -637,6 +652,9 @@
     "typescript": "^5.3.0"
   },
   "dependencies": {
-    "diff": "^9.0.0"
+    "diff": "^9.0.0",
+    "preact": "^10.29.7",
+    "react-diff-view": "^3.3.3",
+    "refractor": "^4.9.0"
   }
 }
