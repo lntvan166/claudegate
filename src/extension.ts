@@ -25,6 +25,8 @@ import { persistWorkspaceRoots } from "./workspaceRoots";
 import { isInWorkspace, isExcluded, isProtected, setExcludeMatcher, setProtectedMatcher } from "./workspaceScope";
 import { ExcludeMatcher, DEFAULT_EXCLUDES } from "./excludeMatcher";
 import { saveDirtyPending } from "./saveEdits";
+import { orderedPendingPaths } from "./pendingPaths";
+import { stepPending, resolveCurrent } from "./reviewNav";
 
 
 function getActivePendingFilePath(managerFor: (p?: string) => SessionManager): string | undefined {
@@ -298,20 +300,10 @@ export function activate(context: vscode.ExtensionContext): void {
     );
     updateHistoryContext();
 
+    const orderedPending = (): string[] => orderedPendingPaths(sessionManager);
+
     const openNextPending = async (): Promise<void> => {
-      const session = sessionManager.getSession();
-      const next = session
-        ? Object.entries(session.files)
-            .filter(
-              ([fp, e]) =>
-                e.reviewStatus === "pending" &&
-                isInWorkspace(fp) &&
-                !isExcluded(fp) &&
-                sessionManager.hasRealPendingChange(fp)
-            )
-            .map(([fp]) => fp)
-            .sort((a, b) => a.localeCompare(b))[0]
-        : undefined;
+      const next = orderedPending()[0];
       if (next) {
         await vscode.commands.executeCommand("claudegate.openDiff", next);
       } else {
@@ -384,6 +376,38 @@ export function activate(context: vscode.ExtensionContext): void {
         await closeDiffEditor(fp);
         if (vscode.workspace.getConfiguration("claudegate").get<boolean>("autoAdvance", true)) {
           await openNextPending();
+        }
+      }),
+      vscode.commands.registerCommand("claudegate.nextPending", async () => {
+        const ordered = orderedPending();
+        const current = resolveCurrent(ordered, getActivePendingFilePath(managerFor), process.platform === "win32");
+        const step = stepPending(ordered, current, 1);
+        if ("target" in step) {
+          await vscode.commands.executeCommand("claudegate.openDiff", step.target);
+        } else if ("atEnd" in step) {
+          vscode.window.showInformationMessage(
+            step.atEnd === "last"
+              ? "Claude Gate: last pending file"
+              : "Claude Gate: first pending file"
+          );
+        } else {
+          vscode.window.showInformationMessage("Claude Gate: all caught up ✓");
+        }
+      }),
+      vscode.commands.registerCommand("claudegate.prevPending", async () => {
+        const ordered = orderedPending();
+        const current = resolveCurrent(ordered, getActivePendingFilePath(managerFor), process.platform === "win32");
+        const step = stepPending(ordered, current, -1);
+        if ("target" in step) {
+          await vscode.commands.executeCommand("claudegate.openDiff", step.target);
+        } else if ("atEnd" in step) {
+          vscode.window.showInformationMessage(
+            step.atEnd === "first"
+              ? "Claude Gate: first pending file"
+              : "Claude Gate: last pending file"
+          );
+        } else {
+          vscode.window.showInformationMessage("Claude Gate: all caught up ✓");
         }
       }),
 
