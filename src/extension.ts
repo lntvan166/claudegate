@@ -24,6 +24,7 @@ import { fileEntryFor } from "./reviewModel";
 import { persistWorkspaceRoots } from "./workspaceRoots";
 import { isInWorkspace, isExcluded, isProtected, setExcludeMatcher, setProtectedMatcher } from "./workspaceScope";
 import { ExcludeMatcher, DEFAULT_EXCLUDES } from "./excludeMatcher";
+import { saveDirtyPending } from "./saveEdits";
 
 
 function getActivePendingFilePath(managerFor: (p?: string) => SessionManager): string | undefined {
@@ -345,6 +346,7 @@ export function activate(context: vscode.ExtensionContext): void {
         async (item?: FileReviewItem | { filePath: string }) => {
           const filePath = item?.filePath ?? getActivePendingFilePath(managerFor);
           if (!filePath) return;
+          await saveDirtyPending([filePath]);
           managerFor(filePath).acceptFile(filePath);
           await closeDiffEditor(filePath);
         }
@@ -366,6 +368,7 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.commands.registerCommand("claudegate.acceptCurrent", async () => {
         const fp = getActivePendingFilePath(managerFor);
         if (!fp) return;
+        await saveDirtyPending([fp]);
         managerFor(fp).acceptFile(fp);
         await closeDiffEditor(fp);
         if (vscode.workspace.getConfiguration("claudegate").get<boolean>("autoAdvance", true)) {
@@ -387,7 +390,19 @@ export function activate(context: vscode.ExtensionContext): void {
       // ── Pending folder actions ──
       vscode.commands.registerCommand(
         "claudegate.acceptFolder",
-        (item: FolderItem) => managerFor(item.folderPath).acceptFolder(item.folderPath)
+        async (item: FolderItem) => {
+          const mgr = managerFor(item.folderPath);
+          const session = mgr.getSession();
+          const pendingFiles = Object.entries(session?.files ?? {})
+            .filter(
+              ([fp, e]) =>
+                fp.startsWith(item.folderPath + path.sep) &&
+                e.reviewStatus === "pending"
+            )
+            .map(([fp]) => fp);
+          await saveDirtyPending(pendingFiles);
+          mgr.acceptFolder(item.folderPath);
+        }
       ),
 
       vscode.commands.registerCommand(
@@ -475,6 +490,7 @@ export function activate(context: vscode.ExtensionContext): void {
             )
           : [];
         if (pending.length === 0) return;
+        await saveDirtyPending(pending.map(([fp]) => fp));
         sessionManager.acceptAll();
         await Promise.all(pending.map(([fp]) => closeDiffEditor(fp)));
         // Accept keeps files as-is (non-destructive), so no modal — just confirm
