@@ -7,6 +7,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.9.0] — 2026-07-12
+
+### Added
+
+- **Edit Claude's change before you accept it.** The right-hand side of a review diff has always been the live file, but Accept captured the version on disk — so if you tweaked a line in the diff and hadn't saved, your edit was silently dropped. Now every Accept (single file, **Accept Folder**, or **Accept All**) flushes any unsaved edits in those diffs to disk first, so the version you see is exactly the version that gets kept and logged. Reject is unchanged — it still discards the change, edits and all.
+- **Step through pending files from the keyboard.** Two new commands — **Next Pending File** (`Alt+]`) and **Previous Pending File** (`Alt+[`) — move between pending diffs *without* deciding, so you can skip ahead and come back. They stop at the ends with a hint instead of wrapping, and they're gated to pending diffs — and use `Alt+[`/`Alt+]` rather than `Cmd/Ctrl+[`/`]` on purpose, so they don't clobber the diff's own indent/outdent now that the right pane is editable. The diff title also shows where you are in the queue — **`· N of M pending`** — and the count shrinks as you accept or reject.
+
 ## [1.8.0] — 2026-07-12
 
 ### Added
