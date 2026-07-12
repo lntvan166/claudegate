@@ -26,6 +26,8 @@ export const window = {
 // reload path under test).
 export const workspace = {
   workspaceFolders: undefined as readonly { uri: { fsPath: string } }[] | undefined,
+  // Mutable so unit tests can inject fake documents ({ isDirty, uri:{fsPath}, save() }).
+  textDocuments: [] as Array<{ isDirty: boolean; uri: { fsPath: string }; save: () => Thenable<boolean> }>,
   // claudegate reads booleans like groupBySession; returning the default keeps
   // tree providers on their default (non-grouped) rendering under test.
   getConfiguration: (_section?: string) => ({
