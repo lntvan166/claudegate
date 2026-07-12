@@ -126,6 +126,14 @@
         "icon": "$(debug-restart)"
       },
       {
+        "command": "claudegate.nextPending",
+        "title": "Claude Gate: Next Pending File"
+      },
+      {
+        "command": "claudegate.prevPending",
+        "title": "Claude Gate: Previous Pending File"
+      },
+      {
         "command": "claudegate.viewAsTree",
         "title": "View as Tree",
         "category": "Claude Gate",
@@ -643,6 +651,16 @@
         "command": "claudegate.rejectCurrent",
         "key": "ctrl+shift+backspace",
         "mac": "cmd+backspace",
+        "when": "claudegate.activeFileIsPending"
+      },
+      {
+        "command": "claudegate.nextPending",
+        "key": "alt+]",
+        "when": "claudegate.activeFileIsPending"
+      },
+      {
+        "command": "claudegate.prevPending",
+        "key": "alt+[",
         "when": "claudegate.activeFileIsPending"
       }
     ],
