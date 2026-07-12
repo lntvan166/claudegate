@@ -26,7 +26,7 @@ import { isInWorkspace, isExcluded, isProtected, setExcludeMatcher, setProtected
 import { ExcludeMatcher, DEFAULT_EXCLUDES } from "./excludeMatcher";
 import { saveDirtyPending } from "./saveEdits";
 import { orderedPendingPaths } from "./pendingPaths";
-import { stepPending } from "./reviewNav";
+import { stepPending, resolveCurrent } from "./reviewNav";
 
 
 function getActivePendingFilePath(managerFor: (p?: string) => SessionManager): string | undefined {
@@ -379,7 +379,9 @@ export function activate(context: vscode.ExtensionContext): void {
         }
       }),
       vscode.commands.registerCommand("claudegate.nextPending", async () => {
-        const step = stepPending(orderedPending(), getActivePendingFilePath(managerFor), 1);
+        const ordered = orderedPending();
+        const current = resolveCurrent(ordered, getActivePendingFilePath(managerFor), process.platform === "win32");
+        const step = stepPending(ordered, current, 1);
         if ("target" in step) {
           await vscode.commands.executeCommand("claudegate.openDiff", step.target);
         } else if ("atEnd" in step) {
@@ -393,7 +395,9 @@ export function activate(context: vscode.ExtensionContext): void {
         }
       }),
       vscode.commands.registerCommand("claudegate.prevPending", async () => {
-        const step = stepPending(orderedPending(), getActivePendingFilePath(managerFor), -1);
+        const ordered = orderedPending();
+        const current = resolveCurrent(ordered, getActivePendingFilePath(managerFor), process.platform === "win32");
+        const step = stepPending(ordered, current, -1);
         if ("target" in step) {
           await vscode.commands.executeCommand("claudegate.openDiff", step.target);
         } else if ("atEnd" in step) {

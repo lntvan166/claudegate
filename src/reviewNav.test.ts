@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { orderPending, stepPending, pendingProgress } from "./reviewNav";
+import { orderPending, stepPending, pendingProgress, resolveCurrent } from "./reviewNav";
 
 function run(name: string, fn: () => void): void {
   try {
@@ -58,6 +58,33 @@ run("pendingProgress: 1-based index and total, undefined when absent", () => {
   assert.deepEqual(pendingProgress(o, "/a"), { index: 1, total: 3 });
   assert.deepEqual(pendingProgress(o, "/c"), { index: 3, total: 3 });
   assert.equal(pendingProgress(o, "/missing"), undefined);
+});
+
+run("resolveCurrent: exact match returns the same string", () => {
+  const o = ["/a", "/b", "/c"];
+  assert.equal(resolveCurrent(o, "/b", false), "/b");
+});
+
+run("resolveCurrent: caseInsensitive=false + only-case-differing current returns undefined", () => {
+  const o = ["c:\\repo\\a.ts"];
+  assert.equal(resolveCurrent(o, "C:\\repo\\A.ts", false), undefined);
+});
+
+run("resolveCurrent: caseInsensitive=true + case-differing current returns canonical entry", () => {
+  const o = ["c:\\repo\\a.ts"];
+  assert.equal(resolveCurrent(o, "C:\\repo\\A.ts", true), "c:\\repo\\a.ts");
+});
+
+run("resolveCurrent: current undefined returns undefined (both boolean values)", () => {
+  const o = ["/a", "/b"];
+  assert.equal(resolveCurrent(o, undefined, false), undefined);
+  assert.equal(resolveCurrent(o, undefined, true), undefined);
+});
+
+run("resolveCurrent: current absent entirely (no case-insensitive match) returns undefined", () => {
+  const o = ["/a", "/b"];
+  assert.equal(resolveCurrent(o, "/gone", true), undefined);
+  assert.equal(resolveCurrent(o, "/gone", false), undefined);
 });
 
 console.log("done");

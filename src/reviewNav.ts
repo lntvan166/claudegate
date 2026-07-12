@@ -23,6 +23,22 @@ export function stepPending(ordered: string[], current: string | undefined, dir:
   return { target: ordered[j] };
 }
 
+// Resolve `current` to the matching entry in `ordered`. Exact match first; when
+// caseInsensitive (win32), fall back to a case-folded match so a drive-letter /
+// case mismatch between the editor path and the session key still finds the
+// neighbor. Returns undefined if absent (callers then start from first/last).
+export function resolveCurrent(
+  ordered: string[],
+  current: string | undefined,
+  caseInsensitive: boolean
+): string | undefined {
+  if (current === undefined) return undefined;
+  if (ordered.includes(current)) return current;
+  if (!caseInsensitive) return undefined;
+  const lc = current.toLowerCase();
+  return ordered.find((p) => p.toLowerCase() === lc);
+}
+
 // 1-based position of `path` within the ordered list, plus the total.
 export function pendingProgress(
   ordered: string[],
