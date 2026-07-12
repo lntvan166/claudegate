@@ -6,6 +6,8 @@ import { SessionManager } from "./sessionManager";
 import { fileEntryFor } from "./reviewModel";
 import { countChanges, formatChangeCount } from "./changeCount";
 import { findArchiveRecord, HistoryRecordRef } from "./historyModel";
+import { pendingProgress } from "./reviewNav";
+import { orderedPendingPaths } from "./pendingPaths";
 
 export const SCHEME = "claudegate";
 
@@ -150,10 +152,12 @@ export async function openDiff(
     suffix = "";
   }
 
+  const prog = pendingProgress(orderedPendingPaths(sessionManager), filePath);
+  const progSuffix = prog ? `  ·  ${prog.index} of ${prog.total} pending` : "";
   const title =
-    entry.originalContent === null
+    (entry.originalContent === null
       ? `Claude Gate: ${label}  (new file${suffix})`
-      : `Claude Gate: ${label}  (original ↔ current${suffix})`;
+      : `Claude Gate: ${label}  (original ↔ current${suffix})`) + progSuffix;
 
   await vscode.commands.executeCommand("vscode.diff", beforeUri, currentUri, title);
 
