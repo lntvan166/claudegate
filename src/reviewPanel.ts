@@ -43,6 +43,16 @@ function matchesSession(itemSessionId: string | undefined, sessionId: string | n
   return sessionId === null ? !itemSessionId : itemSessionId === sessionId;
 }
 
+/** Open `dir` as a new VS Code window. Shared by the folder-node and
+ *  worktree-group "Open in New Window" actions so their behaviour can't drift. */
+export function openFolderInNewWindow(dir: string): void {
+  void vscode.commands.executeCommand(
+    "vscode.openFolder",
+    vscode.Uri.file(dir),
+    { forceNewWindow: true }
+  );
+}
+
 // ─── Folder item (tree mode) ──────────────────────────────────────────────────
 
 export class FolderItem extends vscode.TreeItem {

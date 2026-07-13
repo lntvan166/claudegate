@@ -10,6 +10,7 @@ import {
   WorktreeGroupItem,
   registerOpenDiff,
   closeDiffEditor,
+  openFolderInNewWindow,
 } from "./reviewPanel";
 import { WorktreeSessionRegistry } from "./worktreeSessionRegistry";
 import { HookInstaller } from "./hookInstaller";
@@ -722,11 +723,15 @@ export function activate(context: vscode.ExtensionContext): void {
         "claudegate.openWorktreeWindow",
         (item: WorktreeGroupItem) => {
           if (!item?.worktreeRoot) return;
-          void vscode.commands.executeCommand(
-            "vscode.openFolder",
-            vscode.Uri.file(item.worktreeRoot),
-            { forceNewWindow: true }
-          );
+          openFolderInNewWindow(item.worktreeRoot);
+        }
+      ),
+
+      vscode.commands.registerCommand(
+        "claudegate.openFolderInNewWindow",
+        (item: FolderItem) => {
+          if (!item?.folderPath) return;
+          openFolderInNewWindow(item.folderPath);
         }
       ),
 

@@ -7,6 +7,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.10.0] — 2026-07-13
+
+### Added
+
+- **Open any pending folder in a new window — right-click it.** Folder rows in the **Pending** panel (tree view) now have an **Open in New Window** action that opens that folder as its own editor window. This is aimed at multi-repo / `go.work` layouts, where the directory you actually want to review (e.g. a `ws-…` folder holding several service worktrees) isn't a git worktree of the workspace you opened, so it never got the existing **Open Worktree in New Window** button. Now you can jump straight into it and review it there as its own session. The action is right-click only (no hover icon) and, like folder rows themselves, appears in tree view.
+
 ## [1.9.0] — 2026-07-12
 
 ### Added
