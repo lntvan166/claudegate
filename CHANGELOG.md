@@ -7,6 +7,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.10.1] — 2026-07-14
+
+### Fixed
+
+- **Claude's edits inside a nested sub-repo worktree now show up in the Pending panel.** In a `go.work`-style layout where a module is checked out as a git *worktree* into a sub-folder of the workspace you opened (e.g. `ws-geo-global/tms-location-mnt`, a worktree of the nested `tms-location-mnt` repo — not of the workspace's own repo), the capture hook correctly recorded the change into that worktree's own review session, but the sidebar never surfaced it: worktree discovery only looked at the *top-level* repo's `.git/worktrees`, so worktrees owned by nested sub-repos were invisible and their pending edits appeared in no window at all. Discovery now scans the workspace tree for worktree working directories the same way the hook detects them, so those changes appear as a worktree group in the parent window — matching what already worked for the workspace repo's own worktrees.
+
 ## [1.10.0] — 2026-07-13
 
 ### Added

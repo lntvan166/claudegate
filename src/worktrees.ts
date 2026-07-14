@@ -34,37 +34,59 @@ export function isWorktreeRoot(dir: string): boolean {
   return path.basename(worktreesDir) === "worktrees" && path.basename(gitDir) === ".git";
 }
 
+// Directory names never worth descending into while hunting for worktree working
+// dirs — heavy or generated trees that can never *be* one. `.git` is skipped (a
+// worktree wd's `.git` is a file, not a dir we recurse into). `.claude` is
+// deliberately NOT skipped: subagent worktrees live at `<root>/.claude/worktrees/*`.
+const WORKTREE_SCAN_SKIP = new Set([
+  "node_modules", ".git", "dist", "build", "out", "target", "vendor",
+  "__pycache__", ".next", ".nuxt", ".venv", "venv",
+]);
+
+// Bound the descent so a deep monorepo can't turn a refresh into a full-disk
+// crawl. Worktree working dirs in practice sit within a few levels of the root.
+const WORKTREE_SCAN_MAX_DEPTH = 6;
+
 /**
- * Enumerate git worktree working directories nested strictly under `root`, using
- * only the filesystem (no `git` binary). A main repo records each worktree at
- * `<root>/.git/worktrees/<name>/gitdir`, whose content is the path to that
- * worktree's `.git` file; the worktree working directory is that file's parent.
+ * Enumerate git worktree working directories nested under `root`, using only the
+ * filesystem (no `git` binary).
+ *
+ * We scan the directory tree for working dirs whose `.git` is a worktree file
+ * (see {@link isWorktreeRoot}) rather than only reading `<root>/.git/worktrees`.
+ * The registry-only read found worktrees owned by the ROOT repo but missed
+ * worktrees owned by NESTED sub-repos (e.g. a go.work layout where each module
+ * is its own repo and its worktree is checked out into a sibling folder under
+ * the open workspace). The hook (`worktree_root_for_file`) already routes edits
+ * to those worktrees' sessions by walking up to any `.git` worktree file, so a
+ * download-symmetric scan here is required or those pending changes surface in
+ * no window at all. Descent is bounded and skips heavy dirs; symlinked
+ * directories are not followed (cycle-safe).
  */
 export function nestedWorktreesUnder(root: string): string[] {
-  const dotGit = path.join(root, ".git");
-  try {
-    if (!fs.statSync(dotGit).isDirectory()) return []; // only a main repo has worktrees/
-  } catch {
-    return [];
-  }
-  const worktreesDir = path.join(dotGit, "worktrees");
-  let names: string[];
-  try {
-    names = fs.readdirSync(worktreesDir);
-  } catch {
-    return []; // no worktrees/ subdir
-  }
   const found: string[] = [];
-  for (const name of names) {
-    let target: string;
+  const walk = (dir: string, depth: number): void => {
+    if (depth > WORKTREE_SCAN_MAX_DEPTH) return;
+    let entries: fs.Dirent[];
     try {
-      target = fs.readFileSync(path.join(worktreesDir, name, "gitdir"), "utf-8").trim();
+      entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch {
-      continue;
+      return; // unreadable dir — skip, never throw during a refresh
     }
-    const wtRoot = path.resolve(path.dirname(target)); // parent of the `.git` file
-    if (pathIsUnder(wtRoot, root)) found.push(wtRoot);
-  }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue; // files AND symlinks skipped (cycle-safe)
+      if (WORKTREE_SCAN_SKIP.has(entry.name)) continue;
+      const child = path.join(dir, entry.name);
+      if (isWorktreeRoot(child)) {
+        // A worktree working dir. Record it and do NOT descend — its interior is
+        // that worktree's own concern, and an edit inside a nested-within-a-worktree
+        // worktree is routed to its own session by the same rule when it happens.
+        found.push(path.resolve(child));
+        continue;
+      }
+      walk(child, depth + 1);
+    }
+  };
+  walk(path.resolve(root), 1);
   return found;
 }
 

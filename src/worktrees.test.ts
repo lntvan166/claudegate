@@ -44,6 +44,40 @@ function makeRepo(): string {
   console.log("ok - worktree detection (worktree vs main vs submodule)");
 }
 
+// Regression: a worktree owned by a NESTED sub-repo (not the primary root's own
+// repo) must still be discovered. Mirrors a go.work layout where each module is
+// its own git repo and its worktree is checked out into a sibling folder under
+// the open workspace — e.g. tms/ws-geo-global/tms-location-mnt is a worktree of
+// tms/tms-location-mnt, NOT of tms. The old <root>/.git/worktrees read missed it.
+{
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cg-wtn-"));
+  // Primary root's own repo (has some unrelated worktree of its own).
+  fs.mkdirSync(path.join(root, ".git", "worktrees", "self"), { recursive: true });
+  fs.mkdirSync(path.join(root, "self-wt"), { recursive: true });
+  fs.writeFileSync(path.join(root, ".git", "worktrees", "self", "gitdir"),
+    path.join(root, "self-wt", ".git") + "\n");
+  fs.writeFileSync(path.join(root, "self-wt", ".git"),
+    `gitdir: ${path.join(root, ".git", "worktrees", "self")}\n`);
+  // Nested sub-repo `mod` (its own .git dir) with a worktree checked out at
+  // <root>/ws/mod — the working dir is under root, but the OWNING repo is `mod`.
+  fs.mkdirSync(path.join(root, "mod", ".git", "worktrees", "wt"), { recursive: true });
+  fs.mkdirSync(path.join(root, "ws", "mod"), { recursive: true });
+  fs.writeFileSync(path.join(root, "mod", ".git", "worktrees", "wt", "gitdir"),
+    path.join(root, "ws", "mod", ".git") + "\n");
+  fs.writeFileSync(path.join(root, "ws", "mod", ".git"),
+    `gitdir: ${path.join(root, "mod", ".git", "worktrees", "wt")}\n`);
+
+  const found = nestedWorktreesUnder(root).map((p) => path.resolve(p)).sort();
+  const expected = [
+    path.resolve(path.join(root, "self-wt")),
+    path.resolve(path.join(root, "ws", "mod")),
+  ].sort();
+  assert.deepEqual(found, expected,
+    "discovers worktrees of both the root repo AND nested sub-repos");
+  fs.rmSync(root, { recursive: true, force: true });
+  console.log("ok - nested sub-repo worktree working dir is discovered");
+}
+
 // Regression: a submodule whose gitdir target has a `worktrees`-named ANCESTOR
 // (but is structurally `.../.git/modules/<name>`) must NOT be seen as a worktree.
 {
