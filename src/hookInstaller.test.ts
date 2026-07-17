@@ -132,6 +132,23 @@ const registered = computeSettingsPatch("", CMD).content; // contains "claudegat
   console.log("ok - no warning when claudegate entry is removed (uninstall)");
 }
 
+// 8. Non-hooks fields change (model/theme/plugins) while the hooks block is
+//    byte-identical → Claude Code rewrote settings.json for its own reasons,
+//    the loaded PreToolUse hook is untouched → must NOT warn. This is the
+//    real-world false positive: the warning "kept showing without any update".
+{
+  const withHooks = JSON.parse(registered);
+  const benign = JSON.stringify({ ...withHooks, theme: "dark", model: "opus[1m]" });
+  assert.notEqual(benign, registered, "sanity: content actually changed");
+  assert.ok(benign.includes("claudegate"), "sanity: hook still registered");
+  assert.equal(
+    shouldWarnTrustInvalidation(registered, benign),
+    false,
+    "non-hooks change → no warn"
+  );
+  console.log("ok - no warning when only non-hooks settings change");
+}
+
 // ── hookHealthFrom precedence ────────────────────────────────────────────────
 // hookHealthFrom precedence: not-installed → not-registered → trust-invalidated → stale → ok
 {

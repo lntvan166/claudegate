@@ -538,5 +538,65 @@ function readSession(sp: string): any {
     console.log("ok - clearSession({archive:false}) skips backup and guard");
   }
 
+  // dropIfNoRealChange: self-heal a stale "phantom" pending row. A file reverted
+  // to its baseline (e.g. git reset / editor undo) without a session-file change
+  // leaves a no-op entry the panel still shows; opening it should remove it.
+  {
+    const { ws, sp } = newEnv();
+    const sm = new SessionManager(fakeLog, ws);
+    sm.startWatching();
+
+    // real change → keep (never drop a genuine pending review)
+    const real = path.join(ws, "real.ts");
+    fs.writeFileSync(real, "NEW");
+    sm.trackFileChange(real, "OLD");
+    assert.equal(sm.dropIfNoRealChange(real), false, "real change kept");
+    assert.ok(readSession(sp).files[real], "real-change entry stays in session");
+
+    // no-op (disk === baseline, e.g. reverted) → dropped
+    const noop = path.join(ws, "noop.ts");
+    fs.writeFileSync(noop, "SAME");
+    sm.trackFileChange(noop, "SAME");
+    assert.equal(sm.dropIfNoRealChange(noop), true, "no-op entry dropped");
+    assert.equal(readSession(sp).files[noop], undefined, "no-op entry removed from session");
+
+    // unknown path → false, no throw
+    assert.equal(sm.dropIfNoRealChange(path.join(ws, "ghost.ts")), false, "unknown path is a no-op");
+
+    sm.stopWatching();
+    console.log("ok - dropIfNoRealChange self-heals stale no-op rows, keeps real changes");
+  }
+
+  // reconcileNow: prune a settled no-op "phantom" on demand (e.g. on window focus).
+  // A file reverted to baseline long after capture leaves a no-op entry that the
+  // grace reconcile only clears on a session-file change; focusing the window must
+  // be able to trigger that cleanup even when no session-file change occurred.
+  {
+    const { ws, sp } = newEnv();
+    const fp = path.join(ws, "reverted.ts");
+    fs.writeFileSync(fp, "BASE"); // disk === baseline → no-op
+    fs.mkdirSync(path.dirname(sp), { recursive: true });
+    const oldCap = new Date(Date.now() - 60_000).toISOString(); // past the settle window
+    fs.writeFileSync(sp, JSON.stringify({
+      sessionId: "s", status: "active",
+      files: { [fp]: { originalContent: "BASE", reviewStatus: "pending", capturedAt: oldCap } },
+      accepted: [], rejected: {},
+    }));
+    const sm = new SessionManager(fakeLog, ws);
+    sm.startWatching();
+    assert.ok(readSession(sp).files[fp], "settled no-op present before reconcileNow");
+    sm.reconcileNow();
+    assert.equal(readSession(sp).files[fp], undefined, "reconcileNow prunes the settled no-op phantom");
+
+    // a real pending change is NEVER pruned by reconcileNow
+    const fp2 = path.join(ws, "real.ts");
+    fs.writeFileSync(fp2, "NEW");
+    sm.trackFileChange(fp2, "OLD"); // disk NEW !== baseline OLD → real change
+    sm.reconcileNow();
+    assert.ok(readSession(sp).files[fp2], "real change kept by reconcileNow");
+    sm.stopWatching();
+    console.log("ok - reconcileNow prunes settled phantoms, keeps real changes");
+  }
+
   console.log("done");
 })().catch((e) => { console.error(e); process.exit(1); });

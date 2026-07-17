@@ -76,12 +76,17 @@ export function capAcceptedLog(session: Session): boolean {
 // on every load.
 export function capAcceptedBytes(session: Session, maxBytes: number): number {
   const recs = session.accepted;
+  if (recs.length <= 1) return 0; // never trim below the newest single record
   let total = 0;
   let keepFrom = 0; // keep recs[keepFrom..]
   for (let i = recs.length - 1; i >= 0; i--) {
     total += Buffer.byteLength(JSON.stringify(recs[i]));
     if (total > maxBytes) { keepFrom = i + 1; break; }
   }
+  // Always keep at least the newest record: a single record larger than the
+  // whole budget must not empty the log (that would wipe all history over one
+  // big-file accept).
+  if (keepFrom > recs.length - 1) keepFrom = recs.length - 1;
   if (keepFrom === 0) return 0;
   session.accepted = recs.slice(keepFrom);
   return keepFrom;
@@ -95,25 +100,38 @@ export function hasRealChange(originalContent: string | null, diskContent: strin
   return originalContent !== diskContent;
 }
 
+// The PreToolUse hook records an entry BEFORE Claude's write lands, and that
+// write can land SECONDS after the hook fires — measured up to ~6s in the field
+// under a busy PreToolUse hook chain or a slow editor save. So a freshly captured
+// entry is momentarily a no-op (existing file: baseline === disk; new file: still
+// absent on disk) until the write catches up. Pruning it at the old ~1.5s grace
+// destroyed legitimate pending entries before their content ever landed — the
+// reported ".claude/*.commits.yaml / SKILL.md flash-then-vanish" bug. The settle
+// windows below must comfortably exceed real write lag. They gate only session
+// housekeeping (the panel already hides no-ops via hasRealPendingChange), so being
+// generous costs nothing but a slightly later cleanup of genuine no-ops/temp files.
+export const NOOP_SETTLE_MS = 15_000;      // existing-file no-op: prune only after this long
+export const NEW_FILE_ABSENT_MS = 45_000;  // new file is a PROMISED write — allow this long to land
+
 // Decide whether the reconcile should prune a pending entry as a settled no-op.
-//
-// The hook records an entry BEFORE Claude writes, so a brand-new entry is
-// momentarily a no-op (baseline === disk). Pruning must be PER-ENTRY age-based,
-// not on a shared timer: only drop a no-op once it has outlived its own grace
-// window, so a real edit whose write lands slightly late (e.g. in a multi-file
-// burst) is never pruned before it appears. A real change is always kept; an
-// entry with no `capturedAt` (e.g. the file-watcher path, created post-write) is
-// treated as already settled.
+// PER-ENTRY age-based (not a shared timer) so a real edit whose write lands late
+// is never pruned before it appears. A real change is always kept; an entry with
+// no `capturedAt` (e.g. the file-watcher path, created post-write) is treated as
+// already settled.
 export function shouldPruneNoOp(
   entry: FileEntry,
   diskContent: string | null,
-  nowMs: number,
-  graceMs: number
+  nowMs: number
 ): boolean {
   if (hasRealChange(entry.originalContent, diskContent)) return false; // real → keep
+  // No-op: existing file unchanged, or new file not yet on disk. Either way the
+  // tool's write may still be in flight — only prune once the entry out-ages the
+  // window for its kind. A new file (originalContent === null) is a promised
+  // creation, so it gets the longer window.
+  const settleMs = entry.originalContent === null ? NEW_FILE_ABSENT_MS : NOOP_SETTLE_MS;
   const captured = entry.capturedAt ? Date.parse(entry.capturedAt) : NaN;
   const age = Number.isNaN(captured) ? Infinity : nowMs - captured;
-  return age > graceMs; // settled no-op → prune; still-young no-op → keep (write may land)
+  return age > settleMs; // out-aged its window → prune; still within → keep (write may land)
 }
 
 // Merge hook-captured pending entries that landed on disk since we loaded, so a

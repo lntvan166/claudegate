@@ -34,12 +34,13 @@ const LOCK_SLEEP_MS = 5;
 // accepted/rejected history, or stray oversized captures). We still load it, but
 // surface it: parsing megabytes on every fs.watch reload hurts responsiveness,
 // and clearing the review history shrinks it. Well past a healthy session.
-const SESSION_SIZE_WARN_BYTES = 5_000_000;
+const SESSION_SIZE_WARN_BYTES = 2_000_000;
 // When a session file crosses the warning size, auto-trim the accepted log down
 // to this byte budget (oldest-first) so the panel self-heals instead of relying
 // on the user to clear history manually. Kept under the warn threshold to leave
-// room for pending/rejected entries.
-const MAX_ACCEPTED_BYTES = 4_000_000;
+// room for pending/rejected entries. Only the accepted log is ever trimmed —
+// pending entries are unreviewed baselines and are never dropped automatically.
+const MAX_ACCEPTED_BYTES = 1_500_000;
 
 export class SessionManager {
   private readonly sessionPath: string;
@@ -339,6 +340,21 @@ export class SessionManager {
     this.persist({ prunedFiles: new Map([[filePath, entry.capturedAt]]) });
   }
 
+  // Self-heal a stale "phantom" pending row. When a captured file is reverted to
+  // its baseline (git reset, editor undo, or any change the hook doesn't re-write
+  // the session for), the entry becomes a no-op — but because the extension only
+  // reconciles on a session-file change and has no workspace file-watcher, that
+  // no-op can linger in the panel and open a blank diff. Call this when opening
+  // such an entry: if it currently has no real change, remove it so the row
+  // clears at once. Returns true iff an entry was dropped; a genuine pending
+  // change is always kept.
+  dropIfNoRealChange(filePath: string): boolean {
+    if (!this.session?.files[filePath]) return false;
+    if (this.hasRealPendingChange(filePath)) return false; // real → keep
+    this.removePendingFile(filePath);
+    return true;
+  }
+
   // ── Accepted log: undo ──────────────────────────────────────────────────
 
   // Shared mutation for reverting one accepted record; callers persist().
@@ -596,8 +612,9 @@ export class SessionManager {
       dropped > 0
         ? `Claude Gate: the review history was very large, so the ${dropped} oldest accepted ` +
           `record(s) were trimmed to keep the panel responsive.`
-        : "Claude Gate: this workspace's review history is unusually large and may slow the panel. " +
-          "Clear the Accepted or Rejected list to shrink it."
+        : "Claude Gate: this workspace's session is unusually large and may slow the panel. " +
+          "The bloat is in your pending or rejected entries (not accepted history), so review the " +
+          "pending changes — accept or reject them — to shrink it. Nothing was deleted automatically."
     );
   }
 
@@ -616,8 +633,20 @@ export class SessionManager {
     if (pruned.size > 0) this.persist({ prunedFiles: pruned });
   }
 
-  // Prune temp files Claude created then deleted, after a grace delay so a
-  // just-created file (recorded by the hook before the write lands) survives.
+  // Force an immediate no-op / temp-file reconcile pass. Used when disk may have
+  // changed WITHOUT a session-file write to trigger the usual grace reconcile —
+  // e.g. a git reset / editor undo reverted a captured file while the window was
+  // unfocused, leaving a settled no-op "phantom" row that the panel keeps showing
+  // (the panel deliberately does not disk-gate rows) with nothing to prune it.
+  reconcileNow(): void {
+    if (!this.session) return;
+    this.reconcilePending();
+  }
+
+  // Re-check cadence for the no-op/temp-file reconcile. This interval only paces
+  // how often entries are re-evaluated; the actual prune thresholds live per-entry
+  // in shouldPruneNoOp (NOOP_SETTLE_MS / NEW_FILE_ABSENT_MS), which are far longer
+  // so a write that lands seconds after the hook is never mistaken for a no-op.
   private scheduleReconcile(): void {
     if (!this.session || this.reconcileTimer) return;
     this.reconcileTimer = setTimeout(() => {
@@ -637,7 +666,7 @@ export class SessionManager {
     let youngNoOp = false;
     for (const [filePath, entry] of Object.entries(this.session.files)) {
       const disk = this.readFileOrNull(filePath);
-      if (shouldPruneNoOp(entry, disk, now, RECONCILE_GRACE_MS)) {
+      if (shouldPruneNoOp(entry, disk, now)) {
         pruned.set(filePath, entry.capturedAt);
         delete this.session.files[filePath];
         this.log.appendLine(`[INFO] Pruned no-op pending entry: ${filePath}`);

@@ -28,6 +28,7 @@ import { ExcludeMatcher, DEFAULT_EXCLUDES } from "./excludeMatcher";
 import { saveDirtyPending } from "./saveEdits";
 import { orderedPendingPaths } from "./pendingPaths";
 import { stepPending, resolveCurrent } from "./reviewNav";
+import { gcOrphanedSessions } from "./sessionGc";
 
 
 function getActivePendingFilePath(managerFor: (p?: string) => SessionManager): string | undefined {
@@ -124,6 +125,21 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
       vscode.workspace.onDidChangeWorkspaceFolders(() => persistWorkspaceRoots())
     );
+
+    // One-time sweep: drop session files whose workspace tree is gone from disk
+    // (deleted projects, stray test fixtures). Fail-soft and never touches a
+    // live workspace's session — see sessionGc.isOrphanedSession.
+    try {
+      const removed = gcOrphanedSessions(
+        path.join(os.homedir(), ".claudegate", "sessions"),
+        { log: (m) => log.appendLine(m) }
+      );
+      if (removed.length > 0) {
+        log.appendLine(`[INFO] GC removed ${removed.length} orphaned session file(s).`);
+      }
+    } catch (err) {
+      log.appendLine(`[WARN] session GC failed: ${(err as Error).message}`);
+    }
 
     const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     const excludeMatcher = new ExcludeMatcher();
@@ -855,7 +871,18 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(worktreeRegistry.onChange(() => sessionManager.notifyChanged()));
     worktreeRegistry.refresh();
     context.subscriptions.push(
-      vscode.window.onDidChangeWindowState((e) => { if (e.focused) worktreeRegistry.refresh(); })
+      vscode.window.onDidChangeWindowState((e) => {
+        if (!e.focused) return;
+        worktreeRegistry.refresh();
+        // A file reverted to baseline while the window was unfocused (git reset,
+        // editor undo) leaves a settled no-op "phantom" row: the panel does not
+        // disk-gate rows, and no session-file write occurred to trigger the usual
+        // grace reconcile, so the row lingers. Force a reconcile on focus (main +
+        // every worktree session) to prune it; the resulting session change
+        // re-renders the panel.
+        sessionManager.reconcileNow();
+        worktreeRegistry.reconcileAll();
+      })
     );
     context.subscriptions.push({ dispose: () => worktreeRegistry.dispose() });
 

@@ -75,6 +75,13 @@ export class WorktreeSessionRegistry {
     return root ? this.managers.get(root) ?? null : null;
   }
 
+  // Force a no-op/temp-file reconcile on every attached worktree session — used on
+  // window focus so a settled "phantom" no-op in any worktree session is pruned
+  // even when nothing wrote its session file to trigger the usual grace reconcile.
+  reconcileAll(): void {
+    for (const mgr of this.managers.values()) mgr.reconcileNow();
+  }
+
   // Total in-scope pending files across all attached worktrees (for the badge).
   totalPending(): number {
     let n = 0;

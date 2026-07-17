@@ -88,19 +88,58 @@ export function computeSettingsPatch(
 }
 
 /**
- * Decision for the trust-invalidation health signal. Returns true when a
- * detected change to settings.json should warn the user that running Claude
- * Code sessions have gone silent.
+ * The `hooks` block of a settings.json blob, normalized to a stable string for
+ * comparison. Only this block controls hook loading; everything else in
+ * settings.json (model, theme, enabledPlugins, permissions, …) is irrelevant
+ * to trust invalidation. Falls back to the raw text when the JSON can't be
+ * parsed, so a genuine change we can't inspect is still treated as a change.
+ */
+function hooksConfigOf(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw) as { hooks?: unknown };
+    return JSON.stringify(parsed?.hooks ?? null);
+  } catch {
+    return raw;
+  }
+}
+
+/**
+ * How a detected settings.json change relates to the claudegate hook:
+ * - `none`         — byte-identical, nothing happened.
+ * - `benign`       — the hooks block is unchanged; Claude Code rewrote an
+ *                    unrelated field (model, theme, enabledPlugins, session
+ *                    state). The loaded PreToolUse hook is untouched, so
+ *                    capture keeps working — do not warn, do not clear.
+ * - `invalidated`  — the hooks block changed while claudegate is still
+ *                    registered. Claude Code loads hooks once at session start,
+ *                    so already-running sessions have gone silent — warn.
+ * - `unregistered` — the hooks block changed and the claudegate entry is gone.
+ *                    That's an uninstall (handled by the not-registered health
+ *                    state), not an invalidation — don't warn.
+ */
+export type SettingsChangeKind = "none" | "benign" | "invalidated" | "unregistered";
+
+export function classifySettingsChange(prevRaw: string, currentRaw: string): SettingsChangeKind {
+  if (currentRaw === prevRaw) return "none";
+  if (hooksConfigOf(prevRaw) === hooksConfigOf(currentRaw)) return "benign";
+  return currentRaw.includes("claudegate") ? "invalidated" : "unregistered";
+}
+
+/**
+ * Decision for the trust-invalidation health signal. Returns true only when the
+ * *hooks* configuration changed while claudegate is still registered.
  *
- * We warn on the *cause* (settings.json changed while claudegate is still
+ * We warn on the *cause* (the hook config changed while claudegate is still
  * registered) rather than the *effect* (edits arriving with no capture),
  * because attributing an uncaptured edit to Claude is exactly the
- * unsolvable problem DocumentTracker exists for. A change that removes the
- * claudegate entry is an uninstall, not an invalidation — don't warn.
+ * unsolvable problem DocumentTracker exists for. Crucially, we compare only
+ * the hooks block: Claude Code rewrites settings.json constantly for unrelated
+ * reasons (model/theme/plugin toggles, session persistence), and those must not
+ * masquerade as a hook invalidation — that produced a warning that "kept
+ * showing without any update".
  */
 export function shouldWarnTrustInvalidation(prevRaw: string, currentRaw: string): boolean {
-  if (currentRaw === prevRaw) return false;
-  return currentRaw.includes("claudegate");
+  return classifySettingsChange(prevRaw, currentRaw) === "invalidated";
 }
 
 export interface HookStatus {
@@ -474,14 +513,22 @@ export class HookInstaller {
       // clear an active trust-invalidation (which would drop the persistent
       // status-bar warning while running sessions are still untrusted).
       if (current === this.lastKnownSettingsRaw) return;
-      const shouldWarn = shouldWarnTrustInvalidation(this.lastKnownSettingsRaw ?? "", current);
+      const kind = classifySettingsChange(this.lastKnownSettingsRaw ?? "", current);
       this.lastKnownSettingsRaw = current;
 
-      if (!shouldWarn) {
-        // A real change that isn't a trust invalidation — the claudegate entry
-        // was removed (an uninstall, handled by the not-registered health
-        // state), not a mid-session edit. Clear so a future invalidation
-        // re-warns. (Genuine recovery from invalidation is via Setup Hook.)
+      if (kind === "benign") {
+        // Claude Code rewrote an unrelated field (model/theme/plugins/session
+        // state); the hooks block is untouched and capture keeps working.
+        // Leave trust state exactly as-is — don't warn, and don't clear a
+        // genuine invalidation that a real hook change set earlier.
+        return;
+      }
+
+      if (kind === "unregistered") {
+        // The hooks block changed and the claudegate entry is gone — an
+        // uninstall (handled by the not-registered health state), not a
+        // mid-session edit. Clear so a future invalidation re-warns.
+        // (Genuine recovery from invalidation is via Setup Hook.)
         this.trustInvalidated = false;
         this.trustWarningShown = false;
         this.fireHealth();

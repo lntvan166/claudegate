@@ -3,6 +3,7 @@ import {
   hasRealChange, shouldPruneNoOp, acceptEntry, rejectEntry, migrateSession,
   makeRecordId, Session, FileEntry, mergeFreshCaptures,
   MAX_ACCEPTED_RECORDS, capAcceptedLog, capAcceptedBytes, fileEntryFor,
+  NOOP_SETTLE_MS, NEW_FILE_ABSENT_MS,
 } from "./reviewModel";
 
 function base(): Session {
@@ -114,28 +115,44 @@ console.log("ok - makeRecordId");
 // SOUL PATH (C1 regression): the reconcile prune must be per-entry age-based so
 // a real edit whose write lands slightly late (a later file in a burst) is NEVER
 // pruned before it appears.
+// The PreToolUse hook captures the baseline BEFORE the write lands, and the
+// write can land SECONDS after the hook (measured up to ~6s under a busy hook
+// chain / slow editor save). The pre-write reconcile therefore sees a disk state
+// that still predates the write: a new file looks absent, an edited file looks
+// unchanged. Pruning at the old 1.5s grace destroyed these legit pending entries
+// before their content ever landed (the ".claude/*.commits.yaml vanishing" bug).
+// The settle windows must comfortably exceed real write lag.
 {
-  const GRACE = 1500;
   const now = 1_000_000;
   const pend = (oc: string | null, capturedAt?: string): FileEntry =>
     ({ originalContent: oc, reviewStatus: "pending", capturedAt });
   const iso = (ms: number) => new Date(ms).toISOString();
 
   // real change → never pruned, regardless of age
-  assert.equal(shouldPruneNoOp(pend("A", iso(now - 10 * GRACE)), "B", now, GRACE), false, "real change kept");
-  // no-op but YOUNG (write may still land) → keep — this is the C1 guard
-  assert.equal(shouldPruneNoOp(pend("A", iso(now - 100)), "A", now, GRACE), false, "young no-op kept (burst-safe)");
-  // no-op and SETTLED (past its own grace) → prune
-  assert.equal(shouldPruneNoOp(pend("A", iso(now - 2 * GRACE)), "A", now, GRACE), true, "settled no-op pruned");
-  // no-op with no capturedAt (file-watcher path, created post-write) → settled → prune
-  assert.equal(shouldPruneNoOp(pend("A", undefined), "A", now, GRACE), true, "no-op w/o capturedAt pruned");
+  assert.equal(shouldPruneNoOp(pend("A", iso(now - 999_999)), "B", now), false, "real change kept");
+
+  // --- existing-file no-op: kept until NOOP_SETTLE_MS elapses (write may lag) ---
+  assert.equal(shouldPruneNoOp(pend("A", iso(now - (NOOP_SETTLE_MS - 1000))), "A", now), false,
+    "no-op within settle window kept (slow edit's write may still land)");
+  assert.equal(shouldPruneNoOp(pend("A", iso(now - (NOOP_SETTLE_MS + 1000))), "A", now), true,
+    "settled no-op pruned once past the settle window");
+  // no capturedAt (file-watcher path, created post-write) → treat as settled → prune
+  assert.equal(shouldPruneNoOp(pend("A", undefined), "A", now), true, "no-op w/o capturedAt pruned");
+
+  // --- new file: a hook capture PROMISES a write; kept until NEW_FILE_ABSENT_MS ---
   // new file that now exists (even empty) → real change → keep
-  assert.equal(shouldPruneNoOp(pend(null, iso(now - 2 * GRACE)), "", now, GRACE), false, "created (empty) new file kept");
-  // new file that never appeared, settled → prune
-  assert.equal(shouldPruneNoOp(pend(null, iso(now - 2 * GRACE)), null, now, GRACE), true, "vanished new file pruned");
-  // new file not yet written, still young → keep (write pending)
-  assert.equal(shouldPruneNoOp(pend(null, iso(now - 100)), null, now, GRACE), false, "young unwritten new file kept");
-  console.log("ok - shouldPruneNoOp (per-entry grace; burst-safe reconcile)");
+  assert.equal(shouldPruneNoOp(pend(null, iso(now - 999_999)), "", now), false, "created (empty) new file kept");
+  // new file not yet on disk but within the (generous) window → keep (write pending)
+  assert.equal(shouldPruneNoOp(pend(null, iso(now - (NEW_FILE_ABSENT_MS - 1000))), null, now), false,
+    "unwritten new file within window kept (hook-vs-write lag)");
+  // new file that never appeared, past the window → genuine temp file → prune
+  assert.equal(shouldPruneNoOp(pend(null, iso(now - (NEW_FILE_ABSENT_MS + 1000))), null, now), true,
+    "vanished new file pruned once past the window");
+  // REGRESSION (the reported bug): a new file still absent at the OLD 1.5s grace
+  // must NOT be pruned — its write landed ~6s later in the field.
+  assert.equal(shouldPruneNoOp(pend(null, iso(now - 1500)), null, now), false,
+    "new file absent at old 1.5s grace is kept (hook-vs-write race fix)");
+  console.log("ok - shouldPruneNoOp (write-lag-tolerant settle windows)");
 }
 
 // mergeFreshCaptures: reconcile concurrent hook captures at persist time.
@@ -445,6 +462,19 @@ console.log("ok - makeRecordId");
   assert.equal(capAcceptedBytes(s, 1_000_000), 0, "under budget → nothing dropped");
   assert.equal(s.accepted.length, 1);
   console.log("ok - capAcceptedBytes is a no-op under budget");
+}
+{
+  // A single accepted record larger than the whole budget must NOT wipe the log:
+  // keep the newest record so one big-file accept can't erase all history.
+  const s = base();
+  const huge = "x".repeat(100_000);
+  s.accepted.push({ id: "old", path: "/a", before: null, after: huge, decidedAt: "t0" });
+  s.accepted.push({ id: "new", path: "/b", before: null, after: huge, decidedAt: "t1" });
+  const dropped = capAcceptedBytes(s, 50_000); // budget smaller than one record
+  assert.equal(dropped, 1, "only the older record is dropped");
+  assert.equal(s.accepted.length, 1, "the newest record is retained");
+  assert.equal(s.accepted[0].id, "new", "newest kept even though it exceeds the budget");
+  console.log("ok - capAcceptedBytes always keeps the newest record");
 }
 
 // fileEntryFor: drive-letter/case tolerance for URI-derived path lookups (Windows).

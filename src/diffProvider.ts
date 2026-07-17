@@ -128,11 +128,14 @@ export async function openDiff(
 
   const entry = session.files[filePath];
 
-  // A pending entry whose baseline already equals disk (a transient no-op, not
-  // yet pruned) would open a blank diff — show a note instead.
+  // A pending entry whose baseline already equals disk (the file was reverted to
+  // baseline — git reset, editor undo — without a session-file change to trigger
+  // reconcile) would open a blank diff. Self-heal it: drop the stale row so it
+  // clears from the panel instead of lingering as a phantom, and show a note.
   if (!sessionManager.hasRealPendingChange(filePath)) {
+    const removed = sessionManager.dropIfNoRealChange(filePath);
     vscode.window.showInformationMessage(
-      `Claude Gate: no changes to review in ${path.basename(filePath)}.`
+      `Claude Gate: no changes to review in ${path.basename(filePath)}${removed ? " — removed from Pending." : "."}`
     );
     return;
   }
