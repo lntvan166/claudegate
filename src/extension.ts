@@ -6,6 +6,7 @@ import { SessionManager } from "./sessionManager";
 import {
   FilteredTreeProvider,
   FileReviewItem,
+  RecordReviewItem,
   FolderItem,
   WorktreeGroupItem,
   registerOpenDiff,
@@ -15,7 +16,7 @@ import {
 import { WorktreeSessionRegistry } from "./worktreeSessionRegistry";
 import { HookInstaller } from "./hookInstaller";
 import { SettingsTreeProvider, SettingsItem } from "./settingsPanel";
-import { ClaudeGateContentProvider, SCHEME, openReviewRecord, openHistoryRecord, originalUri } from "./diffProvider";
+import { ClaudeGateContentProvider, SCHEME, openDiff, openReviewRecord, openHistoryRecord, originalUri } from "./diffProvider";
 import { HistoryTreeProvider, HistorySessionItem } from "./historyPanel";
 import { formatBytes } from "./historyModel";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
@@ -280,6 +281,21 @@ export function activate(context: vscode.ExtensionContext): void {
       treeDataProvider: pendingProvider,
       showCollapseAll:  true,
     });
+    // Open the diff when a pending file row is selected. This deliberately does
+    // NOT go through a TreeItem.command: dispatching a command via the tree's own
+    // click path fails intermittently with "Actual command not found, wanted to
+    // execute claudegate.openDiff/<handle>" when the clicked node is stale mid-
+    // refresh — e.g. right after accepting another file (microsoft/vscode#173233).
+    // The selection event hands us the live element, so we call openDiff directly
+    // with the row's own (possibly worktree) SessionManager — no fragile dispatch.
+    context.subscriptions.push(
+      pendingView.onDidChangeSelection((e) => {
+        const item = e.selection[0];
+        if (item instanceof FileReviewItem) {
+          void openDiff(item.filePath, item.sessionManager);
+        }
+      })
+    );
     const acceptedView = vscode.window.createTreeView("claudegate.acceptedPanel", {
       treeDataProvider: acceptedProvider,
       showCollapseAll:  true,
@@ -289,6 +305,20 @@ export function activate(context: vscode.ExtensionContext): void {
       showCollapseAll:  true,
     });
     context.subscriptions.push(pendingView, acceptedView, rejectedView);
+
+    // Accepted/Rejected rows open their record diff on selection too (same reason
+    // as the pending panel above — no TreeItem.command dispatch). Records are
+    // primary-session only, so they resolve against the primary sessionManager.
+    const openSelectedRecord = (e: vscode.TreeViewSelectionChangeEvent<vscode.TreeItem>): void => {
+      const item = e.selection[0];
+      if (item instanceof RecordReviewItem) {
+        void openReviewRecord(item.recordId, sessionManager);
+      }
+    };
+    context.subscriptions.push(
+      acceptedView.onDidChangeSelection(openSelectedRecord),
+      rejectedView.onDidChangeSelection(openSelectedRecord)
+    );
 
     const settingsProvider = new SettingsTreeProvider(hookInstaller, context.subscriptions);
     const settingsView = vscode.window.createTreeView("claudegate.settingsPanel", {

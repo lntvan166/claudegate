@@ -65,6 +65,11 @@ export class FolderItem extends vscode.TreeItem {
     this.resourceUri  = vscode.Uri.file(folderPath);
     this.tooltip      = folderPath;
     this.contextValue = `claudegate.folder.${groupStatus}`;
+    // Stable id → VS Code diffs children by identity across onDidChangeTreeData
+    // refreshes instead of tearing the whole subtree down and rebuilding it (see
+    // FileReviewItem). Include groupStatus + sessionId because in group-by-session
+    // mode the same folder path can appear under more than one session node.
+    this.id = `folder::${groupStatus}::${sessionId ?? "*"}::${folderPath}`;
   }
 }
 
@@ -80,6 +85,10 @@ export class SessionItem extends vscode.TreeItem {
     this.description  = `${fileCount} file${fileCount === 1 ? "" : "s"}`;
     this.contextValue = "claudegate.session";
     this.iconPath     = new vscode.ThemeIcon(sessionId ? "history" : "question");
+    // Stable across refreshes (see FileReviewItem). Session ids are unique within
+    // a tree; the file-count lives in `description`, which the full-tree refresh
+    // still re-renders, so a stable id doesn't freeze the count.
+    this.id = `session::${sessionId ?? "__unknown__"}`;
   }
 }
 
@@ -103,6 +112,9 @@ export class WorktreeGroupItem extends vscode.TreeItem {
     );
     this.contextValue = "claudegate.worktreeGroup";
     this.iconPath     = new vscode.ThemeIcon("git-branch");
+    // Stable across refreshes (see FileReviewItem); the pending count lives in
+    // `description`, which the full-tree refresh re-renders.
+    this.id = `worktree::${worktreeRoot}`;
   }
 }
 
@@ -112,7 +124,7 @@ export class FileReviewItem extends vscode.TreeItem {
   constructor(
     public readonly filePath: string,
     public readonly reviewStatus: ReviewStatus,
-    sessionManager: SessionManager,
+    public readonly sessionManager: SessionManager,
     showPath = true
   ) {
     super(path.basename(filePath), vscode.TreeItemCollapsibleState.None);
@@ -124,11 +136,19 @@ export class FileReviewItem extends vscode.TreeItem {
     // FileReviewItem is only used for pending rows now (accepted/rejected use
     // RecordReviewItem), so the context value is always the pending one.
     this.contextValue = "claudegate.file.pending";
-    this.command = {
-      command:   "claudegate.openDiff",
-      title:     "Open Diff",
-      arguments: [filePath, sessionManager],
-    };
+    // Stable id keyed on the file path — preserves selection/expansion state
+    // across refreshes (a pending path is unique in the tree: each file belongs
+    // to exactly one session/worktree scope).
+    this.id = `pending::${filePath}`;
+    // NB: intentionally NO `this.command`. Opening the diff is wired to the tree
+    // view's onDidChangeSelection in extension.ts instead. Binding the open to a
+    // TreeItem.command means VS Code dispatches it through the tree's own
+    // click→command path, which — when the row's node is stale mid-refresh (e.g.
+    // right after accepting another file) — executes a MALFORMED command id
+    // ("claudegate.openDiff/<treeHandle>", e.g. ".../59") and shows "Actual
+    // command not found" (microsoft/vscode#173233). Handling selection ourselves
+    // and calling openDiff(filePath, sessionManager) directly removes that
+    // fragile dispatch entirely.
     if (isProtected(filePath)) {
       this.iconPath = new vscode.ThemeIcon("warning", new vscode.ThemeColor("list.warningForeground"));
       this.tooltip = new vscode.MarkdownString(
@@ -152,10 +172,17 @@ export class RecordReviewItem extends vscode.TreeItem {
     this.filePath = record.path;
     this.recordId = record.id;
     this.contextValue = decision === "accepted" ? "claudegate.file.accepted" : "claudegate.file.rejected";
+    // Stable across refreshes (see FileReviewItem). record.id is already unique
+    // (`<decidedAt>::<path>`); prefix with the decision to stay unique if the
+    // same record id ever surfaced in both logs.
+    this.id = `${decision}::${record.id}`;
     this.tooltip = new vscode.MarkdownString(
       `**${path.basename(record.path)}**\n\n${record.path}\n\n*${decision}* · ${new Date(record.decidedAt).toLocaleString()}`
     );
-    this.command = { command: "claudegate.openReviewRecord", title: "Open Diff", arguments: [record.id] };
+    // No TreeItem.command — opened via the Accepted/Rejected views'
+    // onDidChangeSelection in extension.ts, for the same reason as FileReviewItem
+    // (avoids VS Code's stale-handle "Actual command not found" dispatch,
+    // microsoft/vscode#173233).
     if (isProtected(record.path)) {
       this.iconPath = new vscode.ThemeIcon("warning", new vscode.ThemeColor("list.warningForeground"));
     }

@@ -74,10 +74,13 @@ function makeFixture(): { home: string; root: string; ws: string; wsFile: string
   assert.equal(String(g.description), "1 pending", "group shows the pending count");
   assert.equal(g.contextValue, "claudegate.worktreeGroup", "contextValue drives the inline menu (package.json when-clause)");
 
-  const children = provider.getChildren(g) as unknown as Array<{ filePath: string; command: { arguments: unknown[] } }>;
+  const children = provider.getChildren(g) as unknown as Array<{ filePath: string; sessionManager: unknown }>;
   assert.equal(children.length, 1, "group expands to its one pending file");
   assert.equal(children[0].filePath, wsFile, "child is the worktree's pending file");
-  assert.equal(children[0].command.arguments[1], registry.managerFor(wsFile), "row bound to the WORKTREE's SessionManager (openDiff/accept resolve there)");
+  // The row carries the WORKTREE's SessionManager; the pending panel's
+  // onDidChangeSelection handler passes it straight to openDiff so the diff
+  // resolves against the worktree session (not the primary one).
+  assert.equal(children[0].sessionManager, registry.managerFor(wsFile), "row bound to the WORKTREE's SessionManager (openDiff resolves there)");
 
   assert.equal(registry.totalPending(), 1, "badge count includes the worktree pending file");
   assert.ok(registry.managerFor(wsFile), "managerFor resolves a worktree file");

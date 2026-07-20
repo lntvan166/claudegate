@@ -7,6 +7,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.10.3] — 2026-07-20
+
+### Fixed
+
+- **Clicking a file in a review panel right after accepting another one no longer throws "Actual command not found, wanted to execute claudegate.openDiff".** Accepting a file removes its row and refreshes the tree; if you clicked the next file while that refresh was still in flight (a fast reviewer, not a slow one), VS Code dispatched the row's open command against a stale internal tree node and mangled the command id into `claudegate.openDiff/<node-handle>` — an id that isn't registered, so it errored and the diff didn't open until you clicked again. This is a known VS Code tree-view timing bug ([microsoft/vscode#173233](https://github.com/microsoft/vscode/issues/173233)); the reliable fix is to stop routing the open through a `TreeItem.command` at all. All three panels — Pending, Accepted, Rejected — now open their diff from the tree's **selection** event, calling the open handler directly with the live row, so there is no command-dispatch step left to mangle. Two minor consequences of opening on selection: navigating the list with the arrow keys now opens each highlighted row's diff (as clicking does), and re-selecting the row that's already selected won't reopen a diff you closed — move to another row and back.
+
 ## [1.10.2] — 2026-07-17
 
 ### Fixed
