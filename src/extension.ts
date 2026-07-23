@@ -275,7 +275,6 @@ export function activate(context: vscode.ExtensionContext): void {
         new ClaudeGateDecorationProvider(sessionManager)
       )
     );
-
     // ── Three sidebar panels ───────────────────────────────────────────────
     const pendingView = vscode.window.createTreeView("claudegate.pendingPanel", {
       treeDataProvider: pendingProvider,
@@ -357,7 +356,6 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage("Claude Gate: all caught up ✓");
       }
     };
-
     // ── Commands ──────────────────────────────────────────────────────────
     context.subscriptions.push(
       vscode.commands.registerCommand("claudegate.setupHook", async () => {
@@ -496,6 +494,54 @@ export function activate(context: vscode.ExtensionContext): void {
           );
           if (answer === "Reject") {
             mgr.rejectFolder(item.folderPath);
+            await Promise.all(pendingFiles.map((fp) => closeDiffEditor(fp)));
+          }
+        }
+      ),
+
+      // ── Pending worktree-group actions (accept/reject the whole worktree) ──
+      // A worktree group owns its own SessionManager; every pending file in that
+      // session lives under worktreeRoot, so we reuse the folder accept/reject
+      // path scoped to that root — same save-dirty + confirmation behaviour.
+      vscode.commands.registerCommand(
+        "claudegate.acceptWorktree",
+        async (item: WorktreeGroupItem) => {
+          if (!item?.worktreeRoot) return;
+          const mgr = item.sessionManager;
+          const session = mgr.getSession();
+          const pendingFiles = Object.entries(session?.files ?? {})
+            .filter(
+              ([fp, e]) =>
+                fp.startsWith(item.worktreeRoot + path.sep) &&
+                e.reviewStatus === "pending"
+            )
+            .map(([fp]) => fp);
+          await saveDirtyPending(pendingFiles);
+          mgr.acceptFolder(item.worktreeRoot);
+        }
+      ),
+
+      vscode.commands.registerCommand(
+        "claudegate.rejectWorktree",
+        async (item: WorktreeGroupItem) => {
+          if (!item?.worktreeRoot) return;
+          const mgr = item.sessionManager;
+          const session = mgr.getSession();
+          const pendingFiles = Object.entries(session?.files ?? {})
+            .filter(
+              ([fp, e]) =>
+                fp.startsWith(item.worktreeRoot + path.sep) &&
+                e.reviewStatus === "pending"
+            )
+            .map(([fp]) => fp);
+          if (pendingFiles.length === 0) return;
+          const answer = await vscode.window.showWarningMessage(
+            `Reject ${pendingFiles.length} file(s) in worktree "${path.basename(item.worktreeRoot)}"? This restores their original content.`,
+            { modal: false },
+            "Reject"
+          );
+          if (answer === "Reject") {
+            mgr.rejectFolder(item.worktreeRoot);
             await Promise.all(pendingFiles.map((fp) => closeDiffEditor(fp)));
           }
         }
@@ -824,7 +870,6 @@ export function activate(context: vscode.ExtensionContext): void {
         openReviewRecord(id, sessionManager)
       )
     );
-
     // ── Reactive updates ──────────────────────────────────────────────────
     context.subscriptions.push(
       vscode.window.onDidChangeActiveTextEditor(() =>
@@ -892,15 +937,12 @@ export function activate(context: vscode.ExtensionContext): void {
         sessionManager.notifyChanged();
       })
     );
-
-    sessionManager.startWatching();
-    context.subscriptions.push({ dispose: () => sessionManager.stopWatching() });
+    sessionManager.startWatching();    context.subscriptions.push({ dispose: () => sessionManager.stopWatching() });
 
     // Subscribe BEFORE the first refresh so the initial attach's synchronous
     // onChange updates the badge counter (via notifyChanged) at cold start.
     context.subscriptions.push(worktreeRegistry.onChange(() => sessionManager.notifyChanged()));
-    worktreeRegistry.refresh();
-    context.subscriptions.push(
+    worktreeRegistry.refresh();    context.subscriptions.push(
       vscode.window.onDidChangeWindowState((e) => {
         if (!e.focused) return;
         worktreeRegistry.refresh();

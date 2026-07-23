@@ -2,7 +2,7 @@
   "name": "claudegate",
   "displayName": "Claude Gate",
   "description": "Review Claude Code's file changes in a native diff panel — accept or reject each edit. The PreToolUse hook captures all Claude Code edits (terminal CLI and in-editor extension); the filesystem watcher is an optional fallback for non-Claude agents and is off by default.",
-  "version": "1.10.3",
+  "version": "1.11.0",
   "publisher": "lntvan166",
   "icon": "media/icon.png",
   "engines": {
@@ -190,6 +190,16 @@
       {
         "command": "claudegate.rejectFolder",
         "title": "Reject Folder",
+        "icon": "$(x)"
+      },
+      {
+        "command": "claudegate.acceptWorktree",
+        "title": "Accept Worktree",
+        "icon": "$(check)"
+      },
+      {
+        "command": "claudegate.rejectWorktree",
+        "title": "Reject Worktree",
         "icon": "$(x)"
       },
       {
@@ -476,9 +486,19 @@
           "group": "z_claude@1"
         },
         {
-          "command": "claudegate.openWorktreeWindow",
+          "command": "claudegate.acceptWorktree",
           "when": "view == claudegate.pendingPanel && viewItem == claudegate.worktreeGroup",
           "group": "inline@1"
+        },
+        {
+          "command": "claudegate.rejectWorktree",
+          "when": "view == claudegate.pendingPanel && viewItem == claudegate.worktreeGroup",
+          "group": "inline@2"
+        },
+        {
+          "command": "claudegate.openWorktreeWindow",
+          "when": "view == claudegate.pendingPanel && viewItem == claudegate.worktreeGroup",
+          "group": "inline@3"
         },
         {
           "command": "claudegate.openFolderInNewWindow",
@@ -570,6 +590,14 @@
         },
         {
           "command": "claudegate.openWorktreeWindow",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.acceptWorktree",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.rejectWorktree",
           "when": "false"
         },
         {

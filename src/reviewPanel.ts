@@ -249,30 +249,41 @@ export class FilteredTreeProvider
     // (all edits may live in a nested worktree), so handle it before that guard.
     if (element instanceof WorktreeGroupItem) return this.worktreeFiles(element);
 
-    // Root
-    if (!element) {
-      let primary: vscode.TreeItem[] = [];
-      if (session) {
-        if (grouped) {
-          primary = this.sessionGroups(session);
-        } else {
-          const files = this.filteredFiles(session);
-          primary =
-            this.viewMode === "list"
-              ? [...files]
-                  .sort(
-                    (a, b) =>
-                      (Number(isProtected(b)) - Number(isProtected(a))) || a.localeCompare(b)
-                  )
-                  .map((fp) => new FileReviewItem(fp, this.status, this.sessionManager))
-              : this.directChildren(files, getWorkspaceRoot(files), this.status, false);
-        }
-      }
-      return [...primary, ...this.worktreeGroups()];
+    // Non-grouped tree-mode folder expansion (sessionId undefined). Handled before
+    // the session guard because a folder node can exist purely to hold a nested
+    // worktree (no primary-session file under it, e.g. a `ws-*` dir whose only
+    // change is a checked-out worktree). A folder that falls INSIDE a worktree
+    // resolves to that worktree's manager (so its rows target the worktree
+    // session); otherwise it belongs to the primary session. Only the primary
+    // subtree nests further worktree groups.
+    if (element instanceof FolderItem && element.sessionId === undefined) {
+      const wtMgr = this.worktreeRegistry?.managerFor(element.folderPath) ?? null;
+      const mgr = wtMgr ?? this.sessionManager;
+      const filesUnder = mgr.getSession()
+        ? this.pendingOf(mgr).filter((fp) => fp.startsWith(element.folderPath + path.sep))
+        : [];
+      return this.treeChildrenAt(element.folderPath, filesUnder, mgr, wtMgr === null);
     }
 
-    // Remaining element branches need the primary session (SessionItem/FolderItem
-    // are only produced when a session exists).
+    // Root
+    if (!element) {
+      // Group-by-session keeps worktrees as flat top-level groups (they are their
+      // own sessions, not part of the primary session's session buckets).
+      if (session && grouped) return [...this.sessionGroups(session), ...this.worktreeGroups()];
+
+      const files = session ? this.filteredFiles(session) : [];
+      if (this.viewMode === "list") {
+        const rows = [...files]
+          .sort((a, b) => (Number(isProtected(b)) - Number(isProtected(a))) || a.localeCompare(b))
+          .map((fp) => new FileReviewItem(fp, this.status, this.sessionManager));
+        return [...rows, ...this.worktreeGroups()];
+      }
+      // Tree mode: worktree groups nest under the folder they live in.
+      return this.treeChildrenAt(getWorkspaceRoot(files), files, this.sessionManager, true);
+    }
+
+    // Remaining element branches need the primary session (SessionItem/grouped
+    // FolderItem are only produced when a session exists).
     if (!session) return [];
 
     // Session group children
@@ -393,6 +404,65 @@ export class FilteredTreeProvider
     return Object.keys(s.files).filter((fp) => isInWorkspace(fp) && !isExcluded(fp));
   }
 
+  // Tree-mode children at `parentPath`, binding file rows to `mgr` (the primary
+  // session, or a nested worktree's session when we're inside one). When
+  // `includeWorktrees` is set, attached worktree groups that live under
+  // `parentPath` are nested here too, so a worktree checked out under a `ws-*`
+  // directory renders INSIDE that folder instead of floating at the root (the
+  // go.work / multi-module layout) — intermediate folder nodes are created for
+  // them even when no file lives under them. Folder rows carry no sessionId, so
+  // getChildren() re-resolves their owning manager (primary vs worktree) via the
+  // registry on expansion. Order within a folder: subfolders, then worktree
+  // groups, then files.
+  private treeChildrenAt(
+    parentPath: string,
+    files: string[],
+    mgr: SessionManager,
+    includeWorktrees: boolean
+  ): vscode.TreeItem[] {
+    const seenFolders = new Set<string>();
+    const folders: FolderItem[] = [];
+    const worktrees: WorktreeGroupItem[] = [];
+    const fileItems: FileReviewItem[] = [];
+
+    // Returns true if `targetPath` is an immediate child of parentPath (a leaf at
+    // this level); otherwise creates/reuses the intermediate FolderItem for it.
+    const isImmediateChild = (targetPath: string): boolean => {
+      const parts = path.relative(parentPath, targetPath).split(path.sep);
+      if (parts.length === 1) return true;
+      const folderPath = path.join(parentPath, parts[0]);
+      if (!seenFolders.has(folderPath)) {
+        seenFolders.add(folderPath);
+        folders.push(new FolderItem(folderPath, this.status));
+      }
+      return false;
+    };
+
+    for (const fp of files) {
+      if (isImmediateChild(fp)) fileItems.push(new FileReviewItem(fp, this.status, mgr, false));
+    }
+    if (includeWorktrees) {
+      for (const g of this.worktreeGroupsUnder(parentPath)) {
+        if (isImmediateChild(g.worktreeRoot)) worktrees.push(g);
+      }
+    }
+
+    folders.sort((a, b) => a.folderPath.localeCompare(b.folderPath));
+    worktrees.sort((a, b) => a.worktreeRoot.localeCompare(b.worktreeRoot));
+    fileItems.sort(
+      (a, b) =>
+        (Number(isProtected(b.filePath)) - Number(isProtected(a.filePath))) ||
+        a.filePath.localeCompare(b.filePath)
+    );
+    return [...folders, ...worktrees, ...fileItems];
+  }
+
+  // Attached worktree groups (pending, count > 0) whose root lives under `parentPath`.
+  private worktreeGroupsUnder(parentPath: string): WorktreeGroupItem[] {
+    const prefix = parentPath.endsWith(path.sep) ? parentPath : parentPath + path.sep;
+    return this.worktreeGroups().filter((g) => g.worktreeRoot.startsWith(prefix));
+  }
+
   // One group node per attached worktree that currently has pending files.
   private worktreeGroups(): WorktreeGroupItem[] {
     if (this.status !== "pending" || !this.worktreeRegistry) return [];
@@ -404,13 +474,19 @@ export class FilteredTreeProvider
     return items.sort((a, b) => a.worktreeRoot.localeCompare(b.worktreeRoot));
   }
 
-  // Flat pending-file rows for one worktree group, bound to its session manager
-  // so openDiff/accept/reject resolve against the correct (worktree) session.
+  // Pending-file rows for one worktree group, bound to its session manager so
+  // openDiff/accept/reject resolve against the correct (worktree) session. Honors
+  // the panel's view mode: a folder tree rooted at the worktree in tree mode, a
+  // flat path-labelled list in list mode.
   private worktreeFiles(group: WorktreeGroupItem): vscode.TreeItem[] {
-    const files = this.pendingOf(group.sessionManager).sort(
-      (a, b) => (Number(isProtected(b)) - Number(isProtected(a))) || a.localeCompare(b)
-    );
-    return files.map((fp) => new FileReviewItem(fp, "pending", group.sessionManager, true));
+    const files = this.pendingOf(group.sessionManager);
+    if (this.viewMode === "list") {
+      return [...files]
+        .sort((a, b) => (Number(isProtected(b)) - Number(isProtected(a))) || a.localeCompare(b))
+        .map((fp) => new FileReviewItem(fp, "pending", group.sessionManager, true));
+    }
+    // Tree mode: nest into folders; a worktree never re-nests worktree groups.
+    return this.treeChildrenAt(group.worktreeRoot, files, group.sessionManager, false);
   }
 
   // Accepted (newest first) / rejected (latest-per-file) records, scoped to

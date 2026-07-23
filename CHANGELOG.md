@@ -7,6 +7,17 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.11.0] — 2026-07-23
+
+### Added
+
+- **Accept or reject a whole git worktree in one click.** Worktree group rows in the **Pending** panel now carry inline **Accept ✓** and **Reject ✗** actions, next to the existing **Open Worktree in New Window** button — the same one-click bulk review folder rows already had. Accepting takes every pending file in that worktree's session at once; rejecting prompts for confirmation and restores each file's original content. Both operate on the worktree's own review session, so the decision syncs to the worktree's own window too.
+
+### Changed
+
+- **Worktree changes now nest under the folder they live in, instead of floating at the top of the panel.** In a `go.work` / multi-module layout where worktrees are checked out under per-feature directories (e.g. `ws-kpivio/tms-testing`, `ws-kpivio/tms-shipper-mnt`), the Pending tree used to append every worktree as a bare top-level row labelled by its base name only — disconnected from the `ws-*` folder it belonged to, and ambiguous when two worktrees shared a name (`tms-protobuf` under two different parents). Worktree groups are now placed inside the tree at the folder they physically sit under; intermediate folders (like a `ws-*` directory whose only change is a checked-out worktree) are created even when no primary-session file lives directly under them. Ordering within a folder is subfolders, then worktree groups, then files.
+- **A worktree group's own files now honour the View as Tree / View as List toggle.** The files inside a worktree group used to render as a flat, path-labelled list regardless of the panel's view mode. In tree view they now group into folders rooted at the worktree — matching the primary panel — while list view keeps the flat layout. Folder rows inside a worktree resolve back to that worktree's session, so accept/reject/open still target the correct one.
+
 ## [1.10.3] — 2026-07-20
 
 ### Fixed

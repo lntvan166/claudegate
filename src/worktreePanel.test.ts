@@ -4,7 +4,7 @@ import * as os from "os";
 import * as path from "path";
 import * as crypto from "crypto";
 import { SessionManager } from "./sessionManager";
-import { FilteredTreeProvider, WorktreeGroupItem } from "./reviewPanel";
+import { FilteredTreeProvider, WorktreeGroupItem, FolderItem, FileReviewItem } from "./reviewPanel";
 import { WorktreeSessionRegistry } from "./worktreeSessionRegistry";
 import { ExcludeMatcher } from "./excludeMatcher";
 import { setExcludeMatcher, setProtectedMatcher } from "./workspaceScope";
@@ -47,6 +47,25 @@ function makeFixture(): { home: string; root: string; ws: string; wsFile: string
   return { home, root, ws, wsFile };
 }
 
+// Register a git worktree working dir at <root>/<relPath> against the main repo's
+// `.git`, and drop a single pending file inside it. `relPath` may be nested
+// (e.g. "ws-kpivio/tms-testing"), mirroring the go.work layout where worktrees
+// are checked out under per-feature `ws-*` directories.
+function addWorktree(home: string, root: string, relPath: string, fileName: string): string {
+  const name = relPath.split(path.posix.sep).join("-"); // unique registry entry under .git/worktrees
+  fs.mkdirSync(path.join(root, ".git", "worktrees", name), { recursive: true });
+  const ws = path.join(root, ...relPath.split(path.posix.sep));
+  fs.mkdirSync(ws, { recursive: true });
+  fs.writeFileSync(path.join(root, ".git", "worktrees", name, "gitdir"), path.join(ws, ".git") + "\n");
+  fs.writeFileSync(path.join(ws, ".git"), `gitdir: ${path.join(root, ".git", "worktrees", name)}\n`);
+  const wsFile = path.join(ws, fileName);
+  fs.writeFileSync(wsFile, "changed by claude");
+  writeSession(home, ws, {
+    [wsFile]: { originalContent: "base", reviewStatus: "pending", newFile: false, sessionId: "s1", capturedAt: new Date().toISOString() },
+  });
+  return wsFile;
+}
+
 // ── Case 1: PRIMARY session null (all edits in the worktree) — the Critical ──
 {
   setExcludeMatcher(new ExcludeMatcher());
@@ -73,6 +92,8 @@ function makeFixture(): { home: string; root: string; ws: string; wsFile: string
   assert.equal(String(g.label), "ws-feature (worktree)", "group label");
   assert.equal(String(g.description), "1 pending", "group shows the pending count");
   assert.equal(g.contextValue, "claudegate.worktreeGroup", "contextValue drives the inline menu (package.json when-clause)");
+  // accept/rejectWorktree read item.sessionManager + item.worktreeRoot off the row.
+  assert.equal(g.sessionManager, registry.managerFor(wsFile), "group exposes the WORKTREE's manager (accept/rejectWorktree target it)");
 
   const children = provider.getChildren(g) as unknown as Array<{ filePath: string; sessionManager: unknown }>;
   assert.equal(children.length, 1, "group expands to its one pending file");
@@ -121,14 +142,18 @@ function makeFixture(): { home: string; root: string; ws: string; wsFile: string
   const groups = roots.filter((i) => i instanceof WorktreeGroupItem);
   assert.ok(primaryRows.length >= 1, "primary pending row(s) present");
   assert.equal(groups.length, 1, "worktree group present alongside primary rows");
-  assert.equal(roots.indexOf(groups[0]), roots.length - 1, "worktree group is appended after primary items");
+  // ws-feature sits directly under root (its parent IS the workspace root), so it
+  // stays a top-level row — but ordering is now folders → worktrees → files, so the
+  // group renders BEFORE the primary p.txt file, not appended last.
+  const pIdx = roots.findIndex((i) => !(i instanceof WorktreeGroupItem));
+  assert.ok(roots.indexOf(groups[0]) < pIdx, "worktree group renders before primary file rows");
   assert.equal(registry.totalPending(), 1, "totalPending counts only worktree files");
 
   registry.dispose();
   primary.stopWatching();
   fs.rmSync(home, { recursive: true, force: true });
   fs.rmSync(root, { recursive: true, force: true });
-  console.log("ok - primary rows and worktree group coexist (group appended last)");
+  console.log("ok - primary rows and worktree group coexist (group before files)");
 }
 
 // ── Case 3: Accepted/Rejected panels must NOT show worktree groups (pending-only) ──
@@ -157,6 +182,149 @@ function makeFixture(): { home: string; root: string; ws: string; wsFile: string
   fs.rmSync(home, { recursive: true, force: true });
   fs.rmSync(root, { recursive: true, force: true });
   console.log("ok - worktree groups are pending-only (absent from Accepted/Rejected)");
+}
+
+// ── Case 4: worktrees NEST under their owning folder in tree mode (go.work layout) ──
+// A worktree checked out at <root>/ws-kpivio/tms-testing must appear UNDER a
+// `ws-kpivio` folder node — not as a bare top-level "tms-testing (worktree)" row
+// disconnected from ws-kpivio. Intermediate folders are created even when no
+// primary-session file lives directly under them (ws-appmanageresonly).
+{
+  setExcludeMatcher(new ExcludeMatcher());
+  setProtectedMatcher(new ExcludeMatcher());
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cg-guihome-"));
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cg-guiroot-"));
+  fs.mkdirSync(path.join(root, ".git"), { recursive: true }); // main repo (.git DIR)
+  stubWorkspace.workspaceFolders = [{ uri: { fsPath: root } }];
+
+  const testingFile = addWorktree(home, root, "ws-kpivio/tms-testing", "bootstrap.go");
+  const orderOpsFile = addWorktree(home, root, "ws-appmanageresonly/tms-order-ops", "es.go");
+  // A primary-session file living directly under ws-kpivio (like go.work).
+  const goWork = path.join(root, "ws-kpivio", "go.work");
+  fs.writeFileSync(goWork, "go 1.22");
+  writeSession(home, root, {
+    [goWork]: { originalContent: "old", reviewStatus: "pending", newFile: false, sessionId: "s0", capturedAt: new Date().toISOString() },
+  });
+
+  const primary = new SessionManager(fakeLog, root);
+  primary.startWatching();
+  const registry = new WorktreeSessionRegistry(fakeLog, root);
+  registry.refresh();
+  const provider = new FilteredTreeProvider(primary, "pending", "tree", registry);
+
+  const roots = provider.getChildren();
+  // No worktree group floats at the top level anymore — they nest under folders.
+  assert.equal(
+    roots.filter((i) => i instanceof WorktreeGroupItem).length, 0,
+    "no worktree groups at the top level (they nest under their ws-* folder)"
+  );
+  const folderOf = (name: string) =>
+    roots.find((i) => i instanceof FolderItem && (i as FolderItem).folderPath === path.join(root, name)) as FolderItem | undefined;
+  const kpivio = folderOf("ws-kpivio");
+  const appmanage = folderOf("ws-appmanageresonly");
+  assert.ok(kpivio, "ws-kpivio folder node present at root");
+  assert.ok(appmanage, "ws-appmanageresonly folder node present (created for its worktree, no primary file under it)");
+
+  // Expand ws-kpivio → its worktree group + go.work, ordered folders → worktrees → files.
+  const kpivioKids = provider.getChildren(kpivio);
+  const kpGroups = kpivioKids.filter((i) => i instanceof WorktreeGroupItem) as WorktreeGroupItem[];
+  assert.equal(kpGroups.length, 1, "ws-kpivio contains exactly its one pending worktree");
+  assert.equal(kpGroups[0].worktreeRoot, path.dirname(testingFile), "nested group is ws-kpivio/tms-testing");
+  const kpFiles = kpivioKids.filter((i) => i instanceof FileReviewItem) as FileReviewItem[];
+  assert.equal(kpFiles.length, 1, "ws-kpivio shows its primary go.work file too");
+  assert.equal(kpFiles[0].filePath, goWork, "the primary file under ws-kpivio is go.work");
+  assert.ok(kpivioKids.indexOf(kpGroups[0]) < kpivioKids.indexOf(kpFiles[0]), "worktree row comes before file row");
+
+  // Expand ws-appmanageresonly → its worktree group, even with no primary file under it.
+  const appKids = provider.getChildren(appmanage);
+  const appGroups = appKids.filter((i) => i instanceof WorktreeGroupItem) as WorktreeGroupItem[];
+  assert.equal(appGroups.length, 1, "ws-appmanageresonly contains its worktree group");
+  assert.equal(appGroups[0].worktreeRoot, path.dirname(orderOpsFile), "nested group is ws-appmanageresonly/tms-order-ops");
+
+  registry.dispose();
+  primary.stopWatching();
+  fs.rmSync(home, { recursive: true, force: true });
+  fs.rmSync(root, { recursive: true, force: true });
+  console.log("ok - worktrees nest under their owning ws-* folder in tree mode");
+}
+
+// ── Case 5: a worktree group's OWN files nest as a folder tree (tree mode) ──
+// Inside a worktree checked out at ws-kpivio/tms-testing, its pending files must
+// group into folders (common/suite/…) in tree view and stay flat in list view —
+// same toggle as the primary panel. Folder rows inside the worktree resolve back
+// to the WORKTREE's SessionManager so accept/reject/openDiff target the right one.
+{
+  setExcludeMatcher(new ExcludeMatcher());
+  setProtectedMatcher(new ExcludeMatcher());
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cg-guihome-"));
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cg-guiroot-"));
+  fs.mkdirSync(path.join(root, ".git"), { recursive: true });
+  stubWorkspace.workspaceFolders = [{ uri: { fsPath: root } }];
+
+  // Worktree at ws-kpivio/tms-testing with a NESTED file and a top-level file.
+  const name = "ws-kpivio-tms-testing";
+  fs.mkdirSync(path.join(root, ".git", "worktrees", name), { recursive: true });
+  const wt = path.join(root, "ws-kpivio", "tms-testing");
+  fs.mkdirSync(path.join(wt, "common", "suite"), { recursive: true });
+  fs.writeFileSync(path.join(root, ".git", "worktrees", name, "gitdir"), path.join(wt, ".git") + "\n");
+  fs.writeFileSync(path.join(wt, ".git"), `gitdir: ${path.join(root, ".git", "worktrees", name)}\n`);
+  const nestedFile = path.join(wt, "common", "suite", "bootstrap.go");
+  const topFile = path.join(wt, "go.mod");
+  fs.writeFileSync(nestedFile, "package suite");
+  fs.writeFileSync(topFile, "module x");
+  const entry = (): Record<string, unknown> => ({ originalContent: "base", reviewStatus: "pending", newFile: false, sessionId: "s1", capturedAt: new Date().toISOString() });
+  writeSession(home, wt, { [nestedFile]: entry(), [topFile]: entry() });
+
+  const primary = new SessionManager(fakeLog, root);
+  primary.startWatching();
+  const registry = new WorktreeSessionRegistry(fakeLog, root);
+  registry.refresh();
+
+  const groupOf = (provider: FilteredTreeProvider): WorktreeGroupItem => {
+    // Navigate root → ws-kpivio folder → its worktree group (tree mode).
+    const kpivio = provider.getChildren().find((i) => i instanceof FolderItem) as FolderItem;
+    const g = provider.getChildren(kpivio).find((i) => i instanceof WorktreeGroupItem) as WorktreeGroupItem;
+    return g;
+  };
+
+  // Tree mode: group children nest into folders.
+  {
+    const provider = new FilteredTreeProvider(primary, "pending", "tree", registry);
+    const kids = provider.getChildren(groupOf(provider));
+    const folders = kids.filter((i) => i instanceof FolderItem) as FolderItem[];
+    const files = kids.filter((i) => i instanceof FileReviewItem) as FileReviewItem[];
+    assert.equal(folders.length, 1, "worktree group nests its subdir as a folder (tree mode)");
+    assert.equal(folders[0].folderPath, path.join(wt, "common"), "folder is the worktree's common/ dir");
+    assert.equal(files.length, 1, "the worktree's top-level file sits alongside the folder");
+    assert.equal(files[0].filePath, topFile, "top-level worktree file is go.mod");
+    assert.equal(files[0].description, undefined, "tree-mode file row has no redundant path description");
+
+    // Drill common/ → suite/ → bootstrap.go, bound to the WORKTREE's manager.
+    const suite = provider.getChildren(folders[0]).find((i) => i instanceof FolderItem) as FolderItem;
+    const leaf = provider.getChildren(suite).find((i) => i instanceof FileReviewItem) as FileReviewItem;
+    assert.equal(leaf.filePath, nestedFile, "nested file reached through the folder chain");
+    assert.equal(leaf.sessionManager, registry.managerFor(nestedFile), "nested row bound to the WORKTREE's SessionManager");
+  }
+
+  // List mode: group children stay flat.
+  {
+    const provider = new FilteredTreeProvider(primary, "pending", "list", registry);
+    const group = provider.getChildren().find((i) => i instanceof WorktreeGroupItem) as WorktreeGroupItem;
+    const kids = provider.getChildren(group);
+    assert.equal(kids.filter((i) => i instanceof FolderItem).length, 0, "no folders in list mode");
+    assert.equal(kids.length, 2, "both worktree files listed flat");
+    assert.ok(kids.every((i) => i instanceof FileReviewItem), "all rows are files (flat)");
+  }
+
+  registry.dispose();
+  primary.stopWatching();
+  fs.rmSync(home, { recursive: true, force: true });
+  fs.rmSync(root, { recursive: true, force: true });
+  console.log("ok - worktree group contents nest as a tree (tree mode) and stay flat (list mode)");
 }
 
 // Reset shared stub state so later test bundles start clean.
