@@ -12,7 +12,7 @@ The pending **badge / status-bar count shows `2`**, but the **Pending review tre
 
 ## How to reproduce
 
-1. Open a workspace (e.g. `/home/tuvan/Documents/src/hasaki/tms`).
+1. Open a workspace (e.g. `~/projects/my-monorepo`).
 2. From a Claude Code session whose `cwd` is that workspace, edit a file that lives **outside** the workspace folder — e.g. a memory file under `~/.claude/projects/<...>/memory/<file>.md`.
 3. The `PreToolUse` hook captures the edit and files it into **this workspace's** session.
 4. Observe: status-bar/badge count increments, but the tree does not show the file.

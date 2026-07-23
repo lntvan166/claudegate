@@ -49,7 +49,7 @@ function makeFixture(): { home: string; root: string; ws: string; wsFile: string
 
 // Register a git worktree working dir at <root>/<relPath> against the main repo's
 // `.git`, and drop a single pending file inside it. `relPath` may be nested
-// (e.g. "ws-kpivio/tms-testing"), mirroring the go.work layout where worktrees
+// (e.g. "ws-alpha/service-core"), mirroring the go.work layout where worktrees
 // are checked out under per-feature `ws-*` directories.
 function addWorktree(home: string, root: string, relPath: string, fileName: string): string {
   const name = relPath.split(path.posix.sep).join("-"); // unique registry entry under .git/worktrees
@@ -185,10 +185,10 @@ function addWorktree(home: string, root: string, relPath: string, fileName: stri
 }
 
 // ── Case 4: worktrees NEST under their owning folder in tree mode (go.work layout) ──
-// A worktree checked out at <root>/ws-kpivio/tms-testing must appear UNDER a
-// `ws-kpivio` folder node — not as a bare top-level "tms-testing (worktree)" row
-// disconnected from ws-kpivio. Intermediate folders are created even when no
-// primary-session file lives directly under them (ws-appmanageresonly).
+// A worktree checked out at <root>/ws-alpha/service-core must appear UNDER a
+// `ws-alpha` folder node — not as a bare top-level "service-core (worktree)" row
+// disconnected from ws-alpha. Intermediate folders are created even when no
+// primary-session file lives directly under them (ws-beta).
 {
   setExcludeMatcher(new ExcludeMatcher());
   setProtectedMatcher(new ExcludeMatcher());
@@ -199,10 +199,10 @@ function addWorktree(home: string, root: string, relPath: string, fileName: stri
   fs.mkdirSync(path.join(root, ".git"), { recursive: true }); // main repo (.git DIR)
   stubWorkspace.workspaceFolders = [{ uri: { fsPath: root } }];
 
-  const testingFile = addWorktree(home, root, "ws-kpivio/tms-testing", "bootstrap.go");
-  const orderOpsFile = addWorktree(home, root, "ws-appmanageresonly/tms-order-ops", "es.go");
-  // A primary-session file living directly under ws-kpivio (like go.work).
-  const goWork = path.join(root, "ws-kpivio", "go.work");
+  const coreFile = addWorktree(home, root, "ws-alpha/service-core", "bootstrap.go");
+  const apiFile = addWorktree(home, root, "ws-beta/service-api", "es.go");
+  // A primary-session file living directly under ws-alpha (like go.work).
+  const goWork = path.join(root, "ws-alpha", "go.work");
   fs.writeFileSync(goWork, "go 1.22");
   writeSession(home, root, {
     [goWork]: { originalContent: "old", reviewStatus: "pending", newFile: false, sessionId: "s0", capturedAt: new Date().toISOString() },
@@ -222,26 +222,26 @@ function addWorktree(home: string, root: string, relPath: string, fileName: stri
   );
   const folderOf = (name: string) =>
     roots.find((i) => i instanceof FolderItem && (i as FolderItem).folderPath === path.join(root, name)) as FolderItem | undefined;
-  const kpivio = folderOf("ws-kpivio");
-  const appmanage = folderOf("ws-appmanageresonly");
-  assert.ok(kpivio, "ws-kpivio folder node present at root");
-  assert.ok(appmanage, "ws-appmanageresonly folder node present (created for its worktree, no primary file under it)");
+  const alpha = folderOf("ws-alpha");
+  const beta = folderOf("ws-beta");
+  assert.ok(alpha, "ws-alpha folder node present at root");
+  assert.ok(beta, "ws-beta folder node present (created for its worktree, no primary file under it)");
 
-  // Expand ws-kpivio → its worktree group + go.work, ordered folders → worktrees → files.
-  const kpivioKids = provider.getChildren(kpivio);
-  const kpGroups = kpivioKids.filter((i) => i instanceof WorktreeGroupItem) as WorktreeGroupItem[];
-  assert.equal(kpGroups.length, 1, "ws-kpivio contains exactly its one pending worktree");
-  assert.equal(kpGroups[0].worktreeRoot, path.dirname(testingFile), "nested group is ws-kpivio/tms-testing");
-  const kpFiles = kpivioKids.filter((i) => i instanceof FileReviewItem) as FileReviewItem[];
-  assert.equal(kpFiles.length, 1, "ws-kpivio shows its primary go.work file too");
-  assert.equal(kpFiles[0].filePath, goWork, "the primary file under ws-kpivio is go.work");
-  assert.ok(kpivioKids.indexOf(kpGroups[0]) < kpivioKids.indexOf(kpFiles[0]), "worktree row comes before file row");
+  // Expand ws-alpha → its worktree group + go.work, ordered folders → worktrees → files.
+  const alphaKids = provider.getChildren(alpha);
+  const alphaGroups = alphaKids.filter((i) => i instanceof WorktreeGroupItem) as WorktreeGroupItem[];
+  assert.equal(alphaGroups.length, 1, "ws-alpha contains exactly its one pending worktree");
+  assert.equal(alphaGroups[0].worktreeRoot, path.dirname(coreFile), "nested group is ws-alpha/service-core");
+  const alphaFiles = alphaKids.filter((i) => i instanceof FileReviewItem) as FileReviewItem[];
+  assert.equal(alphaFiles.length, 1, "ws-alpha shows its primary go.work file too");
+  assert.equal(alphaFiles[0].filePath, goWork, "the primary file under ws-alpha is go.work");
+  assert.ok(alphaKids.indexOf(alphaGroups[0]) < alphaKids.indexOf(alphaFiles[0]), "worktree row comes before file row");
 
-  // Expand ws-appmanageresonly → its worktree group, even with no primary file under it.
-  const appKids = provider.getChildren(appmanage);
+  // Expand ws-beta → its worktree group, even with no primary file under it.
+  const appKids = provider.getChildren(beta);
   const appGroups = appKids.filter((i) => i instanceof WorktreeGroupItem) as WorktreeGroupItem[];
-  assert.equal(appGroups.length, 1, "ws-appmanageresonly contains its worktree group");
-  assert.equal(appGroups[0].worktreeRoot, path.dirname(orderOpsFile), "nested group is ws-appmanageresonly/tms-order-ops");
+  assert.equal(appGroups.length, 1, "ws-beta contains its worktree group");
+  assert.equal(appGroups[0].worktreeRoot, path.dirname(apiFile), "nested group is ws-beta/service-api");
 
   registry.dispose();
   primary.stopWatching();
@@ -251,7 +251,7 @@ function addWorktree(home: string, root: string, relPath: string, fileName: stri
 }
 
 // ── Case 5: a worktree group's OWN files nest as a folder tree (tree mode) ──
-// Inside a worktree checked out at ws-kpivio/tms-testing, its pending files must
+// Inside a worktree checked out at ws-alpha/service-core, its pending files must
 // group into folders (common/suite/…) in tree view and stay flat in list view —
 // same toggle as the primary panel. Folder rows inside the worktree resolve back
 // to the WORKTREE's SessionManager so accept/reject/openDiff target the right one.
@@ -265,10 +265,10 @@ function addWorktree(home: string, root: string, relPath: string, fileName: stri
   fs.mkdirSync(path.join(root, ".git"), { recursive: true });
   stubWorkspace.workspaceFolders = [{ uri: { fsPath: root } }];
 
-  // Worktree at ws-kpivio/tms-testing with a NESTED file and a top-level file.
-  const name = "ws-kpivio-tms-testing";
+  // Worktree at ws-alpha/service-core with a NESTED file and a top-level file.
+  const name = "ws-alpha-service-core";
   fs.mkdirSync(path.join(root, ".git", "worktrees", name), { recursive: true });
-  const wt = path.join(root, "ws-kpivio", "tms-testing");
+  const wt = path.join(root, "ws-alpha", "service-core");
   fs.mkdirSync(path.join(wt, "common", "suite"), { recursive: true });
   fs.writeFileSync(path.join(root, ".git", "worktrees", name, "gitdir"), path.join(wt, ".git") + "\n");
   fs.writeFileSync(path.join(wt, ".git"), `gitdir: ${path.join(root, ".git", "worktrees", name)}\n`);
@@ -285,9 +285,9 @@ function addWorktree(home: string, root: string, relPath: string, fileName: stri
   registry.refresh();
 
   const groupOf = (provider: FilteredTreeProvider): WorktreeGroupItem => {
-    // Navigate root → ws-kpivio folder → its worktree group (tree mode).
-    const kpivio = provider.getChildren().find((i) => i instanceof FolderItem) as FolderItem;
-    const g = provider.getChildren(kpivio).find((i) => i instanceof WorktreeGroupItem) as WorktreeGroupItem;
+    // Navigate root → ws-alpha folder → its worktree group (tree mode).
+    const alpha = provider.getChildren().find((i) => i instanceof FolderItem) as FolderItem;
+    const g = provider.getChildren(alpha).find((i) => i instanceof WorktreeGroupItem) as WorktreeGroupItem;
     return g;
   };
 

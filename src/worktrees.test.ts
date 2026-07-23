@@ -47,8 +47,8 @@ function makeRepo(): string {
 // Regression: a worktree owned by a NESTED sub-repo (not the primary root's own
 // repo) must still be discovered. Mirrors a go.work layout where each module is
 // its own git repo and its worktree is checked out into a sibling folder under
-// the open workspace — e.g. tms/ws-geo-global/tms-location-mnt is a worktree of
-// tms/tms-location-mnt, NOT of tms. The old <root>/.git/worktrees read missed it.
+// the open workspace — e.g. monorepo/ws-alpha/service-geo is a worktree of
+// monorepo/service-geo, NOT of monorepo. The old <root>/.git/worktrees read missed it.
 {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cg-wtn-"));
   // Primary root's own repo (has some unrelated worktree of its own).
