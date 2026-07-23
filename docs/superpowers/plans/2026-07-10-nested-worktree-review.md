@@ -108,7 +108,7 @@ function makeRepo(): string {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cd /home/tuvan/Documents/src/personal/claudegate && npx esbuild src/worktrees.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/worktrees.test.cjs && node out/worktrees.test.cjs`
+Run: `cd <repo> && npx esbuild src/worktrees.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/worktrees.test.cjs && node out/worktrees.test.cjs`
 Expected: FAIL — esbuild error `Could not resolve "./worktrees"` (file not created yet).
 
 - [ ] **Step 3: Write the minimal implementation** — create `src/worktrees.ts`:
@@ -194,7 +194,7 @@ export function worktreeRootForPath(filePath: string, roots: string[]): string |
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `cd /home/tuvan/Documents/src/personal/claudegate && npx esbuild src/worktrees.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/worktrees.test.cjs && node out/worktrees.test.cjs`
+Run: `cd <repo> && npx esbuild src/worktrees.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/worktrees.test.cjs && node out/worktrees.test.cjs`
 Expected: PASS — prints `ok - worktree detection (worktree vs main vs submodule)`.
 
 - [ ] **Step 5: Wire the test into `test:unit`** — in `package.json`, append to the `test:unit` script value, right before its closing quote (after the `sessionManager.test.cjs` / `hookInstaller.test.cjs` chain), this segment (note the leading ` && `):
@@ -205,7 +205,7 @@ Expected: PASS — prints `ok - worktree detection (worktree vs main vs submodul
 
 - [ ] **Step 6: Run the full unit suite**
 
-Run: `cd /home/tuvan/Documents/src/personal/claudegate && npm run test:unit`
+Run: `cd <repo> && npm run test:unit`
 Expected: PASS — the run ends with `ok - worktree detection (worktree vs main vs submodule)` among the others; exit code 0.
 
 - [ ] **Step 7: Commit**
@@ -320,7 +320,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cd /home/tuvan/Documents/src/personal/claudegate && python3 -m unittest hooks.tests.test_worktree_routing -v`
+Run: `cd <repo> && python3 -m unittest hooks.tests.test_worktree_routing -v`
 Expected: FAIL — `test_worktree_file_routes_to_worktree_session` fails: the worktree session does not exist and the file was captured into the parent (root) session (today's longest-match behavior).
 
 - [ ] **Step 3: Add the detection helper** — in `hooks/hook.py`, insert this function immediately after `workspace_session_file()` (after line 106):
@@ -389,12 +389,12 @@ with:
 
 - [ ] **Step 5: Run the test to verify it passes**
 
-Run: `cd /home/tuvan/Documents/src/personal/claudegate && python3 -m unittest hooks.tests.test_worktree_routing -v`
+Run: `cd <repo> && python3 -m unittest hooks.tests.test_worktree_routing -v`
 Expected: PASS — all three tests OK.
 
 - [ ] **Step 6: Run the existing hook suite to check for regressions**
 
-Run: `cd /home/tuvan/Documents/src/personal/claudegate && npm run test:hook`
+Run: `cd <repo> && npm run test:hook`
 Expected: PASS — `test_hook.py` and `test_worktree_routing.py` all OK (the plain non-worktree tests still route to the registered root).
 
 - [ ] **Step 7: Commit**
@@ -489,7 +489,7 @@ function sessionPathFor(home: string, ws: string): string {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cd /home/tuvan/Documents/src/personal/claudegate && npx esbuild src/worktreeSessionRegistry.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/worktreeSessionRegistry.test.cjs && node out/worktreeSessionRegistry.test.cjs`
+Run: `cd <repo> && npx esbuild src/worktreeSessionRegistry.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/worktreeSessionRegistry.test.cjs && node out/worktreeSessionRegistry.test.cjs`
 Expected: FAIL — `Could not resolve "./worktreeSessionRegistry"`.
 
 - [ ] **Step 3: Write the implementation** — create `src/worktreeSessionRegistry.ts`:
@@ -582,7 +582,7 @@ export class WorktreeSessionRegistry {
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `cd /home/tuvan/Documents/src/personal/claudegate && npx esbuild src/worktreeSessionRegistry.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/worktreeSessionRegistry.test.cjs && node out/worktreeSessionRegistry.test.cjs`
+Run: `cd <repo> && npx esbuild src/worktreeSessionRegistry.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/worktreeSessionRegistry.test.cjs && node out/worktreeSessionRegistry.test.cjs`
 Expected: PASS — prints `ok - worktree session registry attaches, counts, and routes`.
 
 - [ ] **Step 5: Wire the test into `test:unit`** — append this segment to the `test:unit` script value in `package.json` (leading ` && `):
@@ -593,7 +593,7 @@ Expected: PASS — prints `ok - worktree session registry attaches, counts, and 
 
 - [ ] **Step 6: Run the full unit suite**
 
-Run: `cd /home/tuvan/Documents/src/personal/claudegate && npm run test:unit`
+Run: `cd <repo> && npm run test:unit`
 Expected: PASS — includes `ok - worktree session registry attaches, counts, and routes`; exit 0.
 
 - [ ] **Step 7: Commit**
@@ -618,7 +618,7 @@ git commit -m "feat: WorktreeSessionRegistry attaches a SessionManager per neste
 
 - [ ] **Step 1: Write the failing test** — this behavior is UI-integration (tree items) and is verified manually in Task 6’s F5 check plus a compile/typecheck gate. Add a focused type/shape assertion by extending the existing panel-free logic. Since `FilteredTreeProvider` requires a live VS Code tree host, verify via **typecheck** (no new unit test file):
 
-Run: `cd /home/tuvan/Documents/src/personal/claudegate && npm run typecheck`
+Run: `cd <repo> && npm run typecheck`
 Expected (before edits): PASS — establishes a clean baseline to confirm the edits below keep types sound.
 
 - [ ] **Step 2: Add the `WorktreeGroupItem` class** — in `src/reviewPanel.ts`, add this import near the top (after the existing `./sessionManager` import on line 4):
@@ -727,7 +727,7 @@ export class WorktreeGroupItem extends vscode.TreeItem {
 
 - [ ] **Step 6: Typecheck**
 
-Run: `cd /home/tuvan/Documents/src/personal/claudegate && npm run typecheck`
+Run: `cd <repo> && npm run typecheck`
 Expected: PASS — no type errors. (Provider now references `WorktreeGroupItem`, `worktreeRegistry`, and the new helpers, all defined above.)
 
 - [ ] **Step 7: Commit**
@@ -933,12 +933,12 @@ and in `contributes.menus.commandPalette`, hide it from the palette (it needs an
 
 - [ ] **Step 11: Typecheck, build, and full test suite**
 
-Run: `cd /home/tuvan/Documents/src/personal/claudegate && npm run typecheck && npm run compile && npm test`
+Run: `cd <repo> && npm run typecheck && npm run compile && npm test`
 Expected: PASS — typecheck clean, bundle written to `out/extension.js`, all unit tests print their `ok - …` lines, and the Python hook suite passes.
 
 - [ ] **Step 12: Validate `package.json` is well-formed**
 
-Run: `cd /home/tuvan/Documents/src/personal/claudegate && node -e "require('./package.json'); console.log('package.json OK')"`
+Run: `cd <repo> && node -e "require('./package.json'); console.log('package.json OK')"`
 Expected: `package.json OK` (no JSON parse error from the added entries).
 
 - [ ] **Step 13: Commit**
@@ -962,7 +962,7 @@ tmp=$(mktemp -d); cd "$tmp" && git init -q proj && cd proj && \
   git worktree add -q ws-feature -b feature && echo "worktree at $tmp/proj/ws-feature"
 ```
 
-- [ ] **Step 2: Launch the Extension Development Host** — open `/home/tuvan/Documents/src/personal/claudegate` in VS Code, press **F5**, and in the dev host open the folder `"$tmp/proj"` (the parent repo only). Ensure **Setup Hook** has been run so `~/.claudegate/hook.py` is current (re-run `Claude Gate: Setup Hook` in the dev host to copy the updated hook).
+- [ ] **Step 2: Launch the Extension Development Host** — open `<repo>` in VS Code, press **F5**, and in the dev host open the folder `"$tmp/proj"` (the parent repo only). Ensure **Setup Hook** has been run so `~/.claudegate/hook.py` is current (re-run `Claude Gate: Setup Hook` in the dev host to copy the updated hook).
 
 - [ ] **Step 3: Simulate a Claude edit inside the worktree** — from a terminal, fire the hook for a file under the worktree:
 

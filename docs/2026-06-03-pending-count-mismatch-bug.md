@@ -26,7 +26,7 @@ Session file for the tms workspace
 | reviewStatus | path | inside workspace? |
 |---|---|---|
 | `pending` | `…/tms/docs/superpowers/specs/2026-06-03-…-design.md` | ✅ yes |
-| `pending` | `~/.claude/projects/-home-tuvan-…-tms/memory/feedback_no_coauthor_trailer.md` | ❌ no — lives under `~/.claude` |
+| `pending` | `~/.claude/projects/<workspace-hash>/memory/notes.md` | ❌ no — lives under `~/.claude` |
 
 The second entry is a file edited in a prior session that physically lives
 outside the workspace directory.

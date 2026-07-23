@@ -7,6 +7,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.11.1] — 2026-07-23
+
+### Internal
+
+- **Documentation and test fixtures now use generic example names.** The CHANGELOG examples, worktree test fixtures, and a repro note previously referenced company-internal module/workspace names (and one personal filesystem path); these are replaced with neutral placeholders (`ws-alpha`, `ws-beta`, `service-*`). No code or behavior change — this only affects docs and tests.
+
 ## [1.11.0] — 2026-07-23
 
 ### Added
