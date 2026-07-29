@@ -42,6 +42,19 @@ const SESSION_SIZE_WARN_BYTES = 2_000_000;
 // pending entries are unreviewed baselines and are never dropped automatically.
 const MAX_ACCEPTED_BYTES = 1_500_000;
 
+/**
+ * The canonical session file path for a workspace/worktree root. Mirrors hook.py:
+ * normcase (lower-case on Windows) + abspath, then MD5. Exported so callers can
+ * probe for an existing session WITHOUT constructing a SessionManager (which
+ * would install a watcher).
+ */
+export function sessionFilePathFor(workspacePath: string): string {
+  const resolved = path.resolve(workspacePath);
+  const normalized = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  const hash = crypto.createHash("md5").update(normalized).digest("hex");
+  return path.join(os.homedir(), ".claudegate", "sessions", `${hash}.json`);
+}
+
 export class SessionManager {
   private readonly sessionPath: string;
   private readonly sessionFilename: string;
@@ -64,14 +77,10 @@ export class SessionManager {
     this.claudegateDir = path.join(os.homedir(), ".claudegate");
 
     if (workspacePath) {
-      // Mirror hook.py: normcase (lower-case on Windows) + abspath, then MD5.
-      const resolved  = path.resolve(workspacePath);
-      const normalized = process.platform === "win32" ? resolved.toLowerCase() : resolved;
-      const hash = crypto.createHash("md5").update(normalized).digest("hex");
-      this.sessionFilename = `${hash}.json`;
-      this.watchDir   = path.join(this.claudegateDir, "sessions");
-      this.sessionPath = path.join(this.watchDir, this.sessionFilename);
-      this.workspaceRoot = resolved;
+      this.sessionPath = sessionFilePathFor(workspacePath);
+      this.sessionFilename = path.basename(this.sessionPath);
+      this.watchDir   = path.dirname(this.sessionPath);
+      this.workspaceRoot = path.resolve(workspacePath);
     } else {
       this.sessionFilename = "session.json";
       this.watchDir   = this.claudegateDir;

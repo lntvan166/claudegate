@@ -2,7 +2,7 @@
   "name": "claudegate",
   "displayName": "Claude Gate",
   "description": "Review Claude Code's file changes in a native diff panel — accept or reject each edit. The PreToolUse hook captures all Claude Code edits (terminal CLI and in-editor extension); the filesystem watcher is an optional fallback for non-Claude agents and is off by default.",
-  "version": "1.11.1",
+  "version": "1.12.0",
   "publisher": "lntvan166",
   "icon": "media/icon.png",
   "engines": {
@@ -613,6 +613,12 @@
     "configuration": {
       "title": "Claude Gate",
       "properties": {
+        "claudegate.worktrees.maxAttached": {
+          "type": "number",
+          "default": 256,
+          "minimum": 1,
+          "markdownDescription": "Maximum number of nested git worktrees whose pending changes are shown in this window. Attaching a worktree is cheap, so the default sits far above any realistic layout — a `go.work` monorepo with one worktree per module can easily reach 20+. Lower it only to deliberately narrow the review scope; any worktrees beyond the limit are named in the **Claude Gate** output channel, never dropped silently."
+        },
         "claudegate.fileWatcher.enabled": {
           "type": "boolean",
           "default": false,

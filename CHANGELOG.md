@@ -7,6 +7,25 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.12.0] — 2026-07-29
+
+### Fixed
+
+- **Pending changes in a large multi-module workspace no longer go missing from the panel.** The window attached at most **10** nested git worktrees, and it picked which 10 by sorting the discovered roots alphabetically and slicing — so in a workspace with more than ten, every worktree late in the alphabet was silently skipped and its captured edits appeared in **no** window at all. This bites `go.work` / multi-module layouts hardest, because they check out *one worktree per module*: a single feature directory is 5–10 worktrees on its own, so two of them plus a few agent worktrees clears eighteen and the second feature directory vanishes wholesale. The cap is now **256** (see below), well above any realistic layout. This is the same class of gap as the 1.10.1 discovery fix — there the worktrees were never found; here they were found and then dropped.
+
+### Added
+
+- **New `claudegate.worktrees.maxAttached` setting** (default `256`) caps how many nested worktrees a window will attach. Lower it only to deliberately narrow the review scope — there's no resource reason to. Any worktrees past the limit are now **listed by full path** in the *Claude Gate* output channel instead of only being counted, so a cap hit is diagnosable rather than invisible.
+
+### Changed
+
+- **Worktrees that hold captured work are attached first.** If the cap is ever reached, the slots that get dropped are now guaranteed to be idle worktrees rather than ones sitting on unreviewed changes. Previously the ordering was purely alphabetical, so throwaway agent worktrees under `.claude/worktrees/` could take slots away from worktrees with real pending edits. The check is existence-only on the worktree's session file — deliberately cheap, since parsing every session on each refresh would cost more than the attach it protects.
+
+### Internal
+
+- The old cap of 10 was documented as being "well past any realistic count"; measurement showed the assumption behind it was wrong. Attaching a worktree costs one `fs.watch` on the sessions directory that *every* manager already shares, plus a JSON parse of that worktree's own file when it changes — there is no polling loop, no per-worktree filesystem crawl, and no `git` subprocess. Capping the result of the scan saved nothing, since the directory walk runs regardless. The constant is now documented as a runaway-scan backstop with the real costs written down.
+- `SessionManager`'s inline workspace-hash logic is extracted into an exported `sessionFilePathFor()`, so a caller can locate a worktree's session file without constructing a manager (which would install a watcher). One source of truth with `hook.py` for the MD5 path scheme.
+
 ## [1.11.1] — 2026-07-23
 
 ### Internal

@@ -1,10 +1,42 @@
+import * as fs from "fs";
 import * as vscode from "vscode";
-import { SessionManager } from "./sessionManager";
+import { SessionManager, sessionFilePathFor } from "./sessionManager";
 import { nestedWorktreesUnder, worktreeRootForPath } from "./worktrees";
 
-// Guardrail: never attach an unbounded number of worktree sessions. Well past any
-// realistic count; excess are logged (never silently dropped) per spec §8.
-const MAX_ATTACHED_WORKTREES = 10;
+// Runaway-scan backstop, NOT a resource budget. Attaching a worktree costs one
+// fs.watch on the sessions directory that every manager already shares, plus a
+// JSON parse of that worktree's OWN file when it changes (the watch callback
+// filters on filename). There is no polling loop, no per-worktree crawl, and no
+// git subprocess — so the ceiling can sit far above any real layout.
+//
+// It has to. A `go.work` monorepo checks out one worktree PER MODULE, so a single
+// feature workspace is 5-10 on its own and two of them plus agent worktrees clears
+// 18. The previous value of 10 was below that baseline, and because roots were
+// sliced in alphabetical order it silently hid every worktree late in the alphabet.
+const DEFAULT_MAX_ATTACHED_WORKTREES = 256;
+
+/**
+ * Order worktree roots for attachment: those that already have a session file on
+ * disk (i.e. the hook has captured work there) first, alphabetical within each
+ * tier. Only matters if the cap is ever hit — it guarantees the slots that get
+ * dropped are idle worktrees rather than ones holding unreviewed changes.
+ *
+ * The probe is deliberately existence-only: parsing every session file on each
+ * refresh would cost far more than the attach it is protecting.
+ */
+export function orderRootsForAttach(
+  roots: string[],
+  hasSession: (root: string) => boolean
+): string[] {
+  const active: string[] = [];
+  const idle: string[] = [];
+  // Sort first so BOTH tiers are stable: slicing an unsorted list could drop a
+  // still-present worktree (and attach a different one) between refreshes.
+  for (const root of [...roots].sort()) {
+    (hasSession(root) ? active : idle).push(root);
+  }
+  return [...active, ...idle];
+}
 
 /**
  * Owns one reused SessionManager per git worktree nested under the window's
@@ -28,15 +60,22 @@ export class WorktreeSessionRegistry {
   // trigger (window focus / manual refresh), never in a hot loop.
   refresh(): void {
     if (!this.primaryRoot) return;
-    // Sort for a STABLE cap: slicing raw readdir order could drop a still-present
-    // worktree (and attach a different one) when the count crosses the cap.
-    let roots = nestedWorktreesUnder(this.primaryRoot).sort();
-    if (roots.length > MAX_ATTACHED_WORKTREES) {
+    const max = this.maxAttached();
+    // Worktrees with captured work first, so a cap hit can only ever drop idle ones.
+    let roots = orderRootsForAttach(
+      nestedWorktreesUnder(this.primaryRoot),
+      (root) => {
+        try { return fs.existsSync(sessionFilePathFor(root)); } catch { return false; }
+      }
+    );
+    if (roots.length > max) {
+      const dropped = roots.slice(max);
       this.log.appendLine(
-        `[WARN] ${roots.length} nested worktrees found; attaching only ${MAX_ATTACHED_WORKTREES}. ` +
-        `Open the others directly to review them.`
+        `[WARN] ${roots.length} nested worktrees found; attaching only ${max}. ` +
+        `Raise claudegate.worktrees.maxAttached, or open the others directly to review them.`
       );
-      roots = roots.slice(0, MAX_ATTACHED_WORKTREES);
+      for (const root of dropped) this.log.appendLine(`[WARN]   not attached: ${root}`);
+      roots = roots.slice(0, max);
     }
     const wanted = new Set(roots);
     let changed = false;
@@ -53,6 +92,17 @@ export class WorktreeSessionRegistry {
       changed = true;
     }
     if (changed) this._onChange.fire();
+  }
+
+  // Read the ceiling fresh each refresh so changing the setting takes effect on the
+  // next focus/refresh without a reload. Non-positive or non-numeric → the default.
+  private maxAttached(): number {
+    const configured = vscode.workspace
+      .getConfiguration("claudegate")
+      .get<number>("worktrees.maxAttached", DEFAULT_MAX_ATTACHED_WORKTREES);
+    return Number.isFinite(configured) && (configured as number) > 0
+      ? Math.floor(configured as number)
+      : DEFAULT_MAX_ATTACHED_WORKTREES;
   }
 
   private detach(root: string): void {
