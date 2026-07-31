@@ -139,6 +139,22 @@ export class WorktreeSessionRegistry {
     return n;
   }
 
+  // Same, for the decision logs. The Accepted/Rejected views are gated on
+  // `claudegate.acceptedCount`/`rejectedCount`; without these, accepting a file
+  // that lives in a worktree left both counts at 0, so the view stayed hidden and
+  // the record appeared to vanish.
+  totalAccepted(): number {
+    let n = 0;
+    for (const mgr of this.managers.values()) n += mgr.getAcceptedCount();
+    return n;
+  }
+
+  totalRejected(): number {
+    let n = 0;
+    for (const mgr of this.managers.values()) n += mgr.getRejectedCount();
+    return n;
+  }
+
   dispose(): void {
     for (const root of [...this.managers.keys()]) this.detach(root);
     this._onChange.dispose();

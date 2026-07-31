@@ -7,6 +7,18 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.12.1] — 2026-07-31
+
+### Fixed
+
+- **Accepting or rejecting a file inside a git worktree no longer makes it disappear with no trace.** The decision was recorded correctly — into that worktree's own session — but the parent window surfaced it nowhere: the **Accepted** and **Rejected** views are gated on counts that only ever looked at the primary session, so the view stayed hidden; and even when shown, the panels only ever read the primary session, so they would have rendered empty. In a workspace where every change lives in a worktree (a `go.work` layout, or any window opened above several checked-out modules), the file simply vanished from **Pending** and appeared in neither log. Both counts and panel contents now aggregate across attached worktrees, and worktree records render under their own worktree group — mirroring how **Pending** has grouped them since 1.10.1. Records already written by an earlier version are picked up automatically; nothing was lost, only hidden.
+- **Reverting an accepted file, or re-applying a rejected one, now targets the session that actually owns it.** Both commands were hard-wired to the primary session manager, so once a worktree's records became visible the actions would have written the change back into the wrong session. They now resolve the owning worktree from the file path.
+
+### Internal
+
+- The extension bundle no longer ships the README screenshots or demo media. Both registries render the README by fetching its images from GitHub over HTTPS — the packaged copies were never read — so excluding them cuts the published VSIX from **1.41 MB to 81 KB**. `media/icon.png` and `media/icon-activity.png` still ship; `package.json` points at them.
+- `SessionManager` gains `getAcceptedCount()` / `getRejectedCount()` alongside the existing `getPendingCount()`, and `WorktreeSessionRegistry` gains the matching `totalAccepted()` / `totalRejected()` — the asymmetry between them was the root cause of the bug above.
+
 ## [1.12.0] — 2026-07-29
 
 ### Fixed

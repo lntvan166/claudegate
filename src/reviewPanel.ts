@@ -98,23 +98,35 @@ export class WorktreeGroupItem extends vscode.TreeItem {
   constructor(
     public readonly worktreeRoot: string,
     public readonly sessionManager: SessionManager,
-    pendingCount: number
+    count: number,
+    // Which panel this group belongs to. Only the pending group carries the
+    // bulk Accept/Reject Worktree actions — those make no sense on a decision
+    // log, so the record panels get their own contextValue and no menu binding.
+    public readonly status: ReviewStatus = "pending"
   ) {
     super(`${path.basename(worktreeRoot)} (worktree)`, vscode.TreeItemCollapsibleState.Expanded);
     this.resourceUri  = vscode.Uri.file(worktreeRoot);
-    this.description  = `${pendingCount} pending`;
+    this.description  = `${count} ${status}`;
     this.tooltip      = new vscode.MarkdownString(
-      `**Git worktree** — a nested worktree with its own review scope.\n\n` +
-      `\`${worktreeRoot}\`\n\n` +
-      `${pendingCount} pending file(s). These also appear in **Review All Pending** and in the worktree's own ` +
-      `window — accept/reject in either place and the decision syncs to both.\n\n` +
-      `Use the **Open Worktree in New Window** action (hover this row) to open it directly.`
+      status === "pending"
+        ? `**Git worktree** — a nested worktree with its own review scope.\n\n` +
+          `\`${worktreeRoot}\`\n\n` +
+          `${count} pending file(s). These also appear in **Review All Pending** and in the worktree's own ` +
+          `window — accept/reject in either place and the decision syncs to both.\n\n` +
+          `Use the **Open Worktree in New Window** action (hover this row) to open it directly.`
+        : `**Git worktree** — a nested worktree with its own review scope.\n\n` +
+          `\`${worktreeRoot}\`\n\n` +
+          `${count} ${status} record(s), stored in this worktree's own session. ` +
+          `They also appear in the worktree's own window.`
     );
-    this.contextValue = "claudegate.worktreeGroup";
+    this.contextValue = status === "pending"
+      ? "claudegate.worktreeGroup"
+      : `claudegate.worktreeGroup.${status}`;
     this.iconPath     = new vscode.ThemeIcon("git-branch");
-    // Stable across refreshes (see FileReviewItem); the pending count lives in
-    // `description`, which the full-tree refresh re-renders.
-    this.id = `worktree::${worktreeRoot}`;
+    // Stable across refreshes (see FileReviewItem); the count lives in
+    // `description`, which the full-tree refresh re-renders. Scoped by status so
+    // the same worktree can appear in more than one panel without an id clash.
+    this.id = `worktree::${status}::${worktreeRoot}`;
   }
 }
 
@@ -164,7 +176,11 @@ export class RecordReviewItem extends vscode.TreeItem {
   constructor(
     public readonly record: ReviewRecord,
     public readonly decision: "accepted" | "rejected",
-    showPath = true
+    showPath = true,
+    // The session that OWNS this record. Undefined for primary-session rows (the
+    // command handlers fall back to the primary manager); set for rows inside a
+    // worktree group so revert / re-apply target that worktree's session.
+    public readonly sessionManager?: SessionManager
   ) {
     super(path.basename(record.path), vscode.TreeItemCollapsibleState.None);
     this.resourceUri = vscode.Uri.file(record.path);
@@ -240,8 +256,18 @@ export class FilteredTreeProvider
       .getConfiguration("claudegate")
       .get<boolean>("groupBySession", false);
 
-    // Accepted/Rejected panels are primary-only — nothing to show without a session.
+    // Accepted/Rejected panels. A worktree's decision records live in that
+    // worktree's own session, so they must be surfaced here too — otherwise
+    // accepting a file inside a worktree makes it vanish from this window
+    // entirely. Group expansion is handled before the primary-session guard
+    // because the primary session may legitimately be null (or empty) while a
+    // worktree holds every record.
     if (this.status !== "pending") {
+      if (element instanceof WorktreeGroupItem) return this.worktreeRecords(element);
+      if (!element) {
+        const primary = session ? this.getRecordChildren(session, element, grouped) : [];
+        return [...primary, ...this.worktreeGroups()];
+      }
       return session ? this.getRecordChildren(session, element, grouped) : [];
     }
 
@@ -463,15 +489,36 @@ export class FilteredTreeProvider
     return this.worktreeGroups().filter((g) => g.worktreeRoot.startsWith(prefix));
   }
 
-  // One group node per attached worktree that currently has pending files.
+  // One group node per attached worktree that currently has rows for THIS panel —
+  // pending files for the Pending panel, decision records for Accepted/Rejected.
   private worktreeGroups(): WorktreeGroupItem[] {
-    if (this.status !== "pending" || !this.worktreeRegistry) return [];
+    if (!this.worktreeRegistry) return [];
     const items: WorktreeGroupItem[] = [];
     for (const [root, mgr] of this.worktreeRegistry.getManagers()) {
-      const count = this.pendingOf(mgr).length;
-      if (count > 0) items.push(new WorktreeGroupItem(root, mgr, count));
+      const count = this.status === "pending"
+        ? this.pendingOf(mgr).length
+        : this.recordsOf(mgr).length;
+      if (count > 0) items.push(new WorktreeGroupItem(root, mgr, count, this.status));
     }
     return items.sort((a, b) => a.worktreeRoot.localeCompare(b.worktreeRoot));
+  }
+
+  // In-scope decision records of an arbitrary (worktree) session manager —
+  // the record-panel counterpart of pendingOf().
+  private recordsOf(mgr: SessionManager): ReviewRecord[] {
+    const s = mgr.getSession();
+    return s ? this.filteredRecords(s) : [];
+  }
+
+  // Record rows for one worktree group, bound to its own session so revert /
+  // re-apply resolve against the worktree's session rather than the primary one.
+  // Deliberately FLAT in both view modes: a folder row inside a record group would
+  // be re-expanded through the primary session (getRecordChildren's FolderItem
+  // branch), which would silently show the wrong worktree's records.
+  private worktreeRecords(group: WorktreeGroupItem): vscode.TreeItem[] {
+    const decision = this.status as "accepted" | "rejected";
+    return this.recordsOf(group.sessionManager)
+      .map((r) => new RecordReviewItem(r, decision, true, group.sessionManager));
   }
 
   // Pending-file rows for one worktree group, bound to its session manager so

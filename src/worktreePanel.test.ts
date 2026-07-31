@@ -4,7 +4,7 @@ import * as os from "os";
 import * as path from "path";
 import * as crypto from "crypto";
 import { SessionManager } from "./sessionManager";
-import { FilteredTreeProvider, WorktreeGroupItem, FolderItem, FileReviewItem } from "./reviewPanel";
+import { FilteredTreeProvider, WorktreeGroupItem, FolderItem, FileReviewItem, RecordReviewItem } from "./reviewPanel";
 import { WorktreeSessionRegistry } from "./worktreeSessionRegistry";
 import { ExcludeMatcher } from "./excludeMatcher";
 import { setExcludeMatcher, setProtectedMatcher } from "./workspaceScope";
@@ -171,17 +171,21 @@ function addWorktree(home: string, root: string, relPath: string, fileName: stri
   const registry = new WorktreeSessionRegistry(fakeLog, root);
   registry.refresh();
 
+  // A worktree with pending files but NO decisions yet contributes a group to the
+  // Pending panel only. (Record panels DO show worktree groups — but only for
+  // worktrees that actually hold accepted/rejected records; see the records test
+  // at the end of this file.)
   for (const status of ["accepted", "rejected"] as const) {
     const provider = new FilteredTreeProvider(primary, status, "tree", registry);
     const groups = provider.getChildren().filter((i) => i instanceof WorktreeGroupItem);
-    assert.equal(groups.length, 0, `${status} panel shows no worktree group (pending-only)`);
+    assert.equal(groups.length, 0, `${status} panel shows no group for a worktree with no ${status} records`);
   }
 
   registry.dispose();
   primary.stopWatching();
   fs.rmSync(home, { recursive: true, force: true });
   fs.rmSync(root, { recursive: true, force: true });
-  console.log("ok - worktree groups are pending-only (absent from Accepted/Rejected)");
+  console.log("ok - a worktree with no decisions shows no group in Accepted/Rejected");
 }
 
 // ── Case 4: worktrees NEST under their owning folder in tree mode (go.work layout) ──
@@ -325,6 +329,94 @@ function addWorktree(home: string, root: string, relPath: string, fileName: stri
   fs.rmSync(home, { recursive: true, force: true });
   fs.rmSync(root, { recursive: true, force: true });
   console.log("ok - worktree group contents nest as a tree (tree mode) and stay flat (list mode)");
+}
+
+// Regression: accepting a file that lives in a nested worktree wrote the record
+// into THAT worktree's session, but the Accepted/Rejected panels only ever read
+// the primary session — and their `when` clauses gate on counts that also ignored
+// worktrees. Net effect: the row vanished from Pending and surfaced nowhere, so
+// the decision looked lost. Records in a worktree must appear in the parent
+// window, grouped, and bound to the session that owns them.
+{
+  const { home, root } = makeFixture();
+  stubWorkspace.workspaceFolders = [{ uri: { fsPath: root } }] as never;
+  setExcludeMatcher(new ExcludeMatcher());
+  setProtectedMatcher(new ExcludeMatcher());
+
+  const wt = path.dirname(addWorktree(home, root, "ws-alpha/service-core", "keep.txt"));
+  const accA = path.join(wt, "pricing", "discount.go");
+  const accB = path.join(wt, "pricing", "rounding.go");
+  const rej  = path.join(wt, "pricing", "legacy.go");
+
+  // Primary session: NOTHING decided. Every record lives in the worktree.
+  const sp = path.join(home, ".claudegate", "sessions", md5(wt) + ".json");
+  fs.writeFileSync(sp, JSON.stringify({
+    sessionId: "t", status: "active", files: {},
+    accepted: [
+      { id: `2026-07-31T09:00:00.000Z::${accA}`, path: accA, before: "a", after: "b",
+        decidedAt: "2026-07-31T09:00:00.000Z", sessionId: "agent-a" },
+      { id: `2026-07-31T09:01:00.000Z::${accB}`, path: accB, before: "c", after: "d",
+        decidedAt: "2026-07-31T09:01:00.000Z", sessionId: "agent-a" },
+    ],
+    rejected: {
+      [rej]: { id: `2026-07-31T09:02:00.000Z::${rej}`, path: rej, before: "e", after: "f",
+               decidedAt: "2026-07-31T09:02:00.000Z", sessionId: "agent-a" },
+    },
+  }));
+
+  const primary = new SessionManager(fakeLog, root);
+  primary.startWatching();
+  const registry = new WorktreeSessionRegistry(fakeLog, root);
+  registry.refresh();
+
+  // 1. The counts that drive view visibility must include worktree records.
+  assert.equal(registry.totalAccepted(), 2, "registry aggregates accepted across worktrees");
+  assert.equal(registry.totalRejected(), 1, "registry aggregates rejected across worktrees");
+  assert.equal(primary.getAcceptedCount(), 0, "primary session genuinely holds none");
+
+  // 2. The Accepted panel surfaces them as a worktree group, even though the
+  //    primary session has no accepted records at all.
+  for (const mode of ["tree", "list"] as const) {
+    const provider = new FilteredTreeProvider(primary, "accepted", mode, registry);
+    const groups = provider.getChildren().filter((i) => i instanceof WorktreeGroupItem) as WorktreeGroupItem[];
+    assert.equal(groups.length, 1, `accepted panel shows the worktree group (${mode} mode)`);
+    assert.equal(groups[0].description, "2 accepted", `group is labelled by record count (${mode})`);
+    assert.notEqual(groups[0].contextValue, "claudegate.worktreeGroup",
+      "record groups must NOT carry the pending group's Accept/Reject Worktree actions");
+
+    const rows = provider.getChildren(groups[0]) as RecordReviewItem[];
+    assert.equal(rows.length, 2, `both accepted records render (${mode})`);
+    assert.ok(rows.every((r) => r instanceof RecordReviewItem), "rows are record items");
+    assert.ok(rows.every((r) => r.sessionManager === registry.managerFor(accA)),
+      "record rows are bound to the WORKTREE's SessionManager, so revert targets it");
+  }
+
+  // 3. Same for the Rejected panel.
+  {
+    const provider = new FilteredTreeProvider(primary, "rejected", "tree", registry);
+    const group = provider.getChildren().find((i) => i instanceof WorktreeGroupItem) as WorktreeGroupItem;
+    assert.ok(group, "rejected panel shows the worktree group");
+    assert.equal(group.description, "1 rejected", "rejected group labelled by record count");
+    const rows = provider.getChildren(group) as RecordReviewItem[];
+    assert.equal(rows.length, 1, "the rejected record renders");
+    assert.equal(rows[0].filePath, rej, "it is the rejected file");
+  }
+
+  // 4. A worktree with no records contributes no group (no empty rows).
+  {
+    const empty = addWorktree(home, root, "ws-beta/service-api", "untouched.txt");
+    registry.refresh();
+    const provider = new FilteredTreeProvider(primary, "accepted", "tree", registry);
+    const roots = (provider.getChildren().filter((i) => i instanceof WorktreeGroupItem) as WorktreeGroupItem[])
+      .map((g) => g.worktreeRoot);
+    assert.ok(!roots.includes(empty), "a worktree with no accepted records shows no group");
+  }
+
+  registry.dispose();
+  primary.stopWatching();
+  fs.rmSync(home, { recursive: true, force: true });
+  fs.rmSync(root, { recursive: true, force: true });
+  console.log("ok - worktree decision records surface in the Accepted/Rejected panels");
 }
 
 // Reset shared stub state so later test bundles start clean.

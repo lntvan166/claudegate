@@ -8,13 +8,22 @@ Stop flying blind when Claude modifies your codebase. Claude Gate captures every
 
 ---
 
-## Screenshot
+<!-- Media MUST use absolute raw.githubusercontent.com URLs, not repo-relative
+     paths: the VS Code Marketplace and Open VSX both render this README on their
+     own domains and will not resolve `media/...`, so relative links show as
+     broken images on the listing pages. -->
 
-![Claude Gate in action](media/ClaudeGateDemo.png)
+![Claude Gate — reviewing parallel agent changes across four git worktrees](https://raw.githubusercontent.com/lntvan166/claudegate/main/media/demo.gif)
+
+Your agents edited 15 files across 4 git worktrees. Here they all are, in one panel, reviewable one keystroke at a time — grouped by worktree, attributed to the session that made each change.
+
+## Screenshots
+
+![Claude Gate in action](https://raw.githubusercontent.com/lntvan166/claudegate/main/media/ClaudeGateDemo.png)
 
 **Review All Pending** — every pending change in one native multi-file diff (full syntax highlighting, word-level diffs). Click into a file, then ✓/✗ in the title bar or `Cmd+Enter` / `Cmd+Backspace`:
 
-![Review All Pending — native multi-diff](media/ReviewAllPending.png)
+![Review All Pending — native multi-diff](https://raw.githubusercontent.com/lntvan166/claudegate/main/media/ReviewAllPending.png)
 
 ---
 

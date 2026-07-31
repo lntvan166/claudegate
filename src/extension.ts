@@ -259,9 +259,13 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(hookInstaller.onHealthChange(renderHookHealth));
     renderHookHealth(hookInstaller.getHealth());
 
+    // All three get the registry: a worktree holds its own pending files AND its
+    // own accepted/rejected records, so every panel needs it to surface them.
+    // Omitting it on the record panels made them render empty for a worktree
+    // decision — the view appeared (its count includes worktrees) with nothing in it.
     const pendingProvider  = new FilteredTreeProvider(sessionManager, "pending",  "tree", worktreeRegistry);
-    const acceptedProvider = new FilteredTreeProvider(sessionManager, "accepted", "tree");
-    const rejectedProvider = new FilteredTreeProvider(sessionManager, "rejected", "tree");
+    const acceptedProvider = new FilteredTreeProvider(sessionManager, "accepted", "tree", worktreeRegistry);
+    const rejectedProvider = new FilteredTreeProvider(sessionManager, "rejected", "tree", worktreeRegistry);
 
     context.subscriptions.push(
       vscode.workspace.registerTextDocumentContentProvider(
@@ -550,7 +554,11 @@ export function activate(context: vscode.ExtensionContext): void {
       // ── Accepted file/folder actions ──
       vscode.commands.registerCommand("claudegate.revertAccepted", (item: any) => {
         const id = typeof item === "string" ? item : item?.recordId;
-        if (id) sessionManager.revertAccepted(id);
+        // Record ids are `<decidedAt>::<path>`, so the owning session is
+        // recoverable even when we're handed a bare id — a record inside a
+        // worktree must revert into THAT worktree's session, not the primary one.
+        const p = typeof item === "string" ? item.split("::").slice(1).join("::") : item?.filePath;
+        if (id) managerFor(p).revertAccepted(id);
       }),
 
       vscode.commands.registerCommand(
@@ -580,7 +588,7 @@ export function activate(context: vscode.ExtensionContext): void {
       // ── Rejected file/folder actions ──
       vscode.commands.registerCommand("claudegate.reapplyFile", (item: any) => {
         const fp = typeof item === "string" ? item : item?.filePath;
-        if (fp) sessionManager.reapplyRejected(fp);
+        if (fp) managerFor(fp).reapplyRejected(fp);
       }),
 
       vscode.commands.registerCommand(
@@ -909,7 +917,13 @@ export function activate(context: vscode.ExtensionContext): void {
         accepted = session.accepted.filter((r) => isInWorkspace(r.path) && !isExcluded(r.path)).length;
         rejected = Object.values(session.rejected).filter((r) => isInWorkspace(r.path) && !isExcluded(r.path)).length;
       }
-      pending += worktreeRegistry.totalPending();
+      // Aggregate ALL three across attached worktrees. Counting only the primary
+      // session left the Accepted/Rejected views hidden (their `when` clauses gate
+      // on these) whenever the decision was made on a file inside a worktree — the
+      // record was written correctly but surfaced nowhere in this window.
+      pending  += worktreeRegistry.totalPending();
+      accepted += worktreeRegistry.totalAccepted();
+      rejected += worktreeRegistry.totalRejected();
 
       vscode.commands.executeCommand("setContext", "claudegate.acceptedCount", accepted);
       vscode.commands.executeCommand("setContext", "claudegate.rejectedCount", rejected);

@@ -23,6 +23,23 @@ CLAUDE.md
 media/icon.svg
 media/icon-activity.svg
 
+# Demo recordings, GIFs and README screenshots — safe to exclude because the
+# listing NEVER reads the packaged copies. Marketplace/Open VSX render the README
+# and fetch its images over HTTPS from GitHub: our README uses absolute
+# raw.githubusercontent.com URLs, and even relative paths wouldn't have needed the
+# files here — `vsce package` rewrites them to https://github.com/<repo>/raw/HEAD/...
+# using the `repository` field (verified by packaging a fixture).
+#
+# Consequence: images must be pushed to the default branch before publishing, or
+# the listing renders broken images.
+#
+# media/icon.png and media/icon-activity.png MUST keep shipping — package.json
+# points at them for the extension icon and the activity-bar container.
+media/*.mp4
+media/demo.gif
+media/ClaudeGateDemo.png
+media/ReviewAllPending.png
+
 # Build and lint config
 .gitignore
 .gitattributes

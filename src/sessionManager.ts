@@ -138,6 +138,23 @@ export class SessionManager {
     ).length;
   }
 
+  // In-scope accepted / rejected record counts. Mirror getPendingCount() so the
+  // Accepted and Rejected panels' visibility can be aggregated across worktrees
+  // the same way the pending badge already is.
+  getAcceptedCount(): number {
+    if (!this.session) return 0;
+    return this.session.accepted.filter(
+      (r) => isInWorkspace(r.path) && !isExcluded(r.path)
+    ).length;
+  }
+
+  getRejectedCount(): number {
+    if (!this.session) return 0;
+    return Object.values(this.session.rejected).filter(
+      (r) => isInWorkspace(r.path) && !isExcluded(r.path)
+    ).length;
+  }
+
   trackFileChange(filePath: string, originalContent: string | null, newFile = false): void {
     // Create session if it doesn't exist (in memory; persist() will write it)
     if (!this.session) {
