@@ -96,7 +96,7 @@ vsce verify-pat lntvan166
 
 Checking the Marketplace Personal Access Token now means you won't get halfway through (commit + tag pushed) only to discover you can't publish. If it fails, the PAT has expired — the user must refresh it in Azure DevOps (Marketplace → Manage scope) and re-run `vsce login lntvan166`; suggest they do this via `! vsce login lntvan166` so the interactive prompt lands in the session.
 
-**Open VSX auth is different — there's no `verify-pat` equivalent**, so the token is only validated at publish time (step 8). Confirm the two one-time prerequisites are in place before you rely on it:
+**Open VSX auth is different — there's no `verify-pat` equivalent**, so the token is only validated at publish time (step 9). Confirm the two one-time prerequisites are in place before you rely on it:
 
 - **Eclipse Foundation Open VSX Publisher Agreement** must be signed once, via the maintainer's open-vsx.org account (log in with GitHub → user settings → Publisher Agreement). This is the most common first-time failure — `ovsx publish` rejects an unsigned account.
 - **Namespace `lntvan166`** must exist. It does (created once with `ovsx create-namespace lntvan166 -p <token>`); re-running that just reports "Namespace already exists", which is fine.
@@ -118,7 +118,7 @@ release: vX.Y.Z — <one-line summary of the change>
 
 <optional short body explaining the why>
 
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+Co-Authored-By: Claude <noreply@anthropic.com>   # use the model that did the work
 EOF
 ```
 
@@ -129,12 +129,35 @@ Then re-check `git status --short`: only your intended files should be committed
 ```bash
 git tag -a vX.Y.Z -m "release: vX.Y.Z — <same summary>
 
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+Co-Authored-By: Claude <noreply@anthropic.com>   # use the model that did the work"
 ```
 
 Annotated (`-a`) tags carry a message and author — the project uses these, not lightweight tags.
 
-### 8. Package once, then publish to both registries
+### 8. Push commit and tag to GitHub — BEFORE publishing
+
+```bash
+git push origin main
+git push origin vX.Y.Z
+```
+
+**This must happen before the publish, not after.** The VSIX no longer ships the
+README's images (`.vscodeignore` excludes `media/*.mp4`, `media/demo.gif` and the
+screenshot PNGs — that's what took the package from 1.41 MB to 81 KB). Both
+registries render the README by fetching its images from GitHub over HTTPS, so the
+listing has **no packaged fallback**: publish before pushing and the store page
+shows broken images until the push lands.
+
+Confirm they resolve before you publish — a 404 here means something is unpushed:
+
+```bash
+for u in demo.gif ClaudeGateDemo.png ReviewAllPending.png; do
+  printf "%-22s %s\n" "$u" \
+    "$(curl -s -o /dev/null -w '%{http_code}' https://raw.githubusercontent.com/lntvan166/claudegate/main/media/$u)"
+done   # expect 200 for every line
+```
+
+### 9. Package once, then publish to both registries
 
 Build the artifact a single time so both registries get an identical `.vsix`:
 
@@ -142,29 +165,47 @@ Build the artifact a single time so both registries get an identical `.vsix`:
 vsce package                                       # → claudegate-X.Y.Z.vsix (runs vscode:prepublish)
 ```
 
-Glance at the file list it prints (see **After publishing** for what should/shouldn't be in it), then publish that same file to each registry:
+**Expected output: 13 files, ~82 KB.** That is the regression check — the package
+is code + hook + two icons + walkthrough markdown and nothing else. If it comes out
+in the hundreds of KB or megabytes, media has crept back in; fix `.vscodeignore`
+before publishing rather than shipping a bloated download.
+
+Then publish that same file to each registry:
 
 ```bash
 vsce publish --packagePath claudegate-X.Y.Z.vsix   # VS Code Marketplace
 ovsx publish  claudegate-X.Y.Z.vsix -p <token>     # Open VSX (or set OVSX_PAT and drop -p)
 ```
 
-Report the version and the Marketplace URL. The extension appears live within a few minutes on both.
+Report the version and the Marketplace URL.
 
-**Handling "already published" on Open VSX — it's a success, not a failure.** The maintainer also publishes to Open VSX by a parallel route (an automated/mirror path that runs under the same `lntvan166` account), so `ovsx publish` may report `Extension lntvan166.claudegate X.Y.Z is already published`. That means the version is already live there — treat it as done, don't try to force it. Neither registry can overwrite an existing version, so a duplicate error is confirmation, not a problem. Verify with:
-
-```bash
-curl -s https://open-vsx.org/api/lntvan166/claudegate | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])"
-```
-
-If that prints the version you're releasing, Open VSX is covered regardless of which path published it.
-
-### 9. Push commit and tag to GitHub
+**Both registries index AFTER the CLI reports success — poll, don't panic.** A
+verification run immediately after publishing returns the **previous** version, and
+`https://open-vsx.org/api/.../X.Y.Z` returns **404**. That is propagation delay, not
+a failed release. Measured on v1.12.0: Open VSX went live ~75 s after `ovsx` printed
+success, the Marketplace ~3.5 min after `vsce` did. Wrap the check in a loop rather
+than reading it once:
 
 ```bash
-git push origin main
-git push origin vX.Y.Z
+for i in $(seq 1 25); do
+  o=$(curl -s https://open-vsx.org/api/lntvan166/claudegate | python3 -c "import sys,json;print(json.load(sys.stdin).get('version','?'))" 2>/dev/null)
+  m=$(vsce show lntvan166.claudegate 2>/dev/null | grep "^  Version:" | awk '{print $2}')
+  echo "t+$((i*20))s  openvsx=$o  marketplace=$m"
+  [ "$o" = "X.Y.Z" ] && [ "$m" = "X.Y.Z" ] && echo "BOTH LIVE" && break
+  sleep 20
+done
 ```
+
+Before concluding anything is wrong, check how much time has actually passed —
+against the release commit's own timestamp (`git log -1 --format=%ci`), not a
+session clock. Misjudging that turned a normal 90-second wait into a false alarm once.
+
+**"Already published" on Open VSX is a success, not a failure.** The maintainer also
+publishes to Open VSX by a parallel route (an automated/mirror path under the same
+`lntvan166` account), so `ovsx publish` may report `Extension lntvan166.claudegate
+X.Y.Z is already published` — the version is already live; don't force it. Either
+outcome is fine: a clean `🚀 Published` means the manual path won the race. Neither
+registry can overwrite an existing version, so a duplicate error is confirmation.
 
 ### 10. (Optional) GitHub Release
 
