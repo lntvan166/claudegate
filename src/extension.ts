@@ -968,6 +968,13 @@ export function activate(context: vscode.ExtensionContext): void {
         // re-renders the panel.
         sessionManager.reconcileNow();
         worktreeRegistry.reconcileAll();
+        // Heal and re-evaluate the hook on focus, not just at activation. A hook
+        // deleted, downgraded, or unregistered mid-session would otherwise go
+        // unnoticed until the window reloads — capture stops with the status chip
+        // still reading "ok", which is the silent failure we most want to avoid.
+        // syncHookIfNeeded() early-returns after two hashes when nothing changed,
+        // so the common path costs nothing and spawns no subprocess.
+        void hookInstaller.syncHookIfNeeded().then(() => hookInstaller.refreshHealth());
       })
     );
     context.subscriptions.push({ dispose: () => worktreeRegistry.dispose() });

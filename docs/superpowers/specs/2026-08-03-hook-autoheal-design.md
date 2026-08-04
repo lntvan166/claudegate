@@ -1,9 +1,47 @@
 # Hook Auto-Heal — Design
 
 **Date:** 2026-08-03
-**Status:** Approved (brainstorming)
+**Status:** ❌ **REJECTED — the feature already existed.** Superseded by the
+Findings section below. Kept because the mechanism analysis and the forensic
+method are still correct and still useful; the premise is not.
+
+> ## Why this was rejected
+>
+> `HookInstaller.syncHookIfNeeded()` already hash-compares the bundled and
+> installed `hook.py`, rewrites it plus the wrapper, and notifies once per hash —
+> and `extension.ts` already calls it on activation. The "Problem" section below
+> is simply false. It was written without grepping for an existing implementation.
+>
+> **Forensic findings (2026-08-03, read-only, no reproduction needed):**
+>
+> | Evidence | Result |
+> |---|---|
+> | installed vs bundled `hook.py` hash | identical → health was never `stale` |
+> | `claudegate` in `~/.claude/settings.json` | present → never `not-registered` |
+> | `~/.claudegate/hook.log` daily counts | 354 (Jul 30) → 175 (Jul 31) → 88 (Aug 3) |
+> | captures after the Jul 30 `settings.json` write | uninterrupted, no gap |
+>
+> Capture never stopped. The reported "pending tab stops capturing" is fully
+> explained by two bugs **already fixed**: the nested-worktree attach cap (v1.12.0
+> — `tms` had 18 worktrees against a cap of 10, so whole feature directories were
+> silently dropped) and worktree decision records not surfacing (v1.12.1).
+>
+> **What survived from this design:** the hot/cold distinction under "The
+> mechanism that makes this safe" — `hook.py` changes take effect immediately for
+> running Claude sessions, `settings.json` changes require a restart. That is
+> accurate, load-bearing, and was undocumented. It moved into `CLAUDE.md`.
+>
+> **Also implemented separately:** `syncHookIfNeeded()` never fired
+> `onHealthChange`, and healing ran only at activation. Both fixed — see the
+> commit that follows this one.
+>
+> **Lesson:** grep for the implementation before specifying it, and diagnose from
+> artifacts already on disk before designing. `hook.log`, file hashes and mtimes
+> answered this in minutes without touching a running Claude session.
 
 ## Problem
+
+**(Superseded — this premise is false; see above.)**
 
 Nothing updates the capture hook. When a release changes `hooks/hook.py`, the copy
 at `~/.claudegate/hook.py` stays on the old version until the user notices a

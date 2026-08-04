@@ -1,5 +1,8 @@
 import * as assert from "assert";
-import { computeSettingsPatch, shouldWarnTrustInvalidation, hookHealthFrom, buildVerifyReport } from "./hookInstaller";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
+import { computeSettingsPatch, shouldWarnTrustInvalidation, hookHealthFrom, buildVerifyReport, HookInstaller } from "./hookInstaller";
 
 const CMD = "/home/me/.claudegate/hook.sh";
 const ENTRY = {
@@ -183,4 +186,62 @@ const registered = computeSettingsPatch("", CMD).content; // contains "claudegat
   console.log("ok - buildVerifyReport formats per-check lines + overall ok");
 }
 
-console.log("all hookInstaller tests passed");
+// Regression: syncHookIfNeeded() healed the hook but never fired onHealthChange,
+// so the status chip kept asserting the state it had at activation. Harmless while
+// the hash check and install happen synchronously before the first render, but a
+// single `await` added ahead of them would strand a warning chip over a hook that
+// is actually fine — and the panel would look broken when nothing is.
+void (async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cg-hookhome-"));
+  process.env.HOME = home;
+  process.env.USERPROFILE = home; // Windows: os.homedir() reads USERPROFILE
+
+  // The installer reads bundled hooks from <extensionPath>/hooks/hook.py.
+  const extPath = fs.mkdtempSync(path.join(os.tmpdir(), "cg-ext-"));
+  fs.mkdirSync(path.join(extPath, "hooks"), { recursive: true });
+  fs.writeFileSync(path.join(extPath, "hooks", "hook.py"), "print('bundled v2')\n");
+
+  const store = new Map<string, unknown>();
+  const context = {
+    extensionPath: extPath,
+    globalState: {
+      get: (k: string) => store.get(k),
+      update: async (k: string, v: unknown) => { store.set(k, v); },
+    },
+    extension: { packageJSON: { version: "9.9.9" } },
+  } as never;
+
+  // Pre-install an OLDER hook so the sync has real work to do.
+  fs.mkdirSync(path.join(home, ".claudegate"), { recursive: true });
+  fs.writeFileSync(path.join(home, ".claudegate", "hook.py"), "print('installed v1')\n");
+
+  const installer = new HookInstaller(context, { appendLine() {} } as never);
+  const fired: string[] = [];
+  installer.onHealthChange((h) => fired.push(h));
+
+  const action = await installer.syncHookIfNeeded();
+  assert.equal(action, "updated", "an older installed hook is updated, not installed fresh");
+  assert.equal(
+    fs.readFileSync(path.join(home, ".claudegate", "hook.py"), "utf-8"),
+    "print('bundled v2')\n",
+    "the bundled hook replaced the stale one on disk"
+  );
+  assert.ok(fired.length > 0, "a sync that changed the hook fires onHealthChange");
+
+  // Second sync: hashes now match, so it must early-return without re-firing —
+  // otherwise every window focus would churn the status chip.
+  const before = fired.length;
+  const second = await installer.syncHookIfNeeded();
+  assert.equal(second, "none", "a matching hash is a no-op");
+  assert.equal(fired.length, before, "a no-op sync fires no health event");
+
+  // refreshHealth() is what the focus handler calls to catch changes made outside
+  // this window (hook deleted, registration hand-edited away).
+  installer.refreshHealth();
+  assert.equal(fired.length, before + 1, "refreshHealth always notifies subscribers");
+
+  fs.rmSync(home, { recursive: true, force: true });
+  fs.rmSync(extPath, { recursive: true, force: true });
+  console.log("ok - hook sync heals the installed hook and reports the health change");
+  console.log("all hookInstaller tests passed");
+})();

@@ -201,10 +201,45 @@ The `.vscodeignore` file controls what gets packaged. vsce reads `.vscodeignore`
 
 ---
 
+## Hot vs Cold Hook Changes
+
+`~/.claude/settings.json` does not invoke `hook.py` directly. It invokes a stable
+wrapper (`~/.claudegate/hook.sh`, or `hook.bat` on Windows) whose path never
+changes and which re-execs `hook.py` **fresh on every tool call**:
+
+```bash
+#!/usr/bin/env bash
+python3 "$HOME/.claudegate/hook.py"
+```
+
+This gives two very different change classes, and conflating them causes real bugs:
+
+| Change | Effect on a **running** Claude session |
+|---|---|
+| `hooks/hook.py` content | **Hot** — picked up on the session's next edit. No restart. |
+| `~/.claude/settings.json` hooks block | **Cold** — the session loaded settings at start; capture silently stops until it restarts. |
+
+Consequences:
+
+- `HookInstaller.syncHookIfNeeded()` may rewrite `~/.claudegate/*` **silently and
+  automatically** (it runs at activation and on window focus) precisely because
+  those changes are hot. It must fire `onHealthChange` afterwards or the status
+  chip keeps reporting the pre-heal state.
+- Writing `settings.json` must stay a deliberate user action (**Setup Hook**),
+  because it invalidates every running session. `watchSettingsForTrustInvalidation()`
+  exists to detect exactly that and tell the user to restart their Claude sessions.
+
+When diagnosing "capture stopped", check `~/.claudegate/hook.log` first — daily
+entry counts show immediately whether the hook stopped firing or whether the
+records are landing somewhere the panel isn't displaying (the far more common
+cause historically: worktree sessions, see v1.10.1 / v1.12.0 / v1.12.1).
+
+---
+
 ## Adding Features
 
 - **New commands**: Register in `src/extension.ts` and add to `contributes.commands` + `contributes.menus` in `package.json`.
-- **Hook changes**: Edit `hooks/hook.py` — users must re-run **Setup Hook** to pick up the new version.
+- **Hook changes**: Edit `hooks/hook.py` — the extension auto-syncs it to `~/.claudegate/hook.py` at activation and on window focus, and running Claude sessions pick it up immediately (see **Hot vs Cold Hook Changes**). Re-running **Setup Hook** is only needed when the `settings.json` registration itself is missing or wrong.
 - **Session behavior**: `src/sessionManager.ts` owns all session read/write logic; keep side effects there.
 - **GUI detection changes**: `src/documentTracker.ts` owns all VS Code document/FS watching logic.
 

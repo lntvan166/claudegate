@@ -306,6 +306,13 @@ export class HookInstaller {
       `[INFO] Hook sync: ${action} (hash ${bundledHash.slice(0, 12)}…)`
     );
 
+    // A sync moves health (typically stale/not-installed → ok), so subscribers
+    // must be told or the status chip keeps showing a warning we already fixed.
+    // Every other state transition fires this; this path did not. Harmless today
+    // because the hash check and install run synchronously before the first
+    // render, but any `await` added above this line would strand the chip.
+    this.fireHealth();
+
     if (action === "updated") {
       const notified = this.context.globalState.get<string>(
         HOOK_SYNC_NOTIFIED_KEY
@@ -377,6 +384,17 @@ export class HookInstaller {
 
   getHealth(): HookHealth {
     return hookHealthFrom(this.getStatus(), this.trustInvalidated);
+  }
+
+  /**
+   * Re-evaluate health and notify subscribers. Health is otherwise only computed
+   * at activation and on the specific events that mutate it, so a change made
+   * outside this window — hook.py deleted, the settings entry hand-edited away —
+   * would leave the status chip asserting a state that is no longer true. Cheap:
+   * two file hashes and one read.
+   */
+  refreshHealth(): void {
+    this.fireHealth();
   }
 
   private fireHealth(): void {
