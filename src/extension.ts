@@ -209,9 +209,14 @@ export function activate(context: vscode.ExtensionContext): void {
     };
 
     const hookInstaller  = new HookInstaller(context, log);
-    void hookInstaller.syncHookIfNeeded().then(() => {
-      hookInstaller.warnIfHookNotRegisteredInSettings();
-    });
+    void hookInstaller
+      .syncHookIfNeeded()
+      .then(() => {
+        hookInstaller.warnIfHookNotRegisteredInSettings();
+      })
+      // Same unguarded-throw paths as the focus re-sync below. A rejection here
+      // must not take down activation or surface as an unhandled rejection.
+      .catch((err) => log.appendLine(`[WARN] Hook sync failed: ${(err as Error).message}`));
     // Health signal: warn if settings.json changes out from under a running
     // session (which silently invalidates the hook until the session restarts).
     context.subscriptions.push(hookInstaller.watchSettingsForTrustInvalidation());
@@ -974,7 +979,16 @@ export function activate(context: vscode.ExtensionContext): void {
         // still reading "ok", which is the silent failure we most want to avoid.
         // syncHookIfNeeded() early-returns after two hashes when nothing changed,
         // so the common path costs nothing and spawns no subprocess.
-        void hookInstaller.syncHookIfNeeded().then(() => hookInstaller.refreshHealth());
+        // .catch is required, not decorative: syncHookIfNeeded() can reject (an
+        // unwritable ~/.claudegate reaches an unguarded mkdirSync/installHookPy),
+        // and this runs on EVERY focus — without it a read-only home would emit an
+        // unhandled rejection for the whole session.
+        void hookInstaller
+          .syncHookIfNeeded()
+          .then(() => hookInstaller.refreshHealth())
+          .catch((err) =>
+            log.appendLine(`[WARN] Hook re-sync on focus failed: ${(err as Error).message}`)
+          );
       })
     );
     context.subscriptions.push({ dispose: () => worktreeRegistry.dispose() });
