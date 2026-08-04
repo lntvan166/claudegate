@@ -7,6 +7,18 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.12.2] — 2026-08-04
+
+### Fixed
+
+- **A capture hook that breaks mid-session is now noticed and repaired, instead of failing silently.** The extension keeps `~/.claudegate/hook.py` in sync with the bundled version, but it only ever did so at activation — so a hook deleted, downgraded, or replaced while the window stayed open went unnoticed until the next reload. Capture stopped while the status bar still reported everything as fine, which is the worst combination: no changes captured and no signal that anything is wrong. The hook is now re-checked and re-synced on window focus as well. It costs nothing when nothing has changed (two file hashes, then an early return — no subprocess, no writes), and a healthy setup shows and logs nothing.
+- **The status bar no longer keeps warning about a hook it has already repaired.** Syncing the hook moves its health state, but that path never notified the status chip, unlike every other transition. The warning was therefore a snapshot from activation rather than the current truth. Today the sync happens to run before the first render so the stale warning was not visible in practice, but the bug was one `await` away from surfacing as "the extension stopped working" after an update, when in fact it had fixed itself.
+- **A read-only home directory can no longer destabilise the extension.** Writing the hook reaches an unguarded `mkdir`, so an unwritable `~/.claudegate` throws out of the sync routine. Neither caller handled that, and the newly added focus check would have turned a single failure at activation into an unhandled rejection on *every* window focus for the whole session. Both call sites now log and continue — an unwritable hook is already reported through the health chip and must not take anything else down with it.
+
+### Internal
+
+- Documented in `CLAUDE.md` the mechanism that makes silent self-repair safe: `~/.claude/settings.json` invokes a stable wrapper that re-executes `hook.py` on every tool call, so **hook script changes are hot** (a running Claude session picks them up on its next edit) while **`settings.json` changes are cold** (they invalidate every running session until it restarts). Conflating the two is what makes a hook problem look like a broken extension. Also records that `~/.claudegate/hook.log` is the fastest way to tell a genuine capture failure apart from records landing where the panel is not looking.
+
 ## [1.12.1] — 2026-07-31
 
 ### Fixed
