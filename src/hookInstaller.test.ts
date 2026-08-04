@@ -240,6 +240,22 @@ void (async () => {
   installer.refreshHealth();
   assert.equal(fired.length, before + 1, "refreshHealth always notifies subscribers");
 
+  // The anti-silent-stop claim: a hook removed mid-session must be restored by the
+  // next sync, not left broken until the window reloads. Without this, capture
+  // stops while the status chip still reads "ok" — failure with no signal.
+  const hookPath = path.join(home, ".claudegate", "hook.py");
+  fs.rmSync(hookPath);
+  assert.equal(installer.getHealth(), "not-installed", "a deleted hook is detected");
+
+  const healed = await installer.syncHookIfNeeded();
+  assert.equal(healed, "installed", "a deleted hook is re-installed, not reported as updated");
+  assert.equal(
+    fs.readFileSync(hookPath, "utf-8"),
+    "print('bundled v2')\n",
+    "the bundled hook is restored byte-for-byte"
+  );
+  assert.notEqual(installer.getHealth(), "not-installed", "health recovers after the heal");
+
   fs.rmSync(home, { recursive: true, force: true });
   fs.rmSync(extPath, { recursive: true, force: true });
   console.log("ok - hook sync heals the installed hook and reports the health change");
