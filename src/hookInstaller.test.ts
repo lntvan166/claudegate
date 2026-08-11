@@ -2,7 +2,16 @@ import * as assert from "assert";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { computeSettingsPatch, shouldWarnTrustInvalidation, hookHealthFrom, buildVerifyReport, HookInstaller } from "./hookInstaller";
+import {
+  computeSettingsPatch,
+  shouldWarnTrustInvalidation,
+  hookHealthFrom,
+  buildVerifyReport,
+  backupsToPrune,
+  verifySettingsContent,
+  SETTINGS_BACKUP_RETENTION,
+  HookInstaller,
+} from "./hookInstaller";
 
 const CMD = "/home/me/.claudegate/hook.sh";
 const ENTRY = {
@@ -112,6 +121,104 @@ const ENTRY = {
   console.log("ok - repairs a stale claudegate registration");
 }
 
+// 4f. Touch only what we own. A real-world settings.json carries the user's
+//     whole Claude config plus other tools' hooks; installing ours must leave
+//     every one of those byte-for-byte intact (deep-equal, not just "present").
+//     Regression pin for the hazard where a failed read produced a bare stub
+//     that replaced all of this.
+{
+  const foreignHook = {
+    matcher: "^Bash$",
+    hooks: [{ type: "command", command: "/other/tool.sh" }],
+  };
+  const original = {
+    model: "opus[1m]",
+    theme: "dark",
+    permissions: { allow: ["Bash(npm test)"], deny: ["Read(./.env)"] },
+    enabledPlugins: { "claude-mem@marketplace": true },
+    extraKnownMarketplaces: { marketplace: { source: { source: "github", repo: "a/b" } } },
+    apiKeyHelper: "/usr/local/bin/key.sh",
+    hooks: {
+      PreToolUse: [foreignHook],
+      PostToolUse: [{ matcher: "^Write$", hooks: [{ type: "command", command: "/other/post.sh" }] }],
+      SessionStart: [{ hooks: [{ type: "command", command: "/other/start.sh" }] }],
+    },
+  };
+  const { content, changed } = computeSettingsPatch(JSON.stringify(original, null, 2), CMD);
+  assert.equal(changed, true, "claudegate not present → append");
+  const parsed = JSON.parse(content);
+
+  for (const key of Object.keys(original)) {
+    assert.ok(key in parsed, `top-level key "${key}" survived`);
+  }
+  assert.deepEqual(Object.keys(parsed), Object.keys(original), "no key added, dropped or reordered");
+  for (const key of ["model", "theme", "permissions", "enabledPlugins", "extraKnownMarketplaces", "apiKeyHelper"] as const) {
+    assert.deepEqual(parsed[key], original[key], `${key} untouched`);
+  }
+  assert.deepEqual(parsed.hooks.PostToolUse, original.hooks.PostToolUse, "foreign PostToolUse untouched");
+  assert.deepEqual(parsed.hooks.SessionStart, original.hooks.SessionStart, "foreign SessionStart untouched");
+  assert.deepEqual(parsed.hooks.PreToolUse[0], foreignHook, "foreign PreToolUse hook untouched, still first");
+  assert.equal(parsed.hooks.PreToolUse.length, 2, "exactly one entry appended");
+  assert.deepEqual(parsed.hooks.PreToolUse[1], ENTRY, "and it is ours");
+  console.log("ok - a full settings.json round-trips intact apart from our added entry");
+}
+
+// ── verifySettingsContent (post-write verification) ──────────────────────────
+{
+  const before = JSON.stringify({ model: "opus", permissions: {}, hooks: {} });
+  const good = computeSettingsPatch(before, CMD).content;
+  assert.equal(verifySettingsContent(good, before, CMD), null, "a correct write verifies");
+
+  // The catastrophic case: our entry landed but the user's config is gone.
+  const stub = computeSettingsPatch("", CMD).content;
+  assert.ok(
+    (verifySettingsContent(stub, before, CMD) ?? "").includes("model"),
+    "a lost top-level key is reported by name"
+  );
+
+  assert.ok(verifySettingsContent("not json", before, CMD), "unparseable result rejected");
+  assert.ok(verifySettingsContent("[]", before, CMD), "non-object result rejected");
+  assert.ok(
+    verifySettingsContent(JSON.stringify(JSON.parse(before)), before, CMD),
+    "a write that silently did nothing (our entry missing) is rejected"
+  );
+  assert.equal(
+    verifySettingsContent(computeSettingsPatch("", CMD).content, "", CMD),
+    null,
+    "fresh install has no prior keys to preserve"
+  );
+  console.log("ok - verifySettingsContent catches lost keys, bad JSON and missing entry");
+}
+
+// ── backupsToPrune (retention) ───────────────────────────────────────────────
+{
+  const names = [
+    "settings.json",
+    "settings.json.claudegate.bak",           // legacy fixed backup — never pruned
+    "other.json.claudegate-2026-01-01T00-00-00.000Z.bak", // another file's backup
+    ...Array.from({ length: 7 }, (_, i) =>
+      `settings.json.claudegate-2026-08-1${i}T10-00-00.000Z.bak`),
+  ];
+  const stale = backupsToPrune(names, "settings.json");
+  assert.equal(SETTINGS_BACKUP_RETENTION, 5, "retention is 5");
+  assert.equal(stale.length, 2, "7 timestamped backups → prune the 2 oldest");
+  assert.deepEqual(
+    stale,
+    [
+      "settings.json.claudegate-2026-08-10T10-00-00.000Z.bak",
+      "settings.json.claudegate-2026-08-11T10-00-00.000Z.bak",
+    ],
+    "the OLDEST are pruned, newest retained"
+  );
+  assert.ok(!stale.includes("settings.json.claudegate.bak"), "legacy fixed backup is never pruned");
+  assert.ok(!stale.some((n) => n.startsWith("other.json")), "another file's backups are not touched");
+  assert.deepEqual(backupsToPrune(names.slice(0, 5), "settings.json"), [], "under the cap → prune nothing");
+  // Same-millisecond collision suffix must still sort as the newer copy.
+  const collided = ["a.claudegate-2026-08-11T10-00-00.000Z.bak", "a.claudegate-2026-08-11T10-00-00.000Z_1.bak"];
+  assert.deepEqual(backupsToPrune(collided, "a", 1), [collided[0]], "the _1 collision copy is the newer one");
+  console.log("ok - backupsToPrune keeps the newest 5 and spares foreign/legacy backups");
+}
+
 // ── Health signal: shouldWarnTrustInvalidation ────────────────────────────
 const registered = computeSettingsPatch("", CMD).content; // contains "claudegate"
 
@@ -191,7 +298,7 @@ const registered = computeSettingsPatch("", CMD).content; // contains "claudegat
 // the hash check and install happen synchronously before the first render, but a
 // single `await` added ahead of them would strand a warning chip over a hook that
 // is actually fine — and the panel would look broken when nothing is.
-void (async () => {
+async function testHookSyncHeals(): Promise<void> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cg-hookhome-"));
   process.env.HOME = home;
   process.env.USERPROFILE = home; // Windows: os.homedir() reads USERPROFILE
@@ -259,5 +366,266 @@ void (async () => {
   fs.rmSync(home, { recursive: true, force: true });
   fs.rmSync(extPath, { recursive: true, force: true });
   console.log("ok - hook sync heals the installed hook and reports the health change");
+}
+
+// ── Guarded ~/.claude/settings.json write protocol ───────────────────────────
+// This file is the user's ENTIRE Claude Code config. Every assertion below
+// pins a hazard that was live in the shipped extension: a transient read error
+// replacing the whole config with a hook-only stub, a single fixed backup that
+// the next bad write destroys, and a rename that turns a dotfiles symlink into
+// a detached regular file.
+
+const NO_LOG = { appendLine() { /* silence */ } } as never;
+const NO_CONTEXT = {} as never;
+
+/** Fresh isolated HOME with an empty ~/.claude. Returns { home, claudeDir, settingsPath }. */
+function tempSettingsHome(): { home: string; claudeDir: string; settingsPath: string } {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cg-settings-"));
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  const claudeDir = path.join(home, ".claude");
+  fs.mkdirSync(claudeDir, { recursive: true });
+  return { home, claudeDir, settingsPath: path.join(claudeDir, "settings.json") };
+}
+
+const USER_CONFIG = JSON.stringify(
+  {
+    model: "opus[1m]",
+    permissions: { allow: ["Bash(npm test)"] },
+    enabledPlugins: { "claude-mem@marketplace": true },
+    hooks: { PreToolUse: [{ matcher: "^Bash$", hooks: [{ type: "command", command: "/other/tool.sh" }] }] },
+  },
+  null,
+  2
+);
+
+/** A settings blob with a stale claudegate wrapper path — always a semantic change. */
+function staleConfig(): string {
+  const parsed = JSON.parse(USER_CONFIG);
+  parsed.hooks.PreToolUse.push({
+    matcher: "^(Write|Edit|MultiEdit)$",
+    hooks: [{ type: "command", command: "/old/home/.claudegate/hook.sh" }],
+  });
+  return JSON.stringify(parsed, null, 2);
+}
+
+const backupsIn = (dir: string): string[] =>
+  fs.readdirSync(dir).filter((n) => n.endsWith(".bak")).sort();
+
+// A perfectly good settings.json that we transiently cannot read: EACCES under a
+// restrictive umask, EMFILE under a busy VS Code, EBUSY/EPERM on Windows while
+// Claude Code rewrites the file for its own state. Injected because none of
+// these can be provoked portably (chmod 000 proves nothing when running as root).
+class UnreadableInstaller extends HookInstaller {
+  protected readSettingsFileSync(): string {
+    const err: NodeJS.ErrnoException = new Error("EACCES: permission denied, open 'settings.json'");
+    err.code = "EACCES";
+    throw err;
+  }
+}
+
+function testUnreadableSettingsIsNeverOverwritten(): void {
+  const { home, claudeDir, settingsPath } = tempSettingsHome();
+  fs.writeFileSync(settingsPath, USER_CONFIG, "utf-8");
+
+  const wrote = new UnreadableInstaller(NO_CONTEXT, NO_LOG).registerHookInSettings();
+
+  assert.equal(wrote, false, "a non-ENOENT read error must abort the write");
+  assert.equal(
+    fs.readFileSync(settingsPath, "utf-8"),
+    USER_CONFIG,
+    "the user's entire config is untouched — NOT replaced by a hook-only stub"
+  );
+  assert.deepEqual(
+    fs.readdirSync(claudeDir),
+    ["settings.json"],
+    "no write, no temp file and no backup churn"
+  );
+
+  // The same must hold for a real non-ENOENT errno: a directory at the settings
+  // path makes readFileSync throw EISDIR.
+  const other = tempSettingsHome();
+  fs.mkdirSync(other.settingsPath);
+  assert.equal(
+    new HookInstaller(NO_CONTEXT, NO_LOG).registerHookInSettings(),
+    false,
+    "EISDIR aborts too"
+  );
+  assert.ok(fs.statSync(other.settingsPath).isDirectory(), "the existing path was not replaced");
+  assert.deepEqual(fs.readdirSync(other.claudeDir), ["settings.json"], "and nothing was written");
+
+  fs.rmSync(home, { recursive: true, force: true });
+  fs.rmSync(other.home, { recursive: true, force: true });
+  console.log("ok - a present-but-unreadable settings.json produces no write at all");
+}
+
+function testSymlinkedSettingsStaysASymlink(): void {
+  const { home, claudeDir, settingsPath } = tempSettingsHome();
+  const dotfiles = path.join(home, "dotfiles");
+  fs.mkdirSync(dotfiles);
+  const realFile = path.join(dotfiles, "settings.json");
+  fs.writeFileSync(realFile, USER_CONFIG, "utf-8");
+  fs.symlinkSync(realFile, settingsPath);
+
+  const installer = new HookInstaller(NO_CONTEXT, NO_LOG);
+  assert.equal(installer.registerHookInSettings(), true, "a fresh registration writes");
+
+  assert.ok(fs.lstatSync(settingsPath).isSymbolicLink(), "settings.json is STILL a symlink");
+  assert.equal(
+    fs.realpathSync(settingsPath),
+    fs.realpathSync(realFile),
+    "and still points at the dotfiles target"
+  );
+  const written = JSON.parse(fs.readFileSync(realFile, "utf-8"));
+  assert.ok(JSON.stringify(written).includes("claudegate"), "the dotfiles target received our entry");
+  assert.equal(written.model, "opus[1m]", "the user's config survived");
+  assert.deepEqual(
+    written.hooks.PreToolUse[0],
+    JSON.parse(USER_CONFIG).hooks.PreToolUse[0],
+    "the foreign hook survived"
+  );
+  assert.deepEqual(
+    fs.readdirSync(dotfiles),
+    ["settings.json"],
+    "no .bak or .tmp litter left inside the dotfiles repo"
+  );
+
+  // Backups live beside the literal path, in ~/.claude.
+  const first = backupsIn(claudeDir);
+  assert.equal(first.length, 1, "the pre-write state was backed up");
+  assert.equal(
+    fs.readFileSync(path.join(claudeDir, first[0]), "utf-8"),
+    USER_CONFIG,
+    "the backup holds the exact pre-write bytes"
+  );
+
+  // Hazard 2: a second write must ADD a backup, not overwrite the only good one.
+  fs.writeFileSync(realFile, staleConfig(), "utf-8");
+  assert.equal(installer.registerHookInSettings(), true, "a stale registration is repaired");
+  const second = backupsIn(claudeDir);
+  assert.equal(second.length, 2, "the second write added a backup instead of clobbering the first");
+  assert.equal(
+    fs.readFileSync(path.join(claudeDir, first[0]), "utf-8"),
+    USER_CONFIG,
+    "the first backup still holds the original config"
+  );
+
+  // Retention: newest 5 kept, older pruned.
+  for (let i = 1; i <= 6; i++) {
+    fs.writeFileSync(
+      path.join(claudeDir, `settings.json.claudegate-1999-01-0${i}T00-00-00.000Z.bak`),
+      `ancient ${i}`,
+      "utf-8"
+    );
+  }
+  fs.writeFileSync(realFile, staleConfig(), "utf-8");
+  assert.equal(installer.registerHookInSettings(), true, "third real write");
+  const kept = backupsIn(claudeDir);
+  assert.equal(kept.length, SETTINGS_BACKUP_RETENTION, "retention caps backups at 5");
+  assert.ok(!kept.some((n) => n.includes("1999-01-01")), "the oldest backups were pruned");
+  assert.ok(kept.some((n) => n.includes("1999-01-06")), "the newest of the old backups is retained");
+
+  fs.rmSync(home, { recursive: true, force: true });
+  console.log("ok - a symlinked settings.json stays a symlink and backups are timestamped + capped");
+}
+
+// Simulates a write that lands wrong bytes (a partial write, a racing writer, a
+// future bug in the patch logic). Verification must catch it and roll back.
+class CorruptingInstaller extends HookInstaller {
+  protected writeFileAtomic(filePath: string, _content: string): void {
+    fs.writeFileSync(filePath, JSON.stringify({ hooks: {} }, null, 2), "utf-8");
+  }
+}
+
+function testVerificationFailureRestoresBackup(): void {
+  const { home, claudeDir, settingsPath } = tempSettingsHome();
+  fs.writeFileSync(settingsPath, USER_CONFIG, "utf-8");
+
+  const wrote = new CorruptingInstaller(NO_CONTEXT, NO_LOG).registerHookInSettings();
+
+  assert.equal(wrote, false, "a write that fails verification is not reported as success");
+  assert.equal(
+    fs.readFileSync(settingsPath, "utf-8"),
+    USER_CONFIG,
+    "the user's config was restored from the backup, byte-for-byte"
+  );
+  assert.equal(backupsIn(claudeDir).length, 1, "the backup that made the rollback possible is kept");
+
+  fs.rmSync(home, { recursive: true, force: true });
+  console.log("ok - a post-write verification failure restores the backup");
+}
+
+// A full disk or a read-only ~/.claude makes the backup copy fail. Writing then
+// means changing the user's config with nothing to roll back to — so it must abort.
+class UnbackupableInstaller extends HookInstaller {
+  protected backupSettings(): string | null {
+    return null;
+  }
+}
+
+function testWriteAbortsWhenBackupFails(): void {
+  const { home, settingsPath } = tempSettingsHome();
+  fs.writeFileSync(settingsPath, USER_CONFIG, "utf-8");
+
+  const wrote = new UnbackupableInstaller(NO_CONTEXT, NO_LOG).registerHookInSettings();
+
+  assert.equal(wrote, false, "no backup means no write");
+  assert.equal(
+    fs.readFileSync(settingsPath, "utf-8"),
+    USER_CONFIG,
+    "the config is untouched when we could not protect it first"
+  );
+
+  fs.rmSync(home, { recursive: true, force: true });
+  console.log("ok - a failed backup aborts the write instead of proceeding unprotected");
+}
+
+function testMalformedSettingsRefusedOnDisk(): void {
+  const { home, claudeDir, settingsPath } = tempSettingsHome();
+  const garbage = '{ "model": "x", not json';
+  fs.writeFileSync(settingsPath, garbage, "utf-8");
+
+  const wrote = new HookInstaller(NO_CONTEXT, NO_LOG).registerHookInSettings();
+
+  assert.equal(wrote, false, "malformed settings must not be written");
+  assert.equal(fs.readFileSync(settingsPath, "utf-8"), garbage, "the bytes on disk are untouched");
+  assert.deepEqual(backupsIn(claudeDir), [], "refusing early means no backup churn either");
+
+  fs.rmSync(home, { recursive: true, force: true });
+  console.log("ok - malformed settings.json is refused on disk, not overwritten");
+}
+
+function testAutomaticWriteIsBounded(): void {
+  const { home, claudeDir, settingsPath } = tempSettingsHome();
+  fs.mkdirSync(settingsPath); // unreadable → the automatic attempt fails
+
+  const installer = new HookInstaller(NO_CONTEXT, NO_LOG);
+  assert.equal(installer.syncSettingsIfNeeded(), false, "the one automatic attempt fails safely");
+
+  // Repair the situation the way a user would, then confirm the automatic path
+  // stays latched off (it must not retry on every window focus) while the
+  // explicit Setup Hook action still works.
+  fs.rmdirSync(settingsPath);
+  fs.writeFileSync(settingsPath, USER_CONFIG, "utf-8");
+
+  assert.equal(installer.syncSettingsIfNeeded(), false, "the automatic path is latched off after a failure");
+  assert.equal(fs.readFileSync(settingsPath, "utf-8"), USER_CONFIG, "…and wrote nothing");
+  assert.deepEqual(backupsIn(claudeDir), [], "…and took no backup");
+
+  assert.equal(installer.registerHookInSettings(), true, "the explicit user action is still retryable");
+  assert.ok(fs.readFileSync(settingsPath, "utf-8").includes("claudegate"), "Setup Hook installs the entry");
+
+  fs.rmSync(home, { recursive: true, force: true });
+  console.log("ok - the automatic settings write is attempted at most once and latches off");
+}
+
+void (async () => {
+  await testHookSyncHeals();
+  testUnreadableSettingsIsNeverOverwritten();
+  testSymlinkedSettingsStaysASymlink();
+  testVerificationFailureRestoresBackup();
+  testWriteAbortsWhenBackupFails();
+  testMalformedSettingsRefusedOnDisk();
+  testAutomaticWriteIsBounded();
   console.log("all hookInstaller tests passed");
 })();

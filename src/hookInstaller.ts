@@ -142,6 +142,83 @@ export function shouldWarnTrustInvalidation(prevRaw: string, currentRaw: string)
   return classifySettingsChange(prevRaw, currentRaw) === "invalidated";
 }
 
+/** How many timestamped settings.json backups we keep before pruning the oldest. */
+export const SETTINGS_BACKUP_RETENTION = 5;
+
+/**
+ * Which of `names` are stale claudegate backups of `baseName` (newest `keep`
+ * retained). Backup names embed a sanitized ISO timestamp, so lexicographic
+ * order is chronological order.
+ *
+ * Pure so retention is testable without a filesystem. Note the legacy single
+ * `settings.json.claudegate.bak` (no timestamp) does not match the
+ * `<base>.claudegate-` prefix and is deliberately never pruned — it may be the
+ * only pre-timestamp copy a user has.
+ */
+export function backupsToPrune(
+  names: string[],
+  baseName: string,
+  keep: number = SETTINGS_BACKUP_RETENTION
+): string[] {
+  const prefix = `${baseName}.claudegate-`;
+  const mine = names.filter((n) => n.startsWith(prefix) && n.endsWith(".bak")).sort();
+  if (mine.length <= keep) return [];
+  return mine.slice(0, mine.length - keep);
+}
+
+type PreToolUseEntry = { matcher?: string; hooks?: Array<{ type?: string; command?: unknown }> };
+
+/**
+ * Post-write verification. Returns null when the bytes now on disk are an
+ * acceptable result of our patch, or a human-readable reason when they are not
+ * — in which case the caller restores the backup.
+ *
+ * Two independent claims are checked, because a write that loses the user's
+ * config is far worse than one that fails to install the hook:
+ *  1. every top-level key that existed before is still present (nothing of the
+ *     user's — model, permissions, enabledPlugins, other tools' hooks — was
+ *     dropped), and
+ *  2. our own entry actually landed (the write did what it claimed).
+ */
+export function verifySettingsContent(
+  after: string,
+  previousRaw: string,
+  hookCommand: string
+): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(after);
+  } catch {
+    return "the file on disk is not valid JSON";
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return "the file on disk is not a JSON object";
+  }
+
+  const afterKeys = new Set(Object.keys(parsed as Record<string, unknown>));
+  let before: unknown = null;
+  try {
+    before = JSON.parse(previousRaw);
+  } catch {
+    before = null; // absent/empty/unparseable before → nothing to preserve
+  }
+  if (typeof before === "object" && before !== null && !Array.isArray(before)) {
+    for (const key of Object.keys(before as Record<string, unknown>)) {
+      if (!afterKeys.has(key)) return `top-level key "${key}" was lost`;
+    }
+  }
+
+  const preToolUse = (parsed as { hooks?: { PreToolUse?: unknown } }).hooks?.PreToolUse;
+  const landed =
+    Array.isArray(preToolUse) &&
+    (preToolUse as PreToolUseEntry[]).some(
+      (h) => Array.isArray(h?.hooks) && h.hooks.some((x) => x?.command === hookCommand)
+    );
+  if (!landed) return "the claudegate hook entry is missing";
+
+  return null;
+}
+
 export interface HookStatus {
   scriptInstalled: boolean;
   registered: boolean;
@@ -180,6 +257,10 @@ export class HookInstaller {
   private lastKnownSettingsRaw: string | null = null;
   private trustWarningShown = false;
   private trustInvalidated = false;
+  // Bounded attempts: the automatic settings write is tried at most once per
+  // extension activation and stays latched off afterwards, so a failure can
+  // never be retried on every window focus. setup() bypasses this latch.
+  private settingsAutoWriteLatched = false;
   private readonly _onHealthChange = new vscode.EventEmitter<HookHealth>();
   readonly onHealthChange = this._onHealthChange.event;
 
@@ -207,7 +288,7 @@ export class HookInstaller {
 
       this.installHookPy();
       this.installHookWrapper();
-      const settingsChanged = this.patchClaudeSettings();
+      const settingsChanged = this.registerHookInSettings();
 
       this.trustInvalidated = false;
       this.trustWarningShown = false;
@@ -441,27 +522,59 @@ export class HookInstaller {
     }
   }
 
-  // Registers the hook in ~/.claude/settings.json. Returns true only when the
-  // file was actually written — a no-op (entry already correct) returns false so
-  // callers avoid the misleading "restart your sessions" notice and, crucially,
-  // so running Claude Code sessions keep their hook trust.
-  //
-  // Data safety: this file holds the user's entire Claude Code config. If it does
-  // not parse we REFUSE to write (never clobber it), and before our first write
-  // we back it up and write atomically (temp + rename) so an interrupted write
-  // can't truncate it.
-  private patchClaudeSettings(): boolean {
+  /**
+   * Registers the hook in ~/.claude/settings.json. Returns true only when the
+   * file was actually written — a no-op (entry already correct) returns false so
+   * callers avoid the misleading "restart your sessions" notice and, crucially,
+   * so running Claude Code sessions keep their hook trust.
+   *
+   * This file holds the user's ENTIRE Claude Code config — model, permissions,
+   * enabledPlugins, marketplaces, and other tools' hooks. Every write therefore
+   * runs the guarded protocol:
+   *
+   *   1. Only ENOENT counts as "fresh install". Any other read error (EACCES,
+   *      EMFILE, EISDIR, EBUSY/EPERM on Windows while Claude Code writes the
+   *      file concurrently) aborts — writing on a failed read would have
+   *      replaced the whole config with a bare hook stub.
+   *   2. A timestamped backup is taken first, and a backup failure aborts the
+   *      write: writing with no recoverable copy is the dangerous case.
+   *   3. The write targets the realpath, so a dotfiles-symlinked config keeps
+   *      its symlink instead of being replaced by a regular file.
+   *   4. The result is re-read and verified; anything wrong restores the backup.
+   *
+   * Public because it is the seam Phase 2's automatic write reuses. setup() —
+   * an explicit user action — calls it directly and stays retryable;
+   * `syncSettingsIfNeeded()` wraps it in the once-per-activation latch.
+   */
+  registerHookInSettings(): boolean {
     const claudeDir = path.dirname(this.claudeSettingsPath);
     fs.mkdirSync(claudeDir, { recursive: true });
 
-    let raw = "";
+    // Only ENOENT means "no config yet". Everything else means "there is a
+    // config and we could not read it" — the one case where writing destroys it.
+    // Note the post-write verification cannot save us here: with no baseline to
+    // compare against, a stub written over a real config verifies clean. Aborting
+    // on the read is the only defence.
+    let raw: string | null;
     try {
-      raw = fs.readFileSync(this.claudeSettingsPath, "utf-8");
-    } catch {
-      raw = "";
+      raw = this.readSettingsFileSync();
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code !== "ENOENT") {
+        this.log.appendLine(
+          `[ERROR] could not read ${this.claudeSettingsPath} (${e.code ?? "unknown"}: ${e.message}); ` +
+            "refusing to write — your Claude configuration is untouched."
+        );
+        vscode.window.showErrorMessage(
+          "Claude Gate: ~/.claude/settings.json exists but could not be read, so the hook was NOT " +
+            "installed — your configuration was left untouched. Check the file's permissions, then run Setup Hook again."
+        );
+        return false;
+      }
+      raw = null; // genuinely absent → safe to create
     }
 
-    const { content, changed, parseError } = computeSettingsPatch(raw, this.hookWrapperDest);
+    const { content, changed, parseError } = computeSettingsPatch(raw ?? "", this.hookWrapperDest);
     if (parseError) {
       this.log.appendLine(
         `[ERROR] ${this.claudeSettingsPath} is not valid JSON; refusing to overwrite it (your config is untouched).`
@@ -474,27 +587,159 @@ export class HookInstaller {
     }
     if (!changed) return false;
 
-    // Back up the existing config before our first modification.
-    if (raw.trim()) {
-      try {
-        fs.copyFileSync(this.claudeSettingsPath, `${this.claudeSettingsPath}.claudegate.bak`);
-      } catch (err) {
-        this.log.appendLine(`[WARN] could not back up settings.json: ${(err as Error).message}`);
+    return this.writeSettingsGuarded(raw, content);
+  }
+
+  // The single read that decides fresh-install vs abort. Protected so tests can
+  // inject the errno cases (EACCES, EMFILE, EBUSY/EPERM on Windows) that cannot
+  // be provoked portably — chmod 000 proves nothing when running as root.
+  protected readSettingsFileSync(): string {
+    return fs.readFileSync(this.claudeSettingsPath, "utf-8");
+  }
+
+  /**
+   * Bounded automatic variant: at most one settings write attempt per extension
+   * activation, latching off afterwards so a focus-driven caller can never turn
+   * a transient failure into a loop of rewrites. setup() deliberately does NOT
+   * go through here — an explicit user action must always be retryable.
+   */
+  syncSettingsIfNeeded(): boolean {
+    if (this.settingsAutoWriteLatched) return false;
+    this.settingsAutoWriteLatched = true;
+    return this.registerHookInSettings();
+  }
+
+  /**
+   * Back up → write → verify → restore-on-failure. `previousRaw` is null when
+   * the file was genuinely absent (nothing to back up, nothing to preserve).
+   */
+  private writeSettingsGuarded(previousRaw: string | null, content: string): boolean {
+    // Resolve symlinks so the temp+rename lands on the real file (keeping the
+    // symlink intact) and stays on one filesystem. Falls back to the literal
+    // path when realpath fails — notably when the file does not exist yet.
+    let target = this.claudeSettingsPath;
+    try {
+      target = fs.realpathSync(this.claudeSettingsPath);
+    } catch {
+      /* absent or unresolvable → write the literal path */
+    }
+
+    let backupPath: string | null = null;
+    if (previousRaw !== null) {
+      backupPath = this.backupSettings();
+      if (!backupPath) {
+        this.log.appendLine(
+          "[ERROR] could not back up ~/.claude/settings.json; refusing to write without a recoverable copy."
+        );
+        vscode.window.showErrorMessage(
+          "Claude Gate: could not back up ~/.claude/settings.json, so the hook was NOT installed — " +
+            "your configuration was left untouched."
+        );
+        return false;
       }
     }
-    this.writeFileAtomic(this.claudeSettingsPath, content);
+
+    try {
+      this.writeFileAtomic(target, content);
+    } catch (err) {
+      this.log.appendLine(`[ERROR] failed to write settings.json: ${(err as Error).message}`);
+      if (backupPath) this.restoreSettingsBackup(backupPath, target);
+      return false;
+    }
+
+    let after = "";
+    try {
+      after = fs.readFileSync(target, "utf-8");
+    } catch (err) {
+      after = ""; // unreadable → fails verification below, which restores
+      this.log.appendLine(`[WARN] could not re-read settings.json after write: ${(err as Error).message}`);
+    }
+    const problem = verifySettingsContent(after, previousRaw ?? "", this.hookWrapperDest);
+    if (problem) {
+      this.log.appendLine(`[ERROR] settings.json failed verification after write: ${problem}.`);
+      if (backupPath && this.restoreSettingsBackup(backupPath, target)) {
+        this.log.appendLine(`[INFO] restored ~/.claude/settings.json from ${backupPath}.`);
+      }
+      vscode.window.showErrorMessage(
+        "Claude Gate: the update to ~/.claude/settings.json did not verify, so it was rolled back from a backup. " +
+          "The hook was not installed."
+      );
+      return false;
+    }
+
     // Record our own write so the trust-invalidation watcher doesn't flag it
     // (setup() shows its own restart notice when it actually writes).
     this.lastKnownSettingsRaw = content;
     return true;
   }
 
+  /**
+   * Copy the current settings.json to a timestamped backup, then prune to the
+   * newest SETTINGS_BACKUP_RETENTION. Returns the backup path, or null if the
+   * copy failed (the caller must then abort the write).
+   *
+   * Timestamped rather than a single fixed path: a fixed `.claudegate.bak` is
+   * overwritten by the next write, so one bad write followed by another
+   * destroys the only good copy. Backups sit beside the *literal* path, in
+   * ~/.claude, so a dotfiles-symlinked config doesn't accumulate .bak files
+   * inside the user's repo.
+   *
+   * Protected so tests can inject a backup failure (a full or read-only
+   * ~/.claude), which must abort the write rather than proceed unprotected.
+   */
+  protected backupSettings(): string | null {
+    const stamp = new Date().toISOString().replace(/:/g, "-");
+    let backupPath = `${this.claudeSettingsPath}.claudegate-${stamp}.bak`;
+    // Two writes inside one millisecond would otherwise reuse the name. "_" sorts
+    // after "." so the suffixed copy still sorts as the newer one.
+    for (let n = 1; fs.existsSync(backupPath); n++) {
+      backupPath = `${this.claudeSettingsPath}.claudegate-${stamp}_${n}.bak`;
+    }
+
+    try {
+      fs.copyFileSync(this.claudeSettingsPath, backupPath);
+    } catch (err) {
+      this.log.appendLine(`[WARN] could not back up settings.json: ${(err as Error).message}`);
+      return null;
+    }
+
+    try {
+      const dir = path.dirname(this.claudeSettingsPath);
+      for (const name of backupsToPrune(fs.readdirSync(dir), path.basename(this.claudeSettingsPath))) {
+        try { fs.unlinkSync(path.join(dir, name)); } catch { /* keep going */ }
+      }
+    } catch (err) {
+      this.log.appendLine(`[WARN] could not prune settings.json backups: ${(err as Error).message}`);
+    }
+
+    return backupPath;
+  }
+
+  private restoreSettingsBackup(backupPath: string, target: string): boolean {
+    try {
+      // copyFileSync (not rename) so a symlinked target keeps its inode.
+      fs.copyFileSync(backupPath, target);
+      return true;
+    } catch (err) {
+      this.log.appendLine(
+        `[ERROR] could not restore settings.json from ${backupPath}: ${(err as Error).message}. ` +
+          "Your previous configuration is still in that backup file."
+      );
+      return false;
+    }
+  }
+
   // Write via a temp file + rename so an interrupted write can't leave a
-  // truncated/corrupt settings.json.
-  private writeFileAtomic(filePath: string, content: string): void {
+  // truncated/corrupt settings.json. `filePath` must already be realpath-resolved
+  // by the caller: renaming onto a symlink replaces the link with a regular file.
+  // Protected so tests can simulate a write that lands wrong content.
+  protected writeFileAtomic(filePath: string, content: string): void {
     const tmp = `${filePath}.${crypto.randomBytes(6).toString("hex")}.tmp`;
     try {
       fs.writeFileSync(tmp, content, "utf-8");
+      // Preserve the existing file's mode — rename would otherwise hand the
+      // user a fresh 0644 file where they had tightened permissions.
+      try { fs.chmodSync(tmp, fs.statSync(filePath).mode & 0o777); } catch { /* new file → default mode */ }
       fs.renameSync(tmp, filePath);
     } catch (err) {
       try { fs.unlinkSync(tmp); } catch { /* ignore cleanup error */ }
