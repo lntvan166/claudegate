@@ -3,7 +3,24 @@
 **Date:** 2026-08-11
 **Severity:** High — silent, total review bypass. Not a subset of edits: an agent that writes files via shell does *100%* of its work unreviewed, while the UI shows a clean "nothing pending" state indistinguishable from "nothing happened".
 **Component:** `src/hookInstaller.ts:80` (the PreToolUse matcher) + `hooks/hook.py:224-227` (the `file_path` contract)
-**Status:** OPEN — reported from a real session; no fix attempted.
+**Status:** FIXED in v1.13.0 (2026-08-11). Design:
+`docs/superpowers/specs/2026-08-11-bash-writes-capture-design.md`.
+
+> Fix options (1) and (3) below were both partly overtaken by what the design
+> turned up. Option 1's "detect and warn" became "detect and capture a real
+> diff", because the extension already prunes baselines that turn out to match
+> disk — so guessing a path wrongly costs a transient invisible entry, which
+> makes liberal extraction affordable rather than reckless. Option 3's premise —
+> that per-tool interception cannot be trusted — is right, and Claude Code now
+> offers a `FileChanged` hook that delivers it natively; it is not used here
+> because it fires after the write and so carries no baseline.
+>
+> Two things had to be fixed that this report does not mention. Widening the
+> matcher could never have reached an existing install, because the registration
+> check compared only the wrapper path and never the matcher. And the reason
+> that check was manual at all — the belief that writing `settings.json`
+> invalidates hooks in running sessions — no longer holds on Claude Code
+> 2.1.227, which is what allows the repair to happen automatically.
 
 ---
 

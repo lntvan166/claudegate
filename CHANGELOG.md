@@ -7,6 +7,35 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.13.0] — 2026-08-11
+
+### Added
+
+- **Files that Claude rewrites through a shell command are now captured for review.** Claude does not only edit through its `Write`/`Edit`/`MultiEdit` tools — it also runs shell commands that rewrite files, which is routine for bulk edits, codemods, formatters and reverts. None of that was captured: the registered hook matched only the three edit tools, so a whole session's work could pass through unreviewed while the panel showed a clean "nothing pending" state — indistinguishable from "nothing happened". In one reported case a session spanning 3 repositories and 7 source files produced a single capture, and that one was incidental. No health check could catch it either, because nothing was broken: the hook was installed, registered, current, and simply never invoked. `Bash` is now part of the matcher, and the hook extracts the target paths from the command — redirection targets, the arguments of in-place tools (`sed -i`, `tee`, `cp`/`mv`, `patch`, `git apply`/`checkout --`/`restore`, `gofmt -w`, `prettier --write`, and others), and path-shaped string literals, which is what catches a `python3` heredoc that binds the path to a variable before writing it. Each target goes through exactly the same pipeline as a direct edit, so a shell-written file gets a real baseline and a normal accept/reject diff.
+- **Commands that cannot write are rejected before any work happens.** The hook now runs on every shell command, so it first asks whether the command could write at all and exits immediately if not. `ls`, `go build` and `git status` cost a few microseconds and produce no log entry. Commands that write without naming a file (`make generate`, `prettier --write src/`) are deliberately left alone — they regenerate output Claude did not author, so flagging them would be noise.
+
+### Fixed
+
+- **A momentary read failure on `~/.claude/settings.json` could replace your entire Claude configuration with a hook-only stub.** Registration read the file inside a `try` whose `catch` set the contents to the empty string, which the patch logic then read as "no config yet" and answered with a fresh-install blob containing nothing but the ClaudeGate hook. `model`, `permissions`, `enabledPlugins`, `extraKnownMarketplaces`, `theme` and every other tool's hooks were overwritten — and the backup was skipped in exactly that case, because backing up was conditional on having read something. No user error was required: a passing `EACCES`, an `EMFILE` under a busy editor, or an `EBUSY`/`EPERM` on Windows while Claude Code wrote the file concurrently was enough. Only a genuine `ENOENT` is now treated as a first install; every other error aborts the write and leaves the file untouched. Verifying after the write cannot help here — with no baseline to compare against, a stub verifies as correct — so refusing to write is the only defence.
+- **A second bad write can no longer destroy the only good backup.** The backup went to one fixed path and was overwritten every time. Backups are now timestamped and the five most recent are kept, and a write is abandoned rather than attempted if the backup itself fails.
+- **A `settings.json` kept as a symlink into a dotfiles repository is no longer silently detached.** The atomic write renamed a temporary file over the path, which replaces the symlink with a regular file: the real config stayed in the repository while Claude Code began reading a copy that nothing was managing. The write now resolves the link first, so the dotfiles file is what gets updated. File permissions survive the write too, rather than being reset to a fresh default.
+- **Writes are now verified and rolled back.** After writing, the file is re-read and checked — every top-level key that was there before must still be there, and the hook entry must have landed. Anything unexpected restores the backup immediately.
+- **ClaudeGate no longer claims your Claude sessions have stopped tracking when they have not.** Changing `settings.json` produced a warning saying every running session had gone silent and had to be restarted. On current Claude Code that is false, and the warning was pure alarm: sessions notice the change and carry on. The message is now a factual note, and the status bar reads "hook config changed" rather than "restart Claude sessions".
+
+### Changed
+
+- **An out-of-date hook registration now repairs itself, with no Setup Hook click.** Deciding whether the registration was current compared only the wrapper path and never the matcher, so anyone whose path was already correct kept their old matcher permanently — through every activation and every hook sync. That made the change above impossible to deliver: widening the matcher in a release could never have reached an existing install. Both halves are now compared, and a stale registration is repaired at activation. The repair is bounded to one attempt, stops after any failure, and only ever repairs — with no ClaudeGate entry present it does nothing, because a first install stays a deliberate **Setup Hook** action rather than something done to a configuration you never opted into.
+
+### Internal
+
+- Corrected the rule recorded in `CLAUDE.md` in 1.12.2, which held that a `settings.json` change was "cold" — silently invalidating hooks in every running Claude session until it restarted. Measured against Claude Code 2.1.227, that is no longer so: every running session holds an inotify watch on the settings file, a hook added mid-session fires on the very next tool call (verified for both project and user-global settings, in sessions hours old), and existing hooks keep firing throughout. This is what makes the self-repair above safe, and the old rule is why the shell-capture gap went undiagnosed for as long as it did. The genuinely useful part of that section — check `~/.claudegate/hook.log` first when capture appears to have stopped — is kept.
+- The session file format is unchanged. A shell-originated capture is an ordinary pending entry, so the review panel, diff viewer, accept/reject, revert/re-apply and worktree routing all work without modification.
+- Path extraction is deliberately liberal, because a wrong guess is nearly free while a miss is the bug being fixed: a path that was not written has a baseline equal to what is on disk and is hidden then pruned by the existing settle-window logic, and a path that never appears is pruned as an absent new file. Extraction is pure string work with no subprocess, glob expansion or `git` call, and is bounded in both input size and target count so a pathological command cannot delay an edit.
+
+### Notes
+
+- **No need to re-run Setup Hook.** Both halves of this release reach an existing install on their own: the hook script is already synced automatically, and the widened matcher is repaired at the next activation.
+
 ## [1.12.2] — 2026-08-04
 
 ### Fixed
