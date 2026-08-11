@@ -10,19 +10,21 @@ import {
   backupsToPrune,
   verifySettingsContent,
   SETTINGS_BACKUP_RETENTION,
+  PRE_TOOL_MATCHER,
   HookInstaller,
 } from "./hookInstaller";
 
 const CMD = "/home/me/.claudegate/hook.sh";
+const OLD_MATCHER = "^(Write|Edit|MultiEdit)$"; // pre-Bash-capture installs
 const ENTRY = {
-  matcher: "^(Write|Edit|MultiEdit)$",
+  matcher: PRE_TOOL_MATCHER,
   hooks: [{ type: "command", command: CMD }],
 };
 
-// The registration write must be idempotent: rewriting ~/.claude/settings.json
-// out from under a running Claude Code session invalidates its hook trust
-// (anti-tampering), silently disabling capture until the session restarts.
-// See docs/2026-07-06-hook-not-firing-in-running-session-bug.md.
+// The registration write must be idempotent: settings.json is the user's whole
+// Claude config, every write costs a backup and a rewrite of bytes we do not
+// own, and older Claude Code versions dropped hook trust for running sessions
+// on any change. See docs/2026-07-06-hook-not-firing-in-running-session-bug.md.
 
 // 1. Empty/absent settings → install, changed.
 {
@@ -30,7 +32,9 @@ const ENTRY = {
   assert.equal(changed, true, "empty settings must be written");
   const parsed = JSON.parse(content);
   assert.deepEqual(parsed.hooks.PreToolUse[0], ENTRY, "entry installed");
-  console.log("ok - installs into empty settings");
+  assert.equal(parsed.hooks.PreToolUse[0].matcher, PRE_TOOL_MATCHER, "a fresh install uses the current matcher");
+  assert.ok(PRE_TOOL_MATCHER.includes("Bash"), "…which selects Bash, so shell writes reach the hook");
+  console.log("ok - installs into empty settings with the current matcher");
 }
 
 // 2. Already-registered, byte-identical → NO write (the bug: this used to rewrite).
@@ -107,7 +111,7 @@ const ENTRY = {
 //     place to the correct command, not left broken.
 {
   const stale = JSON.stringify(
-    { hooks: { PreToolUse: [{ matcher: "^(Write|Edit|MultiEdit)$", hooks: [{ type: "command", command: "/old/path/.claudegate/hook.sh" }] }] } },
+    { hooks: { PreToolUse: [{ matcher: OLD_MATCHER, hooks: [{ type: "command", command: "/old/path/.claudegate/hook.sh" }] }] } },
     null,
     2
   );
@@ -119,6 +123,71 @@ const ENTRY = {
   assert.ok(!cmds.includes("/old/path/.claudegate/hook.sh"), "old command removed");
   assert.equal(parsed.hooks.PreToolUse.length, 1, "no duplicate claudegate entry created");
   console.log("ok - repairs a stale claudegate registration");
+}
+
+// 4e-i. MIGRATION: the command is already correct but the matcher predates Bash
+//     capture. This was previously impossible to detect — correctness was decided
+//     from the command alone, so an existing install kept the narrow matcher
+//     forever and every shell write stayed invisible.
+{
+  const oldInstall = JSON.stringify(
+    { model: "opus[1m]", hooks: { PreToolUse: [{ matcher: OLD_MATCHER, hooks: [{ type: "command", command: CMD }] }] } },
+    null,
+    2
+  );
+  const { content, changed } = computeSettingsPatch(oldInstall, CMD);
+  assert.equal(changed, true, "an old matcher with the right command IS a semantic change");
+  const parsed = JSON.parse(content);
+  assert.equal(parsed.hooks.PreToolUse.length, 1, "repaired in place — no duplicate entry");
+  assert.deepEqual(parsed.hooks.PreToolUse[0], ENTRY, "matcher widened, command kept");
+  assert.equal(parsed.model, "opus[1m]", "the rest of the config is untouched");
+  console.log("ok - an old-matcher entry is detected as stale and repaired to the current matcher");
+}
+
+// 4e-ii. IDEMPOTENCY PIN: current matcher + current command → no write, ever.
+//     Load-bearing — this runs automatically at every activation now, so a
+//     `changed: true` here would rewrite the user's whole Claude config on
+//     every window open.
+{
+  const current = JSON.stringify(
+    { hooks: { PreToolUse: [{ matcher: PRE_TOOL_MATCHER, hooks: [{ type: "command", command: CMD }] }] } },
+    null,
+    2
+  );
+  assert.equal(computeSettingsPatch(current, CMD).changed, false, "already-current entry must NOT rewrite");
+  // And the repair is itself a fixed point: patching its own output changes nothing.
+  const repaired = computeSettingsPatch(
+    JSON.stringify({ hooks: { PreToolUse: [{ matcher: OLD_MATCHER, hooks: [{ type: "command", command: CMD }] }] } }, null, 2),
+    CMD
+  ).content;
+  assert.equal(computeSettingsPatch(repaired, CMD).changed, false, "repairing twice is a no-op");
+  console.log("ok - an entry already carrying the current matcher is a no-op (idempotency)");
+}
+
+// 4e-iii. A foreign PreToolUse entry that happens to use a `^Bash$` matcher is
+//     another tool's hook, not ours — "ours" is the claudegate command path,
+//     never the matcher. It must survive the migration untouched.
+{
+  const foreignBash = { matcher: "^Bash$", hooks: [{ type: "command", command: "/other/tool.sh" }] };
+  const mixed = JSON.stringify(
+    {
+      hooks: {
+        PreToolUse: [
+          foreignBash,
+          { matcher: OLD_MATCHER, hooks: [{ type: "command", command: CMD }] },
+        ],
+      },
+    },
+    null,
+    2
+  );
+  const { content, changed } = computeSettingsPatch(mixed, CMD);
+  assert.equal(changed, true, "our stale entry is still repaired");
+  const parsed = JSON.parse(content);
+  assert.equal(parsed.hooks.PreToolUse.length, 2, "no entry added or dropped");
+  assert.deepEqual(parsed.hooks.PreToolUse[0], foreignBash, "the foreign ^Bash$ hook is byte-identical");
+  assert.deepEqual(parsed.hooks.PreToolUse[1], ENTRY, "and ours was migrated");
+  console.log("ok - a foreign ^Bash$ hook is left untouched while ours is repaired");
 }
 
 // 4f. Touch only what we own. A real-world settings.json carries the user's
@@ -403,7 +472,7 @@ const USER_CONFIG = JSON.stringify(
 function staleConfig(): string {
   const parsed = JSON.parse(USER_CONFIG);
   parsed.hooks.PreToolUse.push({
-    matcher: "^(Write|Edit|MultiEdit)$",
+    matcher: OLD_MATCHER,
     hooks: [{ type: "command", command: "/old/home/.claudegate/hook.sh" }],
   });
   return JSON.stringify(parsed, null, 2);
@@ -597,26 +666,82 @@ function testMalformedSettingsRefusedOnDisk(): void {
 
 function testAutomaticWriteIsBounded(): void {
   const { home, claudeDir, settingsPath } = tempSettingsHome();
-  fs.mkdirSync(settingsPath); // unreadable → the automatic attempt fails
+  // Registered (so the automatic path engages) but malformed, so the attempt
+  // runs and refuses. Any failure must latch, never retry per window focus.
+  const broken = '{ "hooks": { "PreToolUse": [ { "command": "/home/me/.claudegate/hook.sh" } not json';
+  fs.writeFileSync(settingsPath, broken, "utf-8");
 
   const installer = new HookInstaller(NO_CONTEXT, NO_LOG);
   assert.equal(installer.syncSettingsIfNeeded(), false, "the one automatic attempt fails safely");
+  assert.equal(fs.readFileSync(settingsPath, "utf-8"), broken, "malformed settings are left alone");
 
   // Repair the situation the way a user would, then confirm the automatic path
   // stays latched off (it must not retry on every window focus) while the
   // explicit Setup Hook action still works.
-  fs.rmdirSync(settingsPath);
-  fs.writeFileSync(settingsPath, USER_CONFIG, "utf-8");
+  const stale = staleConfig();
+  fs.writeFileSync(settingsPath, stale, "utf-8");
 
   assert.equal(installer.syncSettingsIfNeeded(), false, "the automatic path is latched off after a failure");
-  assert.equal(fs.readFileSync(settingsPath, "utf-8"), USER_CONFIG, "…and wrote nothing");
+  assert.equal(fs.readFileSync(settingsPath, "utf-8"), stale, "…and wrote nothing");
   assert.deepEqual(backupsIn(claudeDir), [], "…and took no backup");
 
   assert.equal(installer.registerHookInSettings(), true, "the explicit user action is still retryable");
-  assert.ok(fs.readFileSync(settingsPath, "utf-8").includes("claudegate"), "Setup Hook installs the entry");
+  assert.ok(fs.readFileSync(settingsPath, "utf-8").includes(PRE_TOOL_MATCHER), "Setup Hook repairs the entry");
 
   fs.rmSync(home, { recursive: true, force: true });
   console.log("ok - the automatic settings write is attempted at most once and latches off");
+}
+
+// The whole point of the automatic write: a user who installed before Bash
+// capture existed gets the widened matcher with no action at all. And the
+// converse — it must never be the path that performs a FIRST-TIME install into
+// a config the user never opted into.
+function testAutomaticWriteHealsStaleMatcherOnly(): void {
+  const { home, claudeDir, settingsPath } = tempSettingsHome();
+  const oldInstall = JSON.parse(USER_CONFIG);
+  oldInstall.hooks.PreToolUse.push({
+    matcher: OLD_MATCHER,
+    hooks: [{ type: "command", command: path.join(home, ".claudegate", "hook.sh") }],
+  });
+  fs.writeFileSync(settingsPath, JSON.stringify(oldInstall, null, 2), "utf-8");
+
+  const installer = new HookInstaller(NO_CONTEXT, NO_LOG);
+  assert.equal(installer.syncSettingsIfNeeded(), true, "an existing install with a stale matcher self-heals");
+
+  const after = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+  assert.equal(after.hooks.PreToolUse.length, 2, "no entry added or dropped");
+  assert.deepEqual(
+    after.hooks.PreToolUse[0],
+    JSON.parse(USER_CONFIG).hooks.PreToolUse[0],
+    "the foreign ^Bash$ hook is untouched"
+  );
+  assert.equal(after.hooks.PreToolUse[1].matcher, PRE_TOOL_MATCHER, "our matcher was widened on disk");
+  assert.equal(after.model, "opus[1m]", "the user's config survived");
+  assert.equal(backupsIn(claudeDir).length, 1, "the write was backed up like any other");
+
+  // Second activation, healed file: nothing left to do (a fresh installer, so
+  // the latch cannot be what is doing the work here).
+  assert.equal(
+    new HookInstaller(NO_CONTEXT, NO_LOG).syncSettingsIfNeeded(),
+    false,
+    "an already-current registration is never rewritten"
+  );
+  assert.equal(backupsIn(claudeDir).length, 1, "…and takes no further backup");
+
+  // Not registered at all → the automatic path must stay out of it.
+  const fresh = tempSettingsHome();
+  fs.writeFileSync(fresh.settingsPath, USER_CONFIG, "utf-8");
+  assert.equal(
+    new HookInstaller(NO_CONTEXT, NO_LOG).syncSettingsIfNeeded(),
+    false,
+    "a first-time install is NOT performed automatically"
+  );
+  assert.equal(fs.readFileSync(fresh.settingsPath, "utf-8"), USER_CONFIG, "…and settings.json is untouched");
+  assert.deepEqual(backupsIn(fresh.claudeDir), [], "…with no backup churn");
+
+  fs.rmSync(home, { recursive: true, force: true });
+  fs.rmSync(fresh.home, { recursive: true, force: true });
+  console.log("ok - the automatic write heals a stale matcher but never performs a first-time install");
 }
 
 void (async () => {
@@ -627,5 +752,6 @@ void (async () => {
   testWriteAbortsWhenBackupFails();
   testMalformedSettingsRefusedOnDisk();
   testAutomaticWriteIsBounded();
+  testAutomaticWriteHealsStaleMatcherOnly();
   console.log("all hookInstaller tests passed");
 })();

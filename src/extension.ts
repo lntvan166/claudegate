@@ -212,13 +212,27 @@ export function activate(context: vscode.ExtensionContext): void {
     void hookInstaller
       .syncHookIfNeeded()
       .then(() => {
+        // Repair an EXISTING registration whose matcher or wrapper path has gone
+        // stale (a widened tool list — Bash writes — reaches installed users only
+        // this way; no user action would ever suggest re-running Setup Hook for
+        // it). Bounded to one attempt per activation, and a no-op when settings
+        // carry no claudegate entry at all — a first-time install stays the
+        // explicit Setup Hook action, left to the warning below.
+        // Silent by design: current Claude Code re-reads hook config on change,
+        // so there is nothing for the user to do and nothing to restart.
+        if (hookInstaller.syncSettingsIfNeeded()) {
+          log.appendLine("[INFO] Repaired the claudegate hook registration in ~/.claude/settings.json.");
+          hookInstaller.refreshHealth();
+        }
         hookInstaller.warnIfHookNotRegisteredInSettings();
       })
-      // Same unguarded-throw paths as the focus re-sync below. A rejection here
+      // Same unguarded-throw paths as the focus re-sync below. syncSettingsIfNeeded()
+      // handles its own I/O errors, but a rejection from anything in this chain
       // must not take down activation or surface as an unhandled rejection.
       .catch((err) => log.appendLine(`[WARN] Hook sync failed: ${(err as Error).message}`));
-    // Health signal: warn if settings.json changes out from under a running
-    // session (which silently invalidates the hook until the session restarts).
+    // Health signal: note if the hooks block of settings.json changes out from
+    // under a running session (current Claude Code re-reads it; older versions
+    // needed a session restart).
     context.subscriptions.push(hookInstaller.watchSettingsForTrustInvalidation());
     const documentTracker = new DocumentTracker(sessionManager, workspacePath, log);
 
@@ -250,7 +264,7 @@ export function activate(context: vscode.ExtensionContext): void {
       "not-installed": "hook not installed",
       "not-registered": "hook not registered",
       "stale": "hook update available",
-      "trust-invalidated": "restart Claude sessions",
+      "trust-invalidated": "hook config changed",
     };
     const renderHookHealth = (health: string) => {
       if (health === "ok") { hookHealthBar.hide(); return; }

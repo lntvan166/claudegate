@@ -9,17 +9,29 @@ import { persistWorkspaceRoots } from "./workspaceRoots";
 type HookSyncAction = "none" | "installed" | "updated";
 
 /**
+ * The `PreToolUse` matcher claudegate registers in ~/.claude/settings.json.
+ *
+ * `Bash` is in the alternation because Claude rewrites files through shell
+ * commands too (`sed -i`, `cat > f <<EOF`, a python heredoc); those writes were
+ * invisible to review until the matcher selected them. Defined once and
+ * compared by `computeSettingsPatch`, so an install carrying an older matcher is
+ * detected as stale and repaired — a widened list reaches existing users on its
+ * own instead of needing a manual re-install.
+ */
+export const PRE_TOOL_MATCHER = "^(Write|Edit|MultiEdit|Bash)$";
+
+/**
  * Pure decision logic for the ~/.claude/settings.json registration write.
  *
  * Given the current file contents and the hook wrapper command, returns the
  * settings JSON that *should* be on disk and whether it differs from what is.
  *
- * Idempotency is load-bearing: Claude Code snapshots hook config at session
- * start and treats any later change to settings.json as untrusted, silently
- * disabling those hooks until the session restarts. So we must NOT rewrite the
- * file for a cosmetic (formatting-only) difference when the claudegate entry is
- * already correct — doing so kills capture for every already-running session at
- * once. `changed` therefore reflects a SEMANTIC change (entry added or repaired),
+ * Idempotency is load-bearing. This file is the user's entire Claude config, and
+ * every write costs a backup, a rewrite of bytes we do not own, and (on older
+ * Claude Code versions, which snapshot hook config at session start) the hook
+ * trust of every running session. So we must NOT rewrite the file for a cosmetic
+ * (formatting-only) difference when the claudegate entry is already correct.
+ * `changed` therefore reflects a SEMANTIC change (entry added or repaired),
  * never a reformat. See docs/2026-07-06-hook-not-firing-in-running-session-bug.md.
  *
  * Data safety: a non-empty file that does not parse as a JSON object is NOT
@@ -53,31 +65,50 @@ export function computeSettingsPatch(
   const preToolUse = hooks.PreToolUse as Array<{ matcher?: string; hooks?: Array<{ type?: string; command?: unknown }> }>;
 
   // "Ours" = any PreToolUse entry that references a claudegate wrapper path.
+  // Never the matcher: a foreign tool may legitimately register `^Bash$`, and
+  // rewriting that would hijack another tool's hook.
   const isOurs = (h: unknown) => JSON.stringify(h).includes("claudegate");
   const ours = preToolUse.filter(isOurs);
+  // Correct means BOTH halves are current. Comparing only the command is what
+  // made an existing install un-upgradable: the wrapper path is already right,
+  // so a widened matcher could never reach anyone who had installed before.
   const correct = ours.some(
-    (h) => Array.isArray(h.hooks) && h.hooks.some((x) => x.command === hookCommand)
+    (h) =>
+      h.matcher === PRE_TOOL_MATCHER &&
+      Array.isArray(h.hooks) &&
+      h.hooks.some((x) => x.command === hookCommand)
   );
 
   let changed = false;
   if (correct) {
-    // Already registered with the exact command → no semantic change. Return the
-    // reformatted content but leave `changed` false so the caller preserves the
-    // on-disk bytes (and hook trust for running sessions).
+    // Already registered with the exact command AND matcher → no semantic
+    // change. Return the reformatted content but leave `changed` false so the
+    // caller preserves the on-disk bytes.
   } else if (ours.length > 0) {
-    // Stale claudegate registration (e.g. an old/wrong wrapper path after the
-    // home dir moved, or a .sh/.bat mismatch) → repair in place to the correct
-    // command rather than leaving capture silently broken.
+    // Stale claudegate registration → repair in place rather than leave capture
+    // silently broken. Either half can be stale:
+    //   - the wrapper COMMAND (an old/wrong path after the home dir moved, a
+    //     .sh/.bat mismatch), or
+    //   - the MATCHER (an install predating a widened tool list — e.g. before
+    //     Bash writes were captured).
+    // Only entries that actually carry a claudegate command are touched, and
+    // only those get their matcher rewritten.
     for (const h of ours) {
       if (!Array.isArray(h.hooks)) continue;
+      let mine = false;
       for (const x of h.hooks) {
-        if (typeof x.command === "string" && x.command.includes("claudegate")) x.command = hookCommand;
+        if (typeof x.command === "string" && x.command.includes("claudegate")) {
+          x.command = hookCommand;
+          mine = true;
+        }
       }
+      if (!mine) continue;
+      h.matcher = PRE_TOOL_MATCHER;
+      changed = true;
     }
-    changed = true;
   } else {
     preToolUse.push({
-      matcher: "^(Write|Edit|MultiEdit)$",
+      matcher: PRE_TOOL_MATCHER,
       hooks: [{ type: "command", command: hookCommand }],
     });
     changed = true;
@@ -111,8 +142,12 @@ function hooksConfigOf(raw: string): string {
  *                    state). The loaded PreToolUse hook is untouched, so
  *                    capture keeps working — do not warn, do not clear.
  * - `invalidated`  — the hooks block changed while claudegate is still
- *                    registered. Claude Code loads hooks once at session start,
- *                    so already-running sessions have gone silent — warn.
+ *                    registered. Current Claude Code (measured on 2.1.227)
+ *                    watches the settings files and re-reads hook config on
+ *                    change, so running sessions keep capturing; older versions
+ *                    snapshotted it at session start and needed a restart. Kept
+ *                    as a low-alarm heads-up for those, not a stop-the-world
+ *                    warning. (The name is historical.)
  * - `unregistered` — the hooks block changed and the claudegate entry is gone.
  *                    That's an uninstall (handled by the not-registered health
  *                    state), not an invalidation — don't warn.
@@ -298,9 +333,8 @@ export class HookInstaller {
         `[INFO] Hook installed successfully.${settingsChanged ? "" : " (settings.json unchanged)"}`
       );
       const message = settingsChanged
-        ? "Claude Gate: Hook installed. Restart any Claude Code sessions that were already running — " +
-          "Claude Code loads hooks once at startup, so in-progress sessions won't be tracked until restarted. " +
-          "New sessions will appear in the sidebar automatically."
+        ? "Claude Gate: Hook installed. Current Claude Code picks the registration up immediately, including sessions " +
+          "that are already running; on older versions, restart a session if its edits don't appear."
         : "Claude Gate: Hook already registered — no changes made. Running Claude Code sessions keep tracking.";
       const action = await vscode.window.showInformationMessage(message, "Verify Setup");
       if (action === "Verify Setup") this.verify();
@@ -523,10 +557,10 @@ export class HookInstaller {
   }
 
   /**
-   * Registers the hook in ~/.claude/settings.json. Returns true only when the
-   * file was actually written — a no-op (entry already correct) returns false so
-   * callers avoid the misleading "restart your sessions" notice and, crucially,
-   * so running Claude Code sessions keep their hook trust.
+   * Registers (or repairs) the hook in ~/.claude/settings.json. Returns true
+   * only when the file was actually written — a no-op (entry already correct)
+   * returns false so callers skip the notice and so we never rewrite the user's
+   * config, or churn backups, for nothing.
    *
    * This file holds the user's ENTIRE Claude Code config — model, permissions,
    * enabledPlugins, marketplaces, and other tools' hooks. Every write therefore
@@ -602,10 +636,19 @@ export class HookInstaller {
    * activation, latching off afterwards so a focus-driven caller can never turn
    * a transient failure into a loop of rewrites. setup() deliberately does NOT
    * go through here — an explicit user action must always be retryable.
+   *
+   * REPAIR ONLY. If ~/.claude/settings.json carries no claudegate entry at all,
+   * this does nothing: a first-time install stays the explicit Setup Hook
+   * action, so we never register ourselves into a configuration the user never
+   * opted into. It exists for the case Setup Hook cannot reach — an existing
+   * registration whose matcher or wrapper path has since gone stale (the
+   * widened matcher is exactly that), which no user action would ever suggest
+   * re-running Setup Hook for.
    */
   syncSettingsIfNeeded(): boolean {
     if (this.settingsAutoWriteLatched) return false;
     this.settingsAutoWriteLatched = true;
+    if (!this.getStatus().registered) return false;
     return this.registerHookInSettings();
   }
 
@@ -756,12 +799,17 @@ export class HookInstaller {
   }
 
   /**
-   * Health signal: watch ~/.claude/settings.json and warn once if it changes
-   * out from under the running extension while the claudegate hook is still
-   * registered. Such a change silently invalidates the hook for every Claude
-   * Code session that was already open (Claude Code trusts hook config as
-   * loaded at session start), so capture goes quiet until those sessions
-   * restart. This turns that silent failure into a visible, actionable hint.
+   * Health signal: watch ~/.claude/settings.json and note once if the hooks
+   * block changes out from under the running extension while the claudegate
+   * hook is still registered.
+   *
+   * Historically this warned that every already-open Claude Code session had
+   * gone silent until restarted. That is NOT true of current Claude Code
+   * (measured on 2.1.227): it holds an inotify watch on the settings files and
+   * re-reads hook config when they change, so a mid-session edit takes effect
+   * immediately and existing hooks keep firing. The mechanism is retained
+   * because older versions did snapshot hook config at session start — but the
+   * message is now a heads-up, not an outage report.
    *
    * Returns a Disposable that stops watching; register it on context.subscriptions.
    */
@@ -803,12 +851,13 @@ export class HookInstaller {
       if (this.trustWarningShown) return;
       this.trustWarningShown = true;
       this.log.appendLine(
-        "[WARN] ~/.claude/settings.json changed while running — hook trust invalidated for open sessions."
+        "[INFO] ~/.claude/settings.json hooks block changed while running; current Claude Code re-reads it, " +
+          "older versions may need a session restart."
       );
       void vscode.window
         .showWarningMessage(
-          "Claude Gate: ~/.claude/settings.json changed. Claude Code loads hooks once at session start, so any " +
-            "Claude Code sessions already running have stopped tracking edits. Restart them (or run /hooks) to resume capture.",
+          "Claude Gate: the hook configuration in ~/.claude/settings.json changed. Current Claude Code re-reads it " +
+            "immediately, so capture should continue; on older versions, restarting a Claude Code session picks up the change.",
           "Verify Setup"
         )
         .then((action) => {

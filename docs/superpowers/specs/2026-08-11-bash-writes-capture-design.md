@@ -77,11 +77,15 @@ path re-stores that snapshot ("Settings changed from …, updating app state").
 **Consequence:** the matcher can be auto-healed. No prompt, no new health state,
 no restart notice, no user action.
 
-**Open item:** the live test used the *project* settings file, since that was the
-low-blast-radius option. The inotify watch on `~/.claude/settings.json` — the file
-we actually write — is confirmed present in every session, so the mechanism is
-shared, but the end-to-end hot reload of the user-global file has not been
-demonstrated. **Verify before Phase 2 ships.**
+**Open item — CLOSED (verified 2026-08-11, before Phase 2b landed).** The first
+live test used the *project* settings file, since that was the low-blast-radius
+option, leaving the end-to-end hot reload of the user-global file undemonstrated.
+It has now been demonstrated directly: a probe hook was added to
+`~/.claude/settings.json` — the file we actually write — and fired on the very
+next tool call in a session that had been running for hours, with the existing
+claudegate hook continuing to fire throughout. The probe was then removed and the
+file restored byte-identically (sha256 unchanged before and after). Nothing about
+the auto-heal is now inferred from the project-settings case.
 
 ### 2. The config write path can destroy the user's Claude config
 

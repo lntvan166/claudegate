@@ -5,7 +5,7 @@
 ClaudeGate is a VS Code/Cursor extension that captures file changes made by Claude Code and presents them in a structured review panel. The user can accept or reject each change using VS Code's native diff editor.
 
 Two detection paths are supported:
-- **PreToolUse hook (authoritative for all Claude Code).** The `~/.claude/settings.json` `PreToolUse` hook fires before every Claude write — for **both** the terminal CLI **and** the in-editor Claude Code extension (confirmed: both run the same hook, so a GUI edit is captured with correct original content and the in-editor session's `session_id`). This is the primary, attributed capture path.
+- **PreToolUse hook (authoritative for all Claude Code).** The `~/.claude/settings.json` `PreToolUse` hook fires before every Claude write — for **both** the terminal CLI **and** the in-editor Claude Code extension (confirmed: both run the same hook, so a GUI edit is captured with correct original content and the in-editor session's `session_id`). This is the primary, attributed capture path. The registered matcher is `PRE_TOOL_MATCHER` in `src/hookInstaller.ts` — `^(Write|Edit|MultiEdit|Bash)$`. `Bash` is in it because Claude also rewrites files through the shell (`sed -i`, `cat > f <<EOF`, a `python3` heredoc); `hook.py` extracts the target paths from `tool_input.command` and runs them through the same capture pipeline.
 - **DocumentTracker (non-Claude fallback, off by default).** The filesystem watcher exists only to capture **non-Claude** agents (Cursor Composer, Codex) that don't run Claude's hooks; it cannot attribute edits, so it is disabled unless `claudegate.fileWatcher.enabled` is set.
 
 ---
@@ -113,14 +113,16 @@ Per-workspace session file at `~/.claudegate/sessions/<md5(workspacePath)>.json`
   "transcript_path": "/path/to/transcript",
   "cwd": "/absolute/working/directory",
   "hook_event_name": "PreToolUse",
-  "tool_name": "Write | Edit | MultiEdit",
+  "tool_name": "Write | Edit | MultiEdit | Bash",
   "tool_input": {
-    "file_path": "relative or absolute path to target file"
+    "file_path": "relative or absolute path to target file (Write/Edit/MultiEdit)",
+    "command": "the shell command string (Bash)"
   }
 }
 ```
 
 **Hook behavior:**
+- A `Bash` payload carries `command` instead of `file_path`. The hook first asks whether the command can plausibly write at all (redirection, `sed -i`, `tee`, `cp`/`mv`, `patch`, `git apply|checkout --|restore`, in-place formatters, …) and exits immediately if not — no filesystem work, no log spam for `ls` or `go build`. Otherwise it harvests candidate target paths from the command and runs **each one through the same pipeline** as a `file_path`. Harvesting is deliberately liberal: a wrongly harvested path becomes a transient no-op entry that the existing settle-window pruning removes, whereas a missed one is an uncaptured edit.
 - `file_path` may be relative to `cwd`. The hook resolves it to an absolute path before storing.
 - If the file is **already pending**, the hook leaves it untouched (preserves the frozen baseline).
 - Otherwise (no entry yet, or — for legacy/pre-migration sessions — a non-pending entry) the hook creates a fresh pending entry with the current on-disk `originalContent`. The hook only ever writes `files`; the extension owns `accepted`/`rejected`, and accept/reject remove the entry from `files`, so on a current-model session a re-edit simply finds no entry and creates a new pending one.
@@ -201,7 +203,7 @@ The `.vscodeignore` file controls what gets packaged. vsce reads `.vscodeignore`
 
 ---
 
-## Hot vs Cold Hook Changes
+## How Hook Changes Reach a Running Session
 
 `~/.claude/settings.json` does not invoke `hook.py` directly. It invokes a stable
 wrapper (`~/.claudegate/hook.sh`, or `hook.bat` on Windows) whose path never
@@ -212,22 +214,43 @@ changes and which re-execs `hook.py` **fresh on every tool call**:
 python3 "$HOME/.claudegate/hook.py"
 ```
 
-This gives two very different change classes, and conflating them causes real bugs:
-
 | Change | Effect on a **running** Claude session |
 |---|---|
-| `hooks/hook.py` content | **Hot** — picked up on the session's next edit. No restart. |
-| `~/.claude/settings.json` hooks block | **Cold** — the session loaded settings at start; capture silently stops until it restarts. |
+| `hooks/hook.py` content | Picked up on the session's next tool call. No restart. |
+| `~/.claude/settings.json` hooks block | Picked up on the session's next tool call **on Claude Code 2.1.227+**. Older versions snapshotted hook config at session start and needed a restart. |
+
+**This corrects an earlier rule in this file** that called the settings.json case
+"cold" — that a write silently stopped capture in every running session until it
+restarted. Measured on 2.1.227:
+
+- every running session (including 25-hour-old ones) holds an `inotify` watch on
+  the settings file, mask `c06`;
+- a hook added mid-session to the **project** `settings.local.json` fired on the
+  very next tool call;
+- the same was then verified for the **user-global** `~/.claude/settings.json` —
+  the file we actually write — in a session hours old;
+- in both cases the pre-existing claudegate hook kept firing throughout: adding
+  or repairing a hook does **not** revoke the others.
 
 Consequences:
 
-- `HookInstaller.syncHookIfNeeded()` may rewrite `~/.claudegate/*` **silently and
-  automatically** (it runs at activation and on window focus) precisely because
-  those changes are hot. It must fire `onHealthChange` afterwards or the status
-  chip keeps reporting the pre-heal state.
-- Writing `settings.json` must stay a deliberate user action (**Setup Hook**),
-  because it invalidates every running session. `watchSettingsForTrustInvalidation()`
-  exists to detect exactly that and tell the user to restart their Claude sessions.
+- `HookInstaller.syncHookIfNeeded()` rewrites `~/.claudegate/*` **silently and
+  automatically** (activation + window focus). It must fire `onHealthChange`
+  afterwards or the status chip keeps reporting the pre-heal state.
+- `HookInstaller.syncSettingsIfNeeded()` may likewise write `settings.json`
+  **silently**, at activation, because the change takes effect immediately. It is
+  deliberately bounded: at most one attempt per activation, latching off on
+  failure, and **repair only** — it never performs a first-time install, which
+  stays the explicit **Setup Hook** action. This is how a widened
+  `PRE_TOOL_MATCHER` (e.g. adding `Bash`) reaches users who installed earlier;
+  nothing else could, since `computeSettingsPatch` is the only code that inspects
+  the matcher.
+- Every settings.json write still runs the full guarded protocol (ENOENT-only
+  fresh install, timestamped backup, realpath write, post-write verify with
+  rollback) — that file holds the user's entire Claude config.
+- `watchSettingsForTrustInvalidation()` is retained for the older versions, but
+  its message is a heads-up, **not** an outage report: do not reintroduce
+  "your sessions have stopped tracking, restart them".
 
 When diagnosing "capture stopped", check `~/.claudegate/hook.log` first — daily
 entry counts show immediately whether the hook stopped firing or whether the
@@ -239,7 +262,8 @@ cause historically: worktree sessions, see v1.10.1 / v1.12.0 / v1.12.1).
 ## Adding Features
 
 - **New commands**: Register in `src/extension.ts` and add to `contributes.commands` + `contributes.menus` in `package.json`.
-- **Hook changes**: Edit `hooks/hook.py` — the extension auto-syncs it to `~/.claudegate/hook.py` at activation and on window focus, and running Claude sessions pick it up immediately (see **Hot vs Cold Hook Changes**). Re-running **Setup Hook** is only needed when the `settings.json` registration itself is missing or wrong.
+- **Hook changes**: Edit `hooks/hook.py` — the extension auto-syncs it to `~/.claudegate/hook.py` at activation and on window focus, and running Claude sessions pick it up immediately (see **How Hook Changes Reach a Running Session**). Re-running **Setup Hook** is only needed when the `settings.json` registration is missing entirely — a *stale* one (wrong wrapper path, outdated matcher) is repaired automatically at the next activation.
+- **Captured tools**: change `PRE_TOOL_MATCHER` in `src/hookInstaller.ts` and teach `hooks/hook.py` to read that tool's `tool_input`. The constant is compared by `computeSettingsPatch`, so existing installs migrate themselves; a matcher hardcoded anywhere else would strand every user who installed before the change.
 - **Session behavior**: `src/sessionManager.ts` owns all session read/write logic; keep side effects there.
 - **GUI detection changes**: `src/documentTracker.ts` owns all VS Code document/FS watching logic.
 
@@ -249,6 +273,7 @@ cause historically: worktree sessions, see v1.10.1 / v1.12.0 / v1.12.1).
 
 - **File snapshot over git**: No git dependency — works in any directory, including non-git projects.
 - **Per-workspace session files** (`~/.claudegate/sessions/<hash>.json`): Multiple simultaneous Claude sessions in different projects stay fully isolated. The hash is `MD5(resolvedWorkspacePath)`, computed identically by `hook.py` and `SessionManager`.
-- **Two detection paths**: The `PreToolUse` hook is authoritative for all Claude Code — terminal CLI and in-editor extension both run the same hook, firing synchronously before writes. The `DocumentTracker` is a non-Claude fallback for agents like Cursor Composer or Codex that don't run Claude's hooks; it cannot attribute edits, so it's disabled by default.
+- **Two detection paths**: The `PreToolUse` hook is authoritative for all Claude Code — terminal CLI and in-editor extension both run the same hook, firing synchronously before writes, for `Write`/`Edit`/`MultiEdit` **and** `Bash`. The `DocumentTracker` is a non-Claude fallback for agents like Cursor Composer or Codex that don't run Claude's hooks; it cannot attribute edits, so it's disabled by default.
+- **Shell writes captured by extraction, not by watching**: a `Bash` payload is parsed for write intent and target paths rather than resolved by observing the filesystem, so the baseline is still snapshotted *before* the write and stays attributable to the session. Commands that write without naming a file (`make generate`, `prettier --write src/`) are out of scope by design.
 - **Only pending files get a badge**: Accepted and rejected files are undecorated in the file explorer to avoid clashing with git's own `A`/`R` status indicators.
 - **Python for the hook**: Python 3 is pre-installed on macOS/Linux and handles JSON and file I/O without extra dependencies.
