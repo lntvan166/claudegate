@@ -244,10 +244,17 @@ class ShellCaptureEndToEndTest(unittest.TestCase):
             json.dump([self.root], f)
         self.session_file = session_file_for(self.cg, self.root)
         self.logfile = os.path.join(self.cg, "hook.log")
-        open(os.path.join(self.cg, "hooklog.enabled"), "w").close()
+        with open(os.path.join(self.cg, "hooklog.enabled"), "w"):
+            pass
 
     def tearDown(self):
         shutil.rmtree(self.home, ignore_errors=True)
+
+    def log(self):
+        """hook.log contents. Read via a context manager so the suite stays
+        ResourceWarning-clean."""
+        with open(self.logfile, encoding="utf-8") as f:
+            return f.read()
 
     def run_bash(self, command):
         payload = json.dumps({
@@ -278,7 +285,7 @@ class ShellCaptureEndToEndTest(unittest.TestCase):
         self.assertEqual("package biz\n", files[target]["originalContent"])
         self.assertEqual("pending", files[target]["reviewStatus"])
         self.assertEqual("s1", files[target]["sessionId"])
-        self.assertIn("captured", open(self.logfile).read())
+        self.assertIn("captured", self.log())
 
     def test_sed_in_place_captures_baseline(self):
         target = self.seed("app.go", "old\n")
@@ -318,14 +325,14 @@ class ShellCaptureEndToEndTest(unittest.TestCase):
             f.write("v")
         self.run_bash(f"sed -i 's/a/b/' {os.path.join(outside, 'x.txt')}")
         self.assertFalse(os.path.exists(self.session_file))
-        self.assertIn("skip-no-root", open(self.logfile).read())
+        self.assertIn("skip-no-root", self.log())
 
     def test_binary_target_is_not_captured(self):
         p = os.path.join(self.root, "img.bin")
         with open(p, "wb") as f:
             f.write(bytes([0x89, 0xFF, 0xFE, 0x00]))
         self.run_bash("cp img.bin copy.bin")
-        self.assertIn("skip-binary", open(self.logfile).read())
+        self.assertIn("skip-binary", self.log())
         files = self.session()["files"] if os.path.exists(self.session_file) else {}
         self.assertNotIn(p, files)
 
@@ -336,7 +343,7 @@ class ShellCaptureEndToEndTest(unittest.TestCase):
             f.write("v1")
         self.run_bash("sed -i 's/v1/v2/' app.go")
         self.assertEqual("v0", self.session()["files"][target]["originalContent"])
-        self.assertIn("skip-already-pending", open(self.logfile).read())
+        self.assertIn("skip-already-pending", self.log())
 
     def test_edit_payload_still_captures_unchanged(self):
         """Control: the file_path leg is untouched by the Bash dispatch."""
