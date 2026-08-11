@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 import json
 import os
+import re
 import time
 import hashlib
 import random
@@ -215,28 +216,344 @@ def log_event(event: str, detail: str = "") -> None:
         pass  # logging must never break the fail-open hook
 
 
-def main() -> None:
-    try:
-        hook_input = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
-        sys.exit(0)
+# ---------------------------------------------------------------------------
+# Shell-write capture (the `Bash` tool).
+#
+# A Bash payload carries `tool_input.command` — a shell string — and no
+# `file_path`, so files rewritten by `sed -i`, a heredoc, or a python one-liner
+# used to be captured by nothing at all. See
+# docs/superpowers/specs/2026-08-11-bash-writes-capture-design.md.
+#
+# Three properties this code must never lose:
+#   * PURE STRING PARSING. No subprocess, no glob expansion, no `git`
+#     invocation. This runs synchronously before every shell command Claude
+#     runs; it may not add measurable latency and may not have side effects.
+#   * BOUNDED. Scanned text and emitted candidates are both capped, so a
+#     pathological heredoc cannot stall a write.
+#   * FAIL OPEN. Any exception degrades to "no capture" (the caller logs and
+#     exits 0), never to a broken edit.
+#
+# Over-capture is deliberate and safe: a wrongly harvested path either matches
+# its own baseline (hidden immediately, pruned by the extension's no-op sweep)
+# or does not exist (pruned as an absent new file). Under-capture is the bug.
+# ---------------------------------------------------------------------------
 
-    tool_input = hook_input.get("tool_input") or {}
-    file_path = tool_input.get("file_path", "")
-    if not file_path:
-        sys.exit(0)
+MAX_COMMAND_CHARS = 64 * 1024   # cap the scanned command text
+MAX_CANDIDATES    = 25          # cap the paths one command may produce
+MAX_CANDIDATE_LEN = 400
 
-    cwd = hook_input.get("cwd", os.getcwd())
-    session_id = hook_input.get("session_id")
-    captured_at = datetime.now(timezone.utc).isoformat()
+# Redirection into a real filename: `> f`, `>> f`, `2> f`, `&> f`. The (?!&)
+# lookahead rejects fd duplication (`2>&1`, `>&2`), which creates no file.
+_REDIRECT_RE = re.compile(
+    r"""(?:^|[\s;&|(])\d*>{1,2}\s*(?!&)"""
+    r"""((?:'[^']*'|"[^"]*"|[^\s;&|<>()'"])+)"""
+)
 
+# In-language writes: `open(p, 'w')` / `'a'` / `'w+'` / `'wb'`, plus the
+# pathlib/file-object write calls that usually accompany them.
+_OPEN_WRITE_RE = re.compile(r"""open\s*\([^()]*?,\s*(['"])[^'"]*[wa+][^'"]*\1""")
+_WRITE_CALL_RE = re.compile(r"\.write(?:_text|_bytes|lines)?\s*\(")
+
+# Tools whose non-flag arguments are write targets whenever they are invoked.
+_ALWAYS_WRITE_TOOLS = frozenset({
+    "tee", "cp", "mv", "install", "patch", "dd", "truncate", "touch",
+    "black", "rustfmt", "sponge",
+})
+
+# Tools that only write when one of these flags is present.
+_FLAG_WRITE_TOOLS = {
+    "sed":          (re.compile(r"^--in-place"), re.compile(r"^-[a-zA-Z]*i")),
+    "perl":         (re.compile(r"^-[a-zA-Z]*i"),),
+    "gofmt":        (re.compile(r"^-w$"),),
+    "goimports":    (re.compile(r"^-w$"),),
+    "prettier":     (re.compile(r"^--write$"), re.compile(r"^-w$")),
+    "clang-format": (re.compile(r"^-i$"),),
+}
+
+# Prefixes that stand in front of the real command: wrappers and the shell
+# keywords that open a compound statement (`for f in *.go; do gofmt -w $f; done`).
+_WRAPPERS = frozenset({
+    "sudo", "env", "nohup", "time", "command", "exec", "xargs",
+    "do", "then", "else", "elif", "if", "while", "until", "!", "{",
+})
+
+_SEP_CHARS   = ";\n&|"
+_REDIR_CHARS = "<>"
+_BAD_CHARS   = frozenset("$`*?!<>|;\"'()[]{}\n\t\\")
+_EXT_RE      = re.compile(r"\.[A-Za-z][A-Za-z0-9_+-]{0,9}$")
+# `s/old/new/g`, `y|a|b|` — a sed script, not a path.
+_SED_EXPR_RE = re.compile(r"^[0-9,]*[sy]([^\w\s])")
+
+
+def _lex(text: str) -> list:
+    """Quote-aware shell-ish lexer. Returns [(kind, value)] with kind in
+    {"word", "sep", "redir"}. Quotes are stripped and their contents joined onto
+    the surrounding word, so `p='a/b.go'` lexes as one word `p=a/b.go`."""
+    tokens: list = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in " \t\r":
+            i += 1
+            continue
+        if c in _SEP_CHARS:
+            while i < n and text[i] in _SEP_CHARS:
+                i += 1
+            tokens.append(("sep", ""))
+            continue
+        if c in _REDIR_CHARS:
+            while i < n and text[i] in _REDIR_CHARS:
+                i += 1
+            tokens.append(("redir", ""))
+            continue
+        buf: list = []
+        while i < n:
+            c = text[i]
+            if c in " \t\r" or c in _SEP_CHARS or c in _REDIR_CHARS:
+                break
+            if c in "'\"":
+                j = text.find(c, i + 1)
+                if j == -1:  # unbalanced quote: take the rest and stop
+                    buf.append(text[i + 1:])
+                    i = n
+                    break
+                buf.append(text[i + 1:j])
+                i = j + 1
+                continue
+            buf.append(c)
+            i += 1
+        tokens.append(("word", "".join(buf)))
+    return tokens
+
+
+def _segments(tokens: list) -> list:
+    """Split lexed tokens into command segments. The word following a
+    redirection operator is dropped — `patch < fix.diff` reads that file, and
+    `> out` targets are harvested separately by _REDIRECT_RE."""
+    segs: list = []
+    cur: list = []
+    skip_next = False
+    for kind, value in tokens:
+        if kind == "sep":
+            if cur:
+                segs.append(cur)
+            cur, skip_next = [], False
+        elif kind == "redir":
+            skip_next = True
+        else:
+            if skip_next:
+                skip_next = False
+                continue
+            cur.append(value)
+    if cur:
+        segs.append(cur)
+    return segs
+
+
+def _normalize_token(tok: str) -> str:
+    """`p=a/b.go` → `a/b.go`, `of=out.img` → `out.img`, `--out=x.go` → `x.go`."""
+    if "=" in tok:
+        tok = tok.rsplit("=", 1)[1]
+    return tok
+
+
+def _is_device(tok: str) -> bool:
+    return tok.startswith(("/dev/", "/proc/", "/sys/"))
+
+
+def _plausible(tok: str) -> bool:
+    """Could this token name a file we may safely baseline?"""
+    if not tok or len(tok) > MAX_CANDIDATE_LEN:
+        return False
+    if tok in (".", "..", "-"):
+        return False
+    if tok.startswith("-") or tok.startswith("~"):
+        return False
+    if any(c in _BAD_CHARS for c in tok):
+        return False
+    if tok.endswith("/") or tok.endswith(os.sep):  # a directory, not a file
+        return False
+    if "://" in tok or "..." in tok:               # URL / go-package wildcard
+        return False
+    if _is_device(tok):
+        return False
+    if tok.isdigit():
+        return False
+    m = _SED_EXPR_RE.match(tok)
+    if m and tok.count(m.group(1)) >= 2:
+        return False
+    return True
+
+
+def _path_shaped(tok: str) -> bool:
+    """A bare literal only counts as a path if it has a separator or extension."""
+    return "/" in tok or bool(_EXT_RE.search(tok))
+
+
+def _strip_quotes(tok: str) -> str:
+    return tok.replace("'", "").replace('"', "")
+
+
+# Two independent passes rather than one alternation, so a literal nested inside
+# another quoting layer is still seen: in
+#   python3 -c "open('pkg/gen.go','w').write(s)"
+# the double-quote pass yields the whole one-liner (discarded — it has parens),
+# while the single-quote pass yields `pkg/gen.go`.
+_SQ_LITERAL_RE = re.compile(r"'([^']*)'")
+_DQ_LITERAL_RE = re.compile(r'"([^"]*)"')
+
+
+def _quoted_literals(text: str) -> list:
+    out: list = []
+    for pattern in (_SQ_LITERAL_RE, _DQ_LITERAL_RE):
+        for m in pattern.finditer(text):
+            out.append(m.group(1))
+    return out
+
+
+def _git_targets(args: list):
+    """Return write targets for a `git` invocation, or None if it doesn't write."""
+    idx = 0
+    while idx < len(args) and args[idx].startswith("-"):
+        idx += 2 if args[idx] in ("-C", "-c") else 1
+    if idx >= len(args):
+        return None
+    sub, rest = args[idx], args[idx + 1:]
+    if sub == "apply":
+        return [a for a in rest if not a.startswith("-")]
+    if sub in ("checkout", "restore"):
+        if "--" in rest:
+            after = rest[rest.index("--") + 1:]
+            return [a for a in after if not a.startswith("-")]
+        # `git checkout .` / a branch name names no file — Tier 3, out of scope.
+        return [a for a in rest if not a.startswith("-") and _path_shaped(a)]
+    if sub == "stash":
+        return [] if rest and rest[0] in ("pop", "apply") else None
+    if sub == "reset":
+        if "--hard" not in rest:
+            return None
+        return [a for a in rest if not a.startswith("-") and _path_shaped(a)]
+    return None
+
+
+def _tool_targets(words: list):
+    """Return the write targets of one command segment, or None if the segment
+    is not a known file-writing command. An empty list means "writes, but names
+    no file" (e.g. `git stash pop`) — Tier 1 true, Tier 2 empty."""
+    while words:
+        head = words[0]
+        if head in _WRAPPERS:
+            words = words[1:]
+            continue
+        name, _, _ = head.partition("=")
+        if "=" in head and not head.startswith("-") and name.isidentifier():
+            words = words[1:]  # leading VAR=value assignment
+            continue
+        break
+    if not words:
+        return None
+
+    name = os.path.basename(words[0])
+    args = words[1:]
+
+    if name == "git":
+        return _git_targets(args)
+    if name == "ruff":
+        if args and args[0] == "format":
+            return [a for a in args[1:] if not a.startswith("-")]
+        return None
+    if name in _ALWAYS_WRITE_TOOLS:
+        return [a for a in args if not a.startswith("-")]
+    patterns = _FLAG_WRITE_TOOLS.get(name)
+    if patterns is not None:
+        for a in args:
+            if a.startswith("-") and any(p.match(a) for p in patterns):
+                return [x for x in args if not x.startswith("-")]
+    return None
+
+
+def _scan_command(command: str):
+    """Return (may_write, candidates). Pure; never raises for ordinary input."""
+    if not command or not isinstance(command, str):
+        return False, []
+    text = command[:MAX_COMMAND_CHARS]
+
+    may_write = False
+    ordered: list = []
+    seen: set = set()
+
+    def add(tok: str, require_shape: bool) -> None:
+        tok = _normalize_token(tok)
+        if not _plausible(tok):
+            return
+        if require_shape and not _path_shaped(tok):
+            return
+        if tok in seen:
+            return
+        seen.add(tok)
+        if len(ordered) < MAX_CANDIDATES:
+            ordered.append(tok)
+
+    # Tier 2a — explicit redirection targets (write targets by definition, so
+    # they need no path shape: `cat > f <<EOF` names `f`).
+    for m in _REDIRECT_RE.finditer(text):
+        target = _strip_quotes(m.group(1))
+        if target and not _is_device(target):
+            may_write = True
+            add(target, False)
+
+    # Tier 1/2b — known in-place writer tools and their arguments.
+    tokens = _lex(text)
+    for segment in _segments(tokens):
+        targets = _tool_targets(segment)
+        if targets is None:
+            continue
+        may_write = True
+        for t in targets:
+            add(t, False)
+
+    # Tier 1 — in-language writes (python heredocs and -c one-liners).
+    if _OPEN_WRITE_RE.search(text) or _WRITE_CALL_RE.search(text):
+        may_write = True
+
+    # Tier 2c — every path-shaped literal in the command. This is what catches
+    # the reported failure, where the path is bound to a variable first:
+    #   p='manager/biz/monitor_filter.go'   ← harvested here
+    #   open(p,'w').write(s)                ← fires Tier 1
+    if may_write:
+        for kind, value in tokens:
+            if kind == "word":
+                add(value, True)
+        for literal in _quoted_literals(text):
+            add(literal, True)
+
+    return may_write, ordered
+
+
+def command_may_write(command: str) -> bool:
+    """Tier 1 — could this command plausibly write a file? Answering False here
+    keeps the hook's filesystem work (and hook.log) off every `ls`/`go build`."""
+    return _scan_command(command)[0]
+
+
+def paths_from_command(command: str) -> list:
+    """Tier 2 — candidate write targets, deduplicated, in discovery order.
+    Gated on Tier 1: a command that cannot write yields no candidates at all,
+    so `cat file.go` and `grep -r foo .` extract nothing."""
+    may_write, candidates = _scan_command(command)
+    return candidates if may_write else []
+
+
+def capture_file(file_path: str, cwd: str, session_id, captured_at: str) -> None:
+    """Run one target through the capture pipeline. Returns (never exits) on
+    every skip, so a Bash command with several candidates keeps going."""
     if not os.path.isabs(file_path):
         file_path = os.path.normpath(os.path.join(cwd, file_path))
 
     workspace_root = workspace_root_for_file(file_path, cwd)
     if workspace_root is None:
         log_event("skip-no-root", file_path)
-        sys.exit(0)
+        return
     # A nested git worktree owns its own session deterministically, regardless of
     # which windows are open (fail-open: falls back to workspace_root on any error).
     worktree_root = worktree_root_for_file(file_path, workspace_root)
@@ -254,11 +571,12 @@ def main() -> None:
             # would let a reject delete the user's real file. Skip capture (a
             # non-zero exit could also block the edit).
             log_event("skip-binary", file_path)
-            sys.exit(0)
+            return
         except OSError:
-            # Exists but unreadable (permissions, etc). Same reasoning as above.
+            # Exists but unreadable (permissions, etc) — or a directory, which a
+            # liberal shell-path candidate can be. Same reasoning as above.
             log_event("skip-unreadable", file_path)
-            sys.exit(0)
+            return
     else:
         original_content = None  # genuinely new — Claude is creating it
 
@@ -288,9 +606,44 @@ def main() -> None:
         release_lock(fd, lock_path)
 
 
+def main() -> None:
+    try:
+        hook_input = json.load(sys.stdin)
+    except (json.JSONDecodeError, ValueError):
+        sys.exit(0)
+
+    tool_input = hook_input.get("tool_input") or {}
+    cwd = hook_input.get("cwd", os.getcwd())
+    session_id = hook_input.get("session_id")
+    captured_at = datetime.now(timezone.utc).isoformat()
+
+    # Write/Edit/MultiEdit: one named target, the original flow.
+    file_path = tool_input.get("file_path", "")
+    if isinstance(file_path, str) and file_path:
+        capture_file(file_path, cwd, session_id, captured_at)
+        return
+
+    # Bash: no file_path, a shell string instead. Extract candidate targets and
+    # run each through the SAME pipeline. Fail open at every step.
+    command = tool_input.get("command", "")
+    if not isinstance(command, str) or not command:
+        sys.exit(0)
+    try:
+        candidates = paths_from_command(command)
+    except Exception:
+        log_event("error")
+        sys.exit(0)
+    for candidate in candidates:
+        try:
+            capture_file(candidate, cwd, session_id, captured_at)
+        except Exception:
+            # One bad candidate must not cost us the rest of the command.
+            log_event("error")
+
+
 if __name__ == "__main__":
     # Fail open, always. The hook runs synchronously before every Claude
-    # Write/Edit/MultiEdit; an uncaught exception here would print a traceback to
+    # Write/Edit/MultiEdit/Bash; an uncaught exception here would print a traceback to
     # the user on every edit (and a non-zero exit could block the write). Any
     # unexpected error — an unwritable ~/.claudegate, a full disk, a malformed
     # workspace-roots.json that parses but isn't a list — must degrade to "no
