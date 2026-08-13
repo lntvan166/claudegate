@@ -122,7 +122,9 @@ Per-workspace session file at `~/.claudegate/sessions/<md5(workspacePath)>.json`
 ```
 
 **Hook behavior:**
-- A `Bash` payload carries `command` instead of `file_path`. The hook first asks whether the command can plausibly write at all (redirection, `sed -i`, `tee`, `cp`/`mv`, `patch`, `git apply|checkout --|restore`, in-place formatters, …) and exits immediately if not — no filesystem work, no log spam for `ls` or `go build`. Otherwise it harvests candidate target paths from the command and runs **each one through the same pipeline** as a `file_path`. Harvesting is deliberately liberal: a wrongly harvested path becomes a transient no-op entry that the existing settle-window pruning removes, whereas a missed one is an uncaptured edit.
+- A `Bash` payload carries `command` instead of `file_path`. The hook first asks whether the command can plausibly write at all (redirection, `sed -i`, `tee`, `cp`/`mv`, `patch`, `git apply|checkout --|restore`, in-place formatters, …) and exits immediately if not — no filesystem work, no log spam for `ls` or `go build`. Otherwise it harvests candidate target paths from the command and runs **each one through the same pipeline** as a `file_path`. Harvesting leans liberal — a missed path is an uncaptured edit — but **not unboundedly so**, because a bogus capture is not free: it costs a session-file write, a full reload (multi-MB on a busy workspace), a reconcile, the prune, and a second write + reload. Two guards keep the false-positive rate down, both of which apply *only* to speculative candidates and never to an explicit redirection or in-place-tool target (`cat > Makefile` still captures `Makefile`):
+  - **Speculative candidates must plausibly name a file** (`_names_a_file`): an extension on the basename, or an existing file on disk. This is what stops a Go module path (`bitbucket.org/hasaki-tech/tms-protobuf`) becoming a pending entry. `paths_from_command(command, cwd)` takes the tool call's `cwd` for the existence probe; without it, extensionless speculative candidates are dropped rather than resolved against the *process* cwd, which is not the session's directory.
+  - **`git` arguments must be pathspecs, not treeish** (`_pathspec_shaped`): with no explicit `--`, `git checkout origin/main` / `git reset --hard origin/sandbox` name refs. Everything after a `--` is still taken verbatim as a path.
 - `file_path` may be relative to `cwd`. The hook resolves it to an absolute path before storing.
 - If the file is **already pending**, the hook leaves it untouched (preserves the frozen baseline).
 - Otherwise (no entry yet, or — for legacy/pre-migration sessions — a non-pending entry) the hook creates a fresh pending entry with the current on-disk `originalContent`. The hook only ever writes `files`; the extension owns `accepted`/`rejected`, and accept/reject remove the entry from `files`, so on a current-model session a re-edit simply finds no entry and creates a new pending one.
@@ -277,3 +279,60 @@ cause historically: worktree sessions, see v1.10.1 / v1.12.0 / v1.12.1).
 - **Shell writes captured by extraction, not by watching**: a `Bash` payload is parsed for write intent and target paths rather than resolved by observing the filesystem, so the baseline is still snapshotted *before* the write and stays attributable to the session. Commands that write without naming a file (`make generate`, `prettier --write src/`) are out of scope by design.
 - **Only pending files get a badge**: Accepted and rejected files are undecorated in the file explorer to avoid clashing with git's own `A`/`R` status indicators.
 - **Python for the hook**: Python 3 is pre-installed on macOS/Linux and handles JSON and file I/O without extra dependencies.
+- **Nothing expensive runs synchronously on a coarse trigger** — see the section below.
+
+---
+
+## Extension-Host Responsiveness
+
+Every trigger this extension listens to fires far more often than the work behind
+it is worth doing. Two of them are load-bearing, and both are rate-limited. Treat
+this as a standing constraint, not an optimization: the extension host is a single
+thread shared with every other extension, and a synchronous stall there freezes
+the editor's UI.
+
+**Window focus** fires on every alt-tab. The sweep behind it (worktree rescan,
+reconcile of every attached session, hook health check) is real filesystem work.
+
+- `createThrottle(FOCUS_SWEEP_MIN_INTERVAL_MS)` in `src/extension.ts` drops
+  sub-interval focus events outright.
+- `WorktreeSessionRegistry.refresh()` applies its own, longer
+  `RESCAN_MIN_INTERVAL_MS` on top, coalesces concurrent callers onto one in-flight
+  walk, and takes `{ force: true }` for activation and user-driven refreshes so
+  nothing a user explicitly asks for is ever delayed.
+- `nestedWorktreesUnder()` is **async and must stay async**. It is the single most
+  expensive routine here — measured at ~2,500 `readdir` + ~2,700 `lstat` on a real
+  `go.work` monorepo. Synchronously that blocked the host for ~42 ms warm (far
+  worse with a cold page cache); the bounded-concurrency BFS keeps the worst
+  event-loop stall at ~2 ms for the same tree. `worktrees.test.ts` asserts the loop
+  keeps turning during a scan.
+
+**Session change** fires at least twice per user decision: once from `persist()`
+and once from the `fs.watch` reload that write triggers. Both consumers coalesce
+via `createCoalescer` (`src/scheduling.ts`):
+
+- `FilteredTreeProvider` collapses the burst into one `onDidChangeTreeData` fire.
+  Firing each change separately raced inside VS Code's async tree and threw
+  `TreeError [claudegate.acceptedPanel] Data tree node not found` /
+  `Tree element not found` during multi-file accepts. `setViewMode()` deliberately
+  fires directly — a button press must repaint at once and cannot storm.
+- The badge/context fan-out and the "Review All Pending" multi-diff rebuild in
+  `extension.ts` likewise. The multi-diff one matters most: `pendingReviewPaths()`
+  reads **every** pending file off disk to test it for a real change.
+
+Note the coalescer is not a debounce — it does not extend its deadline on each
+call, so a continuous stream still runs at a steady cadence instead of starving.
+
+**Logging must never throw.** VS Code closes the host's IPC channel *before*
+running `dispose()` on subscriptions, so `appendLine` from a teardown path raises
+`Error: Channel has been closed`. That escaped `WorktreeSessionRegistry.detach()`
+and aborted `dispose()` mid-loop, leaking an `fs.watch` handle and a reconcile
+timer per un-detached worktree on every window reload. `activate()` wraps the
+channel in `failSoftLog()` (`src/safeLog.ts`) and passes only the wrapper
+downstream; `dispose()` additionally guards each detach.
+
+When diagnosing "the editor feels slow with ClaudeGate installed", check in this
+order: the Claude Gate output channel for a `Session file is large` warning (a
+multi-MB session re-parses on every watch event), then `~/.claudegate/hook.log`
+for bogus captures driving that churn, then whether a new synchronous filesystem
+walk has crept onto a focus or session-change path.

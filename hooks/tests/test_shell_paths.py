@@ -231,6 +231,101 @@ class PathExtractionTest(unittest.TestCase):
         self.assertFalse(hook.command_may_write(""))
 
 
+class SpeculativeHarvestTest(unittest.TestCase):
+    """Tier 2c must not turn every slash-bearing word into a capture.
+
+    Observed in a real session's hook.log, each of these produced a pending
+    entry for a file that does not exist and never would:
+
+        captured .../tms/origin/main
+        captured .../tms/origin/sandbox
+        captured .../tms/bitbucket.org/hasaki-tech/tms-protobuf
+
+    A bogus entry is not merely cosmetic. Each one costs a session-file write,
+    a full reload of that file (2 MB on the workspace where this was found), a
+    reconcile pass, the prune, and a second write + reload — four
+    parse/serialize cycles for a path that was a git refspec or a Go module
+    path all along.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def write(self, rel, body="x"):
+        full = os.path.join(self.tmp, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w") as fh:
+            fh.write(body)
+        return full
+
+    def test_git_refspecs_are_not_paths(self):
+        for cmd in [
+            "git checkout origin/main",
+            "git checkout origin/sandbox -b feature",
+            "git reset --hard origin/main",
+            "git restore origin/main",
+            "git checkout upstream/release-1.2",
+        ]:
+            with self.subTest(cmd=cmd):
+                got = hook.paths_from_command(cmd, self.tmp)
+                self.assertNotIn("origin/main", got, got)
+                self.assertNotIn("origin/sandbox", got, got)
+                self.assertNotIn("upstream/release-1.2", got, got)
+
+    def test_explicit_pathspec_after_dashdash_still_captured(self):
+        # `--` is git's own disambiguator: everything after it IS a path.
+        got = hook.paths_from_command(
+            "git checkout origin/main -- manager/biz/rule.go", self.tmp
+        )
+        self.assertIn("manager/biz/rule.go", got)
+        self.assertNotIn("origin/main", got)
+
+    def test_module_paths_are_not_speculative_targets(self):
+        cmd = (
+            "sed -i 's/a/b/' manager/biz/rule.go && "
+            "go mod edit -replace bitbucket.org/hasaki-tech/tms-protobuf=../tms-protobuf"
+        )
+        got = hook.paths_from_command(cmd, self.tmp)
+        self.assertIn("manager/biz/rule.go", got, "the real sed target survives")
+        self.assertNotIn("bitbucket.org/hasaki-tech/tms-protobuf", got, got)
+
+    def test_extensionless_word_that_exists_on_disk_is_kept(self):
+        # Existence is the escape hatch: a real extensionless file mentioned in a
+        # writing command is still a legitimate baseline.
+        self.write("scripts/build")
+        cmd = "sed -i 's/a/b/' scripts/build"
+        self.assertIn("scripts/build", hook.paths_from_command(cmd, self.tmp))
+
+    def test_speculative_extensionless_word_that_exists_is_kept(self):
+        # Same file, but reached through Tier 2c (bound to a variable) rather
+        # than named as the tool's argument.
+        self.write("scripts/build")
+        cmd = "p=scripts/build\nopen(p,'w').write(s)"
+        self.assertIn("scripts/build", hook.paths_from_command(cmd, self.tmp))
+
+    def test_new_file_with_an_extension_is_still_captured(self):
+        # The common create case: the file does NOT exist yet, and must still be
+        # captured (originalContent stays null so a reject deletes it).
+        cmd = "python3 - <<'PY'\np='pkg/generated_client.go'\nopen(p,'w').write(s)\nPY"
+        self.assertIn("pkg/generated_client.go", hook.paths_from_command(cmd, self.tmp))
+
+    def test_explicit_targets_never_need_an_extension(self):
+        # Tier 2a/2b are explicit, not speculative: a redirection or in-place
+        # tool target is a write target by definition, extension or not.
+        self.assertIn("Makefile", hook.paths_from_command("cat > Makefile <<EOF\nx\nEOF", self.tmp))
+        self.assertIn("build/Dockerfile", hook.paths_from_command("cp a/Dockerfile build/Dockerfile", self.tmp))
+        self.assertIn("conf/nginx", hook.paths_from_command("sed -i 's/a/b/' conf/nginx", self.tmp))
+
+    def test_cwd_is_optional_and_defaults_to_no_existence_check(self):
+        # Called without a cwd (the older signature), extensionless speculative
+        # candidates are simply dropped rather than resolved against the process
+        # cwd, which is not the session's directory.
+        got = hook.paths_from_command("sed -i 's/a/b/' manager/biz/rule.go && echo origin/main")
+        self.assertIn("manager/biz/rule.go", got)
+        self.assertNotIn("origin/main", got)
+
+
 class ShellCaptureEndToEndTest(unittest.TestCase):
     """A real `Bash` payload on stdin, isolated HOME, registered workspace."""
 

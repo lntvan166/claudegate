@@ -28,6 +28,21 @@ import { isInWorkspace, isExcluded, isProtected, setExcludeMatcher, setProtected
 import { ExcludeMatcher, DEFAULT_EXCLUDES } from "./excludeMatcher";
 import { saveDirtyPending } from "./saveEdits";
 import { orderedPendingPaths } from "./pendingPaths";
+import { failSoftLog } from "./safeLog";
+import { createThrottle, createCoalescer } from "./scheduling";
+
+// Minimum gap between window-focus sweeps. Focus fires on every alt-tab back
+// into the window, and the sweep behind it (worktree rescan + reconcile of every
+// attached session + hook health check) is real filesystem work. Sub-interval
+// focus events are dropped entirely.
+const FOCUS_SWEEP_MIN_INTERVAL_MS = 15_000;
+
+// How long the badge/context/multi-diff fan-out waits before running once. Same
+// burst problem as the tree panels: persist() fires a session change and the
+// fs.watch reload fires a second one. This side is costlier than a repaint —
+// pendingReviewPaths() reads every pending file off disk to test it for a real
+// change — so it is worth collapsing.
+const SESSION_FANOUT_COALESCE_MS = 60;
 import { stepPending, resolveCurrent } from "./reviewNav";
 import { gcOrphanedSessions } from "./sessionGc";
 
@@ -88,8 +103,12 @@ function refreshActiveFilePendingContext(managerFor: (p?: string) => SessionMana
 
 export function activate(context: vscode.ExtensionContext): void {
   try {
-    const log = vscode.window.createOutputChannel("Claude Gate");
-    context.subscriptions.push(log);
+    const channel = vscode.window.createOutputChannel("Claude Gate");
+    context.subscriptions.push(channel);
+    // Everything downstream logs through the fail-soft wrapper: the raw channel
+    // throws "Channel has been closed" once the host starts tearing down, and a
+    // log line must never be able to abort a dispose path (see safeLog.ts).
+    const log = failSoftLog(channel);
     log.appendLine("[INFO] Claude Gate activating…");
 
     vscode.commands.executeCommand(
@@ -285,6 +304,9 @@ export function activate(context: vscode.ExtensionContext): void {
     const pendingProvider  = new FilteredTreeProvider(sessionManager, "pending",  "tree", worktreeRegistry);
     const acceptedProvider = new FilteredTreeProvider(sessionManager, "accepted", "tree", worktreeRegistry);
     const rejectedProvider = new FilteredTreeProvider(sessionManager, "rejected", "tree", worktreeRegistry);
+    // Each holds a coalescing timer; without this a reload leaves three pending
+    // timers pointing at a disposed emitter.
+    context.subscriptions.push(pendingProvider, acceptedProvider, rejectedProvider);
 
     context.subscriptions.push(
       vscode.workspace.registerTextDocumentContentProvider(
@@ -909,20 +931,32 @@ export function activate(context: vscode.ExtensionContext): void {
     // notifyChanged), rebuild it with the current pending set, or close it once
     // everything is reviewed. The multi-diff's resource list is static, so it
     // must be reopened to reflect changes.
+    //
+    // Coalesced: pendingReviewPaths() reads EVERY pending file off disk to test
+    // it for a real change, and a single accept fires two session changes (the
+    // persist plus the fs.watch reload it causes). Rebuilding the multi-diff on
+    // each one meant reading a hundred-plus files twice per decision.
     let multiDiffRefreshing = false;
-    sessionManager.onSessionChange(async () => {
-      if (multiDiffRefreshing || !isPendingMultiDiffOpen()) return;
-      multiDiffRefreshing = true;
-      try {
-        const paths = pendingReviewPaths();
-        await closePendingMultiDiff();
-        if (paths.length > 0) await openPendingMultiDiff(paths);
-      } finally {
-        multiDiffRefreshing = false;
-      }
+    const refreshMultiDiff = createCoalescer(SESSION_FANOUT_COALESCE_MS, () => {
+      void (async () => {
+        if (multiDiffRefreshing || !isPendingMultiDiffOpen()) return;
+        multiDiffRefreshing = true;
+        try {
+          const paths = pendingReviewPaths();
+          await closePendingMultiDiff();
+          if (paths.length > 0) await openPendingMultiDiff(paths);
+        } finally {
+          multiDiffRefreshing = false;
+        }
+      })();
     });
+    sessionManager.onSessionChange(() => refreshMultiDiff.schedule());
 
-    sessionManager.onSessionChange((session) => {
+    // Badge / view-gating counts, same burst, same treatment. Reads the session
+    // from the manager rather than the event payload because a coalesced run
+    // must reflect the LATEST state, not whichever event started the timer.
+    const refreshCounts = createCoalescer(SESSION_FANOUT_COALESCE_MS, () => {
+      const session = sessionManager.getSession();
       refreshActiveFilePendingContext(managerFor);
       let pending = 0;
       let accepted = 0;
@@ -955,6 +989,16 @@ export function activate(context: vscode.ExtensionContext): void {
         ? new vscode.ThemeColor("statusBarItem.warningBackground")
         : undefined;
     });
+    sessionManager.onSessionChange(() => refreshCounts.schedule());
+    context.subscriptions.push({
+      dispose: () => {
+        refreshMultiDiff.dispose();
+        refreshCounts.dispose();
+      },
+    });
+    // Paint the badge once at activation — the initial session load already fired
+    // before these listeners were attached.
+    refreshCounts.schedule();
 
     context.subscriptions.push(
       vscode.workspace.onDidChangeConfiguration((e) => {
@@ -975,10 +1019,22 @@ export function activate(context: vscode.ExtensionContext): void {
     // Subscribe BEFORE the first refresh so the initial attach's synchronous
     // onChange updates the badge counter (via notifyChanged) at cold start.
     context.subscriptions.push(worktreeRegistry.onChange(() => sessionManager.notifyChanged()));
-    worktreeRegistry.refresh();    context.subscriptions.push(
+    // Forced at activation: the throttle must never delay the first scan.
+    void worktreeRegistry.refresh({ force: true });
+
+    // Focus fires on every alt-tab back into the window. The sweep below is real
+    // filesystem work — a worktree rescan, a reconcile of every attached session
+    // (each re-reads its pending files from disk), and a hook health check — so
+    // it is rate-limited rather than run on each event.
+    const allowFocusSweep = createThrottle(FOCUS_SWEEP_MIN_INTERVAL_MS);
+    context.subscriptions.push(
       vscode.window.onDidChangeWindowState((e) => {
         if (!e.focused) return;
-        worktreeRegistry.refresh();
+        if (!allowFocusSweep()) return;
+        // Unforced: the registry applies its own, longer interval. The scan is
+        // async so it never blocks the extension host (measured at ~2,500 readdir
+        // + ~2,700 lstat on a real go.work monorepo).
+        void worktreeRegistry.refresh();
         // A file reverted to baseline while the window was unfocused (git reset,
         // editor undo) leaves a settled no-op "phantom" row: the panel does not
         // disk-gate rows, and no session-file write occurred to trigger the usual

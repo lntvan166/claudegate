@@ -15,6 +15,15 @@ import { nestedWorktreesUnder, worktreeRootForPath } from "./worktrees";
 // sliced in alphabetical order it silently hid every worktree late in the alphabet.
 const DEFAULT_MAX_ATTACHED_WORKTREES = 256;
 
+// Floor on the gap between two filesystem scans. The scan itself is the single
+// most expensive thing this extension does on a coarse trigger — a real go.work
+// monorepo costs ~2,500 `readdir` + ~2,700 `lstat` per pass — and it ran on EVERY
+// window focus, alt-tab included, to recompute a set that changes maybe a few
+// times a day. Throttling bounds that to one pass per interval; `force` bypasses
+// it for activation and for an explicit user-driven refresh, so nothing a user
+// deliberately asks for is ever delayed.
+const RESCAN_MIN_INTERVAL_MS = 30_000;
+
 /**
  * Order worktree roots for attachment: those that already have a session file on
  * disk (i.e. the hook has captured work there) first, alphabetical within each
@@ -50,20 +59,52 @@ export class WorktreeSessionRegistry {
   private readonly _onChange = new vscode.EventEmitter<void>();
   readonly onChange = this._onChange.event;
 
+  // A scan already in flight. Concurrent callers await it instead of starting a
+  // second walk of the same tree.
+  private scanning: Promise<void> | null = null;
+  private lastScanAt = Number.NEGATIVE_INFINITY;
+
   constructor(
     private readonly log: vscode.OutputChannel,
-    private readonly primaryRoot: string | undefined
+    private readonly primaryRoot: string | undefined,
+    // Injectable so the throttle can be exercised without real time passing.
+    private readonly now: () => number = Date.now
   ) {}
 
-  // Recompute the nested-worktree set and attach/detach managers to match.
-  // Cheap (filesystem enumeration only) — call at activation and on a coarse
-  // trigger (window focus / manual refresh), never in a hot loop.
-  refresh(): void {
+  /**
+   * Recompute the nested-worktree set and attach/detach managers to match.
+   *
+   * Filesystem enumeration only (no git subprocess), but on a large monorepo
+   * that is still thousands of syscalls, so it is both **asynchronous** (never
+   * blocks the extension host) and **throttled** (at most one pass per
+   * RESCAN_MIN_INTERVAL_MS). Pass `force` when the user's action implies the set
+   * may have just changed — activation, or an explicit refresh.
+   *
+   * Concurrent calls coalesce onto the in-flight scan, so a burst of triggers
+   * costs one walk.
+   */
+  // Deliberately NOT an `async` method: an async wrapper would hand every caller
+  // its own promise object, hiding the fact that they all ride the same walk.
+  // Returning `this.scanning` directly makes the coalescing observable.
+  refresh(opts: { force?: boolean } = {}): Promise<void> {
+    if (!this.primaryRoot) return Promise.resolve();
+    if (this.scanning) return this.scanning;
+    if (!opts.force && this.now() - this.lastScanAt < RESCAN_MIN_INTERVAL_MS) return Promise.resolve();
+    this.scanning = this.scanAndReconcile().finally(() => {
+      this.scanning = null;
+      // Stamped on completion, not on entry: the interval is a gap BETWEEN scans,
+      // so a slow walk can't immediately be followed by another.
+      this.lastScanAt = this.now();
+    });
+    return this.scanning;
+  }
+
+  private async scanAndReconcile(): Promise<void> {
     if (!this.primaryRoot) return;
     const max = this.maxAttached();
     // Worktrees with captured work first, so a cap hit can only ever drop idle ones.
     let roots = orderRootsForAttach(
-      nestedWorktreesUnder(this.primaryRoot),
+      await nestedWorktreesUnder(this.primaryRoot),
       (root) => {
         try { return fs.existsSync(sessionFilePathFor(root)); } catch { return false; }
       }
@@ -156,7 +197,14 @@ export class WorktreeSessionRegistry {
   }
 
   dispose(): void {
-    for (const root of [...this.managers.keys()]) this.detach(root);
+    // Per-root try/catch, because dispose() runs during extension-host teardown
+    // where anything touching the host — the OutputChannel most of all — can throw
+    // "Channel has been closed". A throw here used to abort the loop partway, so
+    // the remaining managers never got stopWatching() and leaked an fs.watch
+    // handle plus a reconcile timer on every window reload.
+    for (const root of [...this.managers.keys()]) {
+      try { this.detach(root); } catch { /* teardown is best-effort */ }
+    }
     this._onChange.dispose();
   }
 }

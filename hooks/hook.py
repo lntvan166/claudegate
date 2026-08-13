@@ -390,6 +390,41 @@ def _path_shaped(tok: str) -> bool:
     return "/" in tok or bool(_EXT_RE.search(tok))
 
 
+def _names_a_file(tok: str, cwd: str | None) -> bool:
+    """Does this SPECULATIVE candidate plausibly name a file?
+
+    Applied only to Tier 2c — the "every path-shaped word in a writing command"
+    pass — never to an explicit redirection or in-place-tool target, which is a
+    write target by definition.
+
+    Tier 2c is deliberately liberal, and the liberality is usually harmless: a
+    wrong guess becomes a no-op entry the settle-window reconcile prunes. But on
+    a large session it is not free. Each bogus entry costs a session-file write,
+    a full reload (2 MB on the workspace where this was diagnosed), a reconcile,
+    the prune, and a second write + reload. Real examples harvested from one
+    session, none of which is a file:
+
+        origin/main, origin/sandbox           ← git refspecs
+        bitbucket.org/hasaki-tech/tms-protobuf ← a Go module path
+
+    Every one shares a shape: slashes, but no extension on the final segment and
+    nothing on disk. So a speculative candidate is kept when EITHER
+      * its basename carries a file extension (`manager/biz/rule.go`) — this is
+        what keeps not-yet-created files capturable, which is the whole point of
+        recording `originalContent: null`; or
+      * it already exists on disk, which makes an extensionless real file
+        (`scripts/build`) a legitimate baseline.
+    """
+    if _EXT_RE.search(os.path.basename(tok)):
+        return True
+    if not cwd:
+        return False
+    try:
+        return os.path.isfile(os.path.join(cwd, tok))
+    except (OSError, ValueError):
+        return False
+
+
 def _strip_quotes(tok: str) -> str:
     return tok.replace("'", "").replace('"', "")
 
@@ -411,6 +446,25 @@ def _quoted_literals(text: str) -> list:
     return out
 
 
+def _pathspec_shaped(tok: str) -> bool:
+    """Is this git argument a pathspec rather than a treeish?
+
+    Without an explicit `--`, `git checkout <x>` / `git reset --hard <x>` is
+    ambiguous, and git itself resolves it by trying `<x>` as a ref first. The old
+    rule accepted anything with a slash, so every `git checkout origin/main` and
+    `git reset --hard origin/sandbox` harvested the REF as a file path — the two
+    most frequent bogus captures in a real session's hook.log.
+
+    A ref and a pathspec are cleanly separable in practice: a pathspec is either
+    explicitly rooted (`./x`, `../x`, `/x`) or names a file (extension on the
+    final segment). `origin/main` is neither. When the caller really does mean a
+    file, git wants the `--` anyway, and that branch is handled above.
+    """
+    if tok.startswith(("./", "../", "/")):
+        return True
+    return _path_shaped(tok) and bool(_EXT_RE.search(os.path.basename(tok)))
+
+
 def _git_targets(args: list):
     """Return write targets for a `git` invocation, or None if it doesn't write."""
     idx = 0
@@ -426,13 +480,13 @@ def _git_targets(args: list):
             after = rest[rest.index("--") + 1:]
             return [a for a in after if not a.startswith("-")]
         # `git checkout .` / a branch name names no file — Tier 3, out of scope.
-        return [a for a in rest if not a.startswith("-") and _path_shaped(a)]
+        return [a for a in rest if not a.startswith("-") and _pathspec_shaped(a)]
     if sub == "stash":
         return [] if rest and rest[0] in ("pop", "apply") else None
     if sub == "reset":
         if "--hard" not in rest:
             return None
-        return [a for a in rest if not a.startswith("-") and _path_shaped(a)]
+        return [a for a in rest if not a.startswith("-") and _pathspec_shaped(a)]
     return None
 
 
@@ -472,8 +526,13 @@ def _tool_targets(words: list):
     return None
 
 
-def _scan_command(command: str):
-    """Return (may_write, candidates). Pure; never raises for ordinary input."""
+def _scan_command(command: str, cwd: str | None = None):
+    """Return (may_write, candidates). Never raises for ordinary input.
+
+    `cwd` is only consulted to test whether a *speculative* (Tier 2c) candidate
+    already exists on disk; every other decision is a pure function of the
+    command text.
+    """
     if not command or not isinstance(command, str):
         return False, []
     text = command[:MAX_COMMAND_CHARS]
@@ -486,7 +545,10 @@ def _scan_command(command: str):
         tok = _normalize_token(tok)
         if not _plausible(tok):
             return
-        if require_shape and not _path_shaped(tok):
+        # require_shape marks the speculative pass. Explicit targets (redirection,
+        # in-place tool arguments) skip both checks — they are write targets by
+        # definition, extension or not (`cat > Makefile`).
+        if require_shape and not (_path_shaped(tok) and _names_a_file(tok, cwd)):
             return
         if tok in seen:
             return
@@ -536,11 +598,16 @@ def command_may_write(command: str) -> bool:
     return _scan_command(command)[0]
 
 
-def paths_from_command(command: str) -> list:
+def paths_from_command(command: str, cwd: str | None = None) -> list:
     """Tier 2 — candidate write targets, deduplicated, in discovery order.
     Gated on Tier 1: a command that cannot write yields no candidates at all,
-    so `cat file.go` and `grep -r foo .` extract nothing."""
-    may_write, candidates = _scan_command(command)
+    so `cat file.go` and `grep -r foo .` extract nothing.
+
+    Pass the tool call's `cwd` so an extensionless speculative candidate can be
+    confirmed against the filesystem. Without it such candidates are dropped —
+    the process cwd is not the session's directory, so resolving against it would
+    be worse than not checking at all."""
+    may_write, candidates = _scan_command(command, cwd)
     return candidates if may_write else []
 
 
@@ -629,7 +696,7 @@ def main() -> None:
     if not isinstance(command, str) or not command:
         sys.exit(0)
     try:
-        candidates = paths_from_command(command)
+        candidates = paths_from_command(command, cwd)
     except Exception:
         log_event("error")
         sys.exit(0)

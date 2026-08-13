@@ -7,6 +7,26 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.13.1] — 2026-08-13
+
+### Fixed
+
+- **The editor no longer stalls every time you switch back to the window.** Focusing the window triggered a filesystem scan for nested git worktrees, and that scan ran synchronously on the extension host — the single thread VS Code shares between every installed extension, so nothing else could run until it finished. On a real `go.work` monorepo the pass costs about 2,500 directory reads and 2,700 stat calls, measured at ~42 ms with a warm page cache and far worse with a cold one, which is why it was most painful on a machine already low on memory. The scan is now asynchronous and walks the tree in bounded batches: the same work now blocks the host for at most ~2 ms at a stretch instead of 42 ms in one block. Total scan time is unchanged — the point is that the editor stays responsive while it happens.
+- **That scan no longer repeats on every alt-tab.** Window focus fires whenever you come back to the editor, from anywhere, and each one re-derived a worktree set that changes maybe a few times a day. It is now rate-limited on two levels — the focus sweep as a whole, and the scan itself on a longer interval — while activation and any refresh you explicitly ask for still bypass both, so nothing you request is ever delayed. A burst of triggers now shares one walk rather than starting several.
+- **Accepting several files at once no longer raises `Data tree node not found` in the Accepted panel.** Every decision fired two session-change events — one from the write, one from the file-watch reload that write triggers — and each rebuilt all three sidebar trees. VS Code's tree resolves children asynchronously, so a refresh could still be reading rows that a later refresh had already thrown away, and it surfaced that as an error notification mid-review. Rapid changes are now collected and repainted once. Switching between list and tree view still repaints immediately, because a button press should never feel deferred.
+- **Reloading a window no longer leaks a file watcher and a timer for every attached worktree.** VS Code closes the extension host's message channel *before* running an extension's cleanup, so writing a routine log line during shutdown threw `Channel has been closed`. That escaped the middle of the loop that detaches worktree sessions, so every worktree after the first never got shut down — one orphaned watcher and one live timer each, accumulating with every reload, on top of the error notification it showed. Logging can no longer throw, and each detach is isolated so one failure cannot abort the rest.
+- **Git branch names and Go module paths are no longer captured as if they were files.** Shell-write capture harvests candidate paths out of a command, and its "anything containing a slash" rule was too loose: `git checkout origin/main` recorded `origin/main`, `git reset --hard origin/sandbox` recorded `origin/sandbox`, and a `go mod edit` recorded `bitbucket.org/…/tms-protobuf`. None of them exist, so each became a pending row that hung around until the settle window pruned it — and on a busy workspace that is not free, since every one costs a session write, a full re-read of a file that can run to megabytes, a reconcile, the prune, then a second write and re-read. Git arguments must now look like a pathspec rather than a branch (everything after an explicit `--` is still taken as written), and a speculatively-harvested path must either carry a file extension or already exist on disk. Explicitly named targets are untouched: `cat > Makefile` still captures `Makefile`.
+
+### Internal
+
+- Two small modules carry the rate limiting so it is testable and used consistently: `src/scheduling.ts` (a throttle for coarse triggers, and a collector that folds a burst of events into one run — deliberately not a debounce, so a continuous stream still runs at a steady cadence instead of being starved) and `src/safeLog.ts` (an output channel wrapper that cannot throw).
+- `CLAUDE.md` gains an **Extension-Host Responsiveness** section recording why the worktree scan must stay asynchronous, which triggers are rate-limited and why, and the order to check things in when the editor feels slow. The measured syscall and stall figures are written down so a future change can tell whether it made things worse.
+- Test coverage goes from 191 to 213 (156 unit assertions, 57 hook tests), including a check that the event loop keeps turning during a worktree scan and one that shutdown detaches every worktree even when logging is already dead.
+
+### Notes
+
+- **No need to re-run Setup Hook.** The hook script is synced automatically and running Claude sessions pick it up on their next tool call.
+
 ## [1.13.0] — 2026-08-11
 
 ### Added

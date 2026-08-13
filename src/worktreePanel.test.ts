@@ -66,6 +66,11 @@ function addWorktree(home: string, root: string, relPath: string, fileName: stri
   return wsFile;
 }
 
+// registry.refresh() is async (the worktree scan must not block the extension
+// host), so every case runs sequentially inside one IIFE — they share the
+// workspace-folders stub and must not interleave.
+void (async () => {
+
 // ── Case 1: PRIMARY session null (all edits in the worktree) — the Critical ──
 {
   setExcludeMatcher(new ExcludeMatcher());
@@ -81,7 +86,7 @@ function addWorktree(home: string, root: string, relPath: string, fileName: stri
   assert.equal(primary.getSession(), null, "precondition: primary session is null (no primary session file)");
 
   const registry = new WorktreeSessionRegistry(fakeLog, root);
-  registry.refresh();
+  await registry.refresh({ force: true });
   const provider = new FilteredTreeProvider(primary, "pending", "tree", registry);
 
   const roots = provider.getChildren();
@@ -134,7 +139,7 @@ function addWorktree(home: string, root: string, relPath: string, fileName: stri
   assert.ok(primary.getSession(), "precondition: primary session loaded");
 
   const registry = new WorktreeSessionRegistry(fakeLog, root);
-  registry.refresh();
+  await registry.refresh({ force: true });
   const provider = new FilteredTreeProvider(primary, "pending", "tree", registry);
 
   const roots = provider.getChildren();
@@ -169,7 +174,7 @@ function addWorktree(home: string, root: string, relPath: string, fileName: stri
   const primary = new SessionManager(fakeLog, root);
   primary.startWatching();
   const registry = new WorktreeSessionRegistry(fakeLog, root);
-  registry.refresh();
+  await registry.refresh({ force: true });
 
   // A worktree with pending files but NO decisions yet contributes a group to the
   // Pending panel only. (Record panels DO show worktree groups — but only for
@@ -215,7 +220,7 @@ function addWorktree(home: string, root: string, relPath: string, fileName: stri
   const primary = new SessionManager(fakeLog, root);
   primary.startWatching();
   const registry = new WorktreeSessionRegistry(fakeLog, root);
-  registry.refresh();
+  await registry.refresh({ force: true });
   const provider = new FilteredTreeProvider(primary, "pending", "tree", registry);
 
   const roots = provider.getChildren();
@@ -286,7 +291,7 @@ function addWorktree(home: string, root: string, relPath: string, fileName: stri
   const primary = new SessionManager(fakeLog, root);
   primary.startWatching();
   const registry = new WorktreeSessionRegistry(fakeLog, root);
-  registry.refresh();
+  await registry.refresh({ force: true });
 
   const groupOf = (provider: FilteredTreeProvider): WorktreeGroupItem => {
     // Navigate root → ws-alpha folder → its worktree group (tree mode).
@@ -367,7 +372,7 @@ function addWorktree(home: string, root: string, relPath: string, fileName: stri
   const primary = new SessionManager(fakeLog, root);
   primary.startWatching();
   const registry = new WorktreeSessionRegistry(fakeLog, root);
-  registry.refresh();
+  await registry.refresh({ force: true });
 
   // 1. The counts that drive view visibility must include worktree records.
   assert.equal(registry.totalAccepted(), 2, "registry aggregates accepted across worktrees");
@@ -405,7 +410,7 @@ function addWorktree(home: string, root: string, relPath: string, fileName: stri
   // 4. A worktree with no records contributes no group (no empty rows).
   {
     const empty = addWorktree(home, root, "ws-beta/service-api", "untouched.txt");
-    registry.refresh();
+    await registry.refresh({ force: true });
     const provider = new FilteredTreeProvider(primary, "accepted", "tree", registry);
     const roots = (provider.getChildren().filter((i) => i instanceof WorktreeGroupItem) as WorktreeGroupItem[])
       .map((g) => g.worktreeRoot);
@@ -419,5 +424,8 @@ function addWorktree(home: string, root: string, relPath: string, fileName: stri
   console.log("ok - worktree decision records surface in the Accepted/Rejected panels");
 }
 
-// Reset shared stub state so later test bundles start clean.
+// Reset shared stub state so later test bundles start clean. This MUST live
+// inside the IIFE: at top level it would run during the body's first `await`,
+// clearing workspaceFolders out from under every case still to come.
 stubWorkspace.workspaceFolders = undefined;
+})();

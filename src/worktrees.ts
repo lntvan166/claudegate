@@ -1,11 +1,11 @@
-import * as fs from "fs";
+import * as fsp from "fs/promises";
 import * as path from "path";
 import { pathIsUnder } from "./workspaceScope";
 
 // Read the `gitdir: <target>` line from a `.git` FILE, or null if it isn't one.
-function gitFileTarget(dotGitPath: string): string | null {
+async function gitFileTarget(dotGitPath: string): Promise<string | null> {
   try {
-    const raw = fs.readFileSync(dotGitPath, "utf-8").trim();
+    const raw = (await fsp.readFile(dotGitPath, "utf-8")).trim();
     const m = /^gitdir:\s*(.+)$/.exec(raw);
     return m ? m[1].trim() : null;
   } catch {
@@ -14,14 +14,14 @@ function gitFileTarget(dotGitPath: string): string | null {
 }
 
 /** True if `dir` is the working directory of a git worktree (not a submodule). */
-export function isWorktreeRoot(dir: string): boolean {
+export async function isWorktreeRoot(dir: string): Promise<boolean> {
   const dotGit = path.join(dir, ".git");
   try {
-    if (!fs.lstatSync(dotGit).isFile()) return false; // main repo has a `.git` DIR
+    if (!(await fsp.lstat(dotGit)).isFile()) return false; // main repo has a `.git` DIR
   } catch {
     return false;
   }
-  const target = gitFileTarget(dotGit);
+  const target = await gitFileTarget(dotGit);
   if (target === null) return false;
   // A worktree's gitdir is structurally `<main-repo>/.git/worktrees/<name>`. Check
   // the two segments above <name> are `worktrees` then `.git`, so a submodule
@@ -47,6 +47,11 @@ const WORKTREE_SCAN_SKIP = new Set([
 // crawl. Worktree working dirs in practice sit within a few levels of the root.
 const WORKTREE_SCAN_MAX_DEPTH = 6;
 
+// How many directories are probed concurrently. Keeps the walk fast without
+// opening thousands of file descriptors at once on a large monorepo, and gives
+// the event loop a turn between batches.
+const WORKTREE_SCAN_CONCURRENCY = 16;
+
 /**
  * Enumerate git worktree working directories nested under `root`, using only the
  * filesystem (no `git` binary).
@@ -61,33 +66,52 @@ const WORKTREE_SCAN_MAX_DEPTH = 6;
  * download-symmetric scan here is required or those pending changes surface in
  * no window at all. Descent is bounded and skips heavy dirs; symlinked
  * directories are not followed (cycle-safe).
+ *
+ * ASYNCHRONOUS BY DESIGN. A real go.work monorepo costs ~2,500 `readdir` plus
+ * ~2,700 `lstat` calls per scan; done synchronously that froze the extension
+ * host for tens of milliseconds warm and far longer with a cold page cache, on
+ * every single window focus. Walking level-by-level in bounded batches keeps the
+ * loop turning throughout. Callers must still avoid rescanning needlessly —
+ * see WorktreeSessionRegistry's throttle.
  */
-export function nestedWorktreesUnder(root: string): string[] {
+export async function nestedWorktreesUnder(root: string): Promise<string[]> {
   const found: string[] = [];
-  const walk = (dir: string, depth: number): void => {
-    if (depth > WORKTREE_SCAN_MAX_DEPTH) return;
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return; // unreadable dir — skip, never throw during a refresh
+  // Breadth-first: `frontier` holds the directories at the current depth, and
+  // each pass fills `next` with the ones to descend into.
+  let frontier: string[] = [path.resolve(root)];
+  for (let depth = 1; depth <= WORKTREE_SCAN_MAX_DEPTH && frontier.length > 0; depth++) {
+    const next: string[] = [];
+    for (let i = 0; i < frontier.length; i += WORKTREE_SCAN_CONCURRENCY) {
+      const batch = frontier.slice(i, i + WORKTREE_SCAN_CONCURRENCY);
+      await Promise.all(batch.map(async (dir) => {
+        let entries;
+        try {
+          entries = await fsp.readdir(dir, { withFileTypes: true });
+        } catch {
+          return; // unreadable dir — skip, never throw during a refresh
+        }
+        await Promise.all(entries.map(async (entry) => {
+          if (!entry.isDirectory()) return; // files AND symlinks skipped (cycle-safe)
+          if (WORKTREE_SCAN_SKIP.has(entry.name)) return;
+          const child = path.join(dir, entry.name);
+          if (await isWorktreeRoot(child)) {
+            // A worktree working dir. Record it and do NOT descend — its interior
+            // is that worktree's own concern, and an edit inside a
+            // nested-within-a-worktree worktree is routed to its own session by
+            // the same rule when it happens.
+            found.push(path.resolve(child));
+            return;
+          }
+          next.push(child);
+        }));
+      }));
     }
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue; // files AND symlinks skipped (cycle-safe)
-      if (WORKTREE_SCAN_SKIP.has(entry.name)) continue;
-      const child = path.join(dir, entry.name);
-      if (isWorktreeRoot(child)) {
-        // A worktree working dir. Record it and do NOT descend — its interior is
-        // that worktree's own concern, and an edit inside a nested-within-a-worktree
-        // worktree is routed to its own session by the same rule when it happens.
-        found.push(path.resolve(child));
-        continue;
-      }
-      walk(child, depth + 1);
-    }
-  };
-  walk(path.resolve(root), 1);
-  return found;
+    frontier = next;
+  }
+  // Concurrency makes completion order nondeterministic. Sort so the registry's
+  // attach cap slices the same tail every refresh instead of dropping a
+  // different worktree each time.
+  return found.sort();
 }
 
 /** The `roots` entry that contains `filePath` (longest match), or null. */

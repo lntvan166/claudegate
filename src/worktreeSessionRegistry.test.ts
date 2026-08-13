@@ -17,6 +17,10 @@ function sessionPathFor(home: string, ws: string): string {
   return path.join(home, ".claudegate", "sessions", `${hash}.json`);
 }
 
+// refresh() is async (the filesystem scan must not block the extension host), so
+// the blocks run sequentially inside one IIFE — they share process.env.HOME and
+// the workspace-folders stub and must not interleave.
+void (async () => {
 {
   setExcludeMatcher(new ExcludeMatcher()); // nothing excluded
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cg-home-"));
@@ -46,7 +50,7 @@ function sessionPathFor(home: string, ws: string): string {
   const reg = new WorktreeSessionRegistry(fakeLog, root);
   let changes = 0;
   reg.onChange(() => changes++);
-  reg.refresh();
+  await reg.refresh({ force: true });
 
   assert.deepEqual([...reg.getManagers().keys()], [path.resolve(ws)], "attached the nested worktree");
   assert.equal(reg.totalPending(), 1, "counts the worktree's pending file");
@@ -95,7 +99,7 @@ function sessionPathFor(home: string, ws: string): string {
   }));
 
   const reg = new WorktreeSessionRegistry(fakeLog, root);
-  reg.refresh();
+  await reg.refresh({ force: true });
 
   assert.equal(reg.getManagers().size, 18, "attaches every nested worktree, not just the first 10");
   assert.ok(reg.getManagers().has(path.resolve(lastRoot)), "the alphabetically-last worktree is attached");
@@ -131,3 +135,101 @@ function sessionPathFor(home: string, ws: string): string {
   );
   console.log("ok - attach ordering puts worktrees with captured work first");
 }
+
+{
+  // The scan is the extension's most expensive routine and used to run on EVERY
+  // window focus. It must be throttled (a plain refresh inside the interval is a
+  // no-op) while still being force-able, and concurrent callers must share one
+  // walk rather than each starting their own.
+  setExcludeMatcher(new ExcludeMatcher());
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cg-home-"));
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cg-root-"));
+  stubWorkspace.workspaceFolders = [{ uri: { fsPath: root } }];
+
+  // One worktree, present from the start.
+  const admin = path.join(root, ".git", "worktrees", "ws");
+  fs.mkdirSync(admin, { recursive: true });
+  fs.mkdirSync(path.join(root, "ws"), { recursive: true });
+  fs.writeFileSync(path.join(root, "ws", ".git"), `gitdir: ${admin}\n`);
+
+  let clock = 1_000_000;
+  const reg = new WorktreeSessionRegistry(fakeLog, root, () => clock);
+
+  await reg.refresh({ force: true });
+  assert.equal(reg.getManagers().size, 1, "forced refresh scans");
+
+  // A second worktree appears, but no time passes → the throttle suppresses the
+  // rescan, so the new worktree is not picked up yet.
+  const admin2 = path.join(root, ".git", "worktrees", "ws2");
+  fs.mkdirSync(admin2, { recursive: true });
+  fs.mkdirSync(path.join(root, "ws2"), { recursive: true });
+  fs.writeFileSync(path.join(root, "ws2", ".git"), `gitdir: ${admin2}\n`);
+
+  await reg.refresh();
+  assert.equal(reg.getManagers().size, 1, "an unforced refresh inside the interval does not rescan");
+
+  await reg.refresh({ force: true });
+  assert.equal(reg.getManagers().size, 2, "force bypasses the throttle");
+
+  // Past the interval, an unforced refresh scans again.
+  const admin3 = path.join(root, ".git", "worktrees", "ws3");
+  fs.mkdirSync(admin3, { recursive: true });
+  fs.mkdirSync(path.join(root, "ws3"), { recursive: true });
+  fs.writeFileSync(path.join(root, "ws3", ".git"), `gitdir: ${admin3}\n`);
+  clock += 30_001;
+  await reg.refresh();
+  assert.equal(reg.getManagers().size, 3, "an unforced refresh past the interval rescans");
+
+  // Concurrent callers coalesce onto a single in-flight walk.
+  const a = reg.refresh({ force: true });
+  const b = reg.refresh({ force: true });
+  assert.equal(a, b, "a concurrent refresh returns the in-flight scan, not a second walk");
+  await Promise.all([a, b]);
+
+  reg.dispose();
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.rmSync(home, { recursive: true, force: true });
+  console.log("ok - worktree scan is throttled, force-able, and coalesces concurrent calls");
+}
+
+{
+  // Regression: dispose() runs during extension-host teardown, where the
+  // OutputChannel throws "Channel has been closed". That throw used to abort the
+  // detach loop, leaking an fs.watch handle + reconcile timer per un-detached
+  // worktree on every window reload.
+  setExcludeMatcher(new ExcludeMatcher());
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cg-home-"));
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cg-root-"));
+  stubWorkspace.workspaceFolders = [{ uri: { fsPath: root } }];
+
+  for (const name of ["wa", "wb", "wc"]) {
+    const adm = path.join(root, ".git", "worktrees", name);
+    fs.mkdirSync(adm, { recursive: true });
+    fs.mkdirSync(path.join(root, name), { recursive: true });
+    fs.writeFileSync(path.join(root, name, ".git"), `gitdir: ${adm}\n`);
+  }
+
+  // Logs fine while attaching, then starts throwing — exactly what the real
+  // OutputChannel does once the host's IPC channel closes.
+  let channelClosed = false;
+  const log = {
+    appendLine() { if (channelClosed) throw new Error("Channel has been closed"); },
+  } as any;
+
+  const reg = new WorktreeSessionRegistry(log, root);
+  await reg.refresh({ force: true });
+  assert.equal(reg.getManagers().size, 3, "three worktrees attached");
+
+  channelClosed = true;
+  reg.dispose();
+  assert.equal(reg.getManagers().size, 0, "every manager is detached even when logging throws");
+
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.rmSync(home, { recursive: true, force: true });
+  console.log("ok - dispose detaches every worktree even when the output channel is dead");
+}
+})();

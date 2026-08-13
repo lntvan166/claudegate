@@ -6,6 +6,12 @@ import { WorktreeSessionRegistry } from "./worktreeSessionRegistry";
 import { openDiff } from "./diffProvider";
 import { isInWorkspace, isExcluded, isProtected } from "./workspaceScope";
 import { countChanges, formatChangeCount } from "./changeCount";
+import { createCoalescer } from "./scheduling";
+
+// How long a burst of session changes is collected before the tree repaints
+// once. Short enough to feel instant, long enough to swallow the persist() +
+// fs.watch-reload pair (and a multi-file accept's follow-on reconcile).
+const TREE_REFRESH_COALESCE_MS = 60;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -221,6 +227,18 @@ export class FilteredTreeProvider
 
   private viewMode: ViewMode;
 
+  // Session changes arrive in bursts — persist() fires one and the fs.watch
+  // reload it triggers fires another, so a single accept produced several
+  // full-tree refreshes back-to-back. Firing each one raced inside VS Code's
+  // async tree, which threw "TreeError [claudegate.acceptedPanel] Data tree node
+  // not found" / "Tree element not found" as a refresh resolved children that a
+  // later refresh had already discarded. Collapsing the burst into one refresh
+  // removes the race and the redundant re-render of a 100+ row tree.
+  private readonly coalescedRefresh = createCoalescer(
+    TREE_REFRESH_COALESCE_MS,
+    () => this._onDidChangeTreeData.fire()
+  );
+
   constructor(
     private readonly sessionManager: SessionManager,
     private readonly status: ReviewStatus,
@@ -228,12 +246,14 @@ export class FilteredTreeProvider
     private readonly worktreeRegistry?: WorktreeSessionRegistry
   ) {
     this.viewMode = initialViewMode;
-    sessionManager.onSessionChange(() => this._onDidChangeTreeData.fire());
-    worktreeRegistry?.onChange(() => this._onDidChangeTreeData.fire());
+    sessionManager.onSessionChange(() => this.coalescedRefresh.schedule());
+    worktreeRegistry?.onChange(() => this.coalescedRefresh.schedule());
   }
 
   setViewMode(mode: ViewMode): void {
     this.viewMode = mode;
+    // Direct, not coalesced: this is a user action on the view itself and must
+    // repaint immediately. It also can't storm — it needs a button press.
     this._onDidChangeTreeData.fire();
   }
 
@@ -243,6 +263,11 @@ export class FilteredTreeProvider
 
   refresh(): void {
     this._onDidChangeTreeData.fire();
+  }
+
+  dispose(): void {
+    this.coalescedRefresh.dispose();
+    this._onDidChangeTreeData.dispose();
   }
 
   getTreeItem(element: vscode.TreeItem): vscode.TreeItem {
