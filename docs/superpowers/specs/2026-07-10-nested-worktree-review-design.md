@@ -8,10 +8,10 @@
 
 ## 1. Goal
 
-When a git worktree lives **inside** a workspace root (e.g. `tms/ws-carriershipping` under `tms`), Claude's edits to worktree files should:
+When a git worktree lives **inside** a workspace root (e.g. `monorepo/ws-alpha` under `monorepo`), Claude's edits to worktree files should:
 
 1. Always be captured to **one canonical session** (the worktree's own), regardless of which windows are open — no more ownership flipping based on window state.
-2. Be shown **with full accept/reject/diff actions in the parent (tms) window**, identically whether or not the worktree window is open.
+2. Be shown **with full accept/reject/diff actions in the parent (monorepo) window**, identically whether or not the worktree window is open.
 3. Be shown in the worktree's own window too, when opened.
 4. Have a **single decision**: accepting/rejecting from either window applies to both, because both windows read and write the *same* record.
 
@@ -23,26 +23,26 @@ Routing is done by `hook.py`, which writes each edit to the session of the **lon
 
 Consequence — ownership of a nested worktree's edits depends on which windows happen to be open:
 
-- Only `tms` open → worktree root not registered → longest match is `tms` → edit lands in **tms** session.
-- `ws-carriershipping` also open → its root is registered and is the longer match → edit lands in the **worktree** session; the tms window goes blank for it.
+- Only `monorepo` open → worktree root not registered → longest match is `monorepo` → edit lands in **monorepo** session.
+- `ws-alpha` also open → its root is registered and is the longer match → edit lands in the **worktree** session; the monorepo window goes blank for it.
 
 **Observed on the maintainer's machine** (`~/.claudegate/sessions/`, 2026-07-10):
 
-| Root | Session hash | Accepted entries under `ws-carriershipping/` |
+| Root | Session hash | Accepted entries under `ws-alpha/` |
 |---|---|---|
-| `tms` | `e6c7ce02…` | **19** |
-| `tms/ws-carriershipping` | `9d267099…` | **2** |
+| `monorepo` | `e6c7ce02…` | **19** |
+| `monorepo/ws-alpha` | `9d267099…` | **2** |
 
-The carriershipping feature's review history is split 19-vs-2 across two sessions purely by window open-order. In the worst case, an undecided file can be **pending in both sessions at once with different baselines** (a momentary double-pending) — decidable independently in each window. This is the confusion to eliminate.
+The feature's review history is split 19-vs-2 across two sessions purely by window open-order. In the worst case, an undecided file can be **pending in both sessions at once with different baselines** (a momentary double-pending) — decidable independently in each window. This is the confusion to eliminate.
 
 ## 3. Non-goals
 
 - **No two synced copies / mirroring.** We do *not* keep the record in two sessions and reconcile them. There is exactly **one** canonical record per worktree file; "sync" falls out of that for free.
-- **No migration of existing scatter.** The 19 historical `tms` accepted entries under `ws-carriershipping/` are **left as-is**. Only behavior going forward changes.
+- **No migration of existing scatter.** The 19 historical `monorepo` accepted entries under `ws-alpha/` are **left as-is**. Only behavior going forward changes.
 - **No `git` binary dependency.** Worktree detection is pure filesystem (reading `.git` / `.git/worktrees/*/gitdir`), preserving the project's no-git-dependency design rule.
 - **No support for worktrees *outside* every registered workspace root.** We only isolate worktrees nested at/under a root the user has actually opened (keeps the "only capture inside an opened workspace" guarantee).
 - **No change to the DocumentTracker** (still opt-in, off by default) or to non-worktree routing.
-- **No showing the worktree's accepted/rejected history in the parent.** The parent shows the worktree's **pending** changes with full actions; decided-history stays in the worktree's own window (keeps tms's own logs clean).
+- **No showing the worktree's accepted/rejected history in the parent.** The parent shows the worktree's **pending** changes with full actions; decided-history stays in the worktree's own window (keeps monorepo's own logs clean).
 
 ## 4. Approach & alternatives
 
@@ -82,8 +82,8 @@ Both `hook.py` and the extension must agree on "is path P a worktree root, and w
 ## 6. Architecture
 
 ```
-                 ┌─────────────── parent (tms) window ───────────────┐
- hook.py ─write─▶│  primary SessionManager  (tms session)            │
+                 ┌─────────────── parent (monorepo) window ───────────────┐
+ hook.py ─write─▶│  primary SessionManager  (monorepo session)            │
    routes to     │            +                                      │
  canonical       │  WorktreeSessionRegistry (new)                    │
  worktree        │    attaches to each nested worktree session file, │
@@ -92,13 +92,13 @@ Both `hook.py` and the extension must agree on "is path P a worktree root, and w
                  │            │                                      │
                  │            ▼  aggregated pending                  │
                  │  reviewPanel tree:                                │
-                 │    <tms's own pending files>                      │
-                 │    ▸ ws-carriershipping (worktree) — N pending    │
+                 │    <monorepo's own pending files>                      │
+                 │    ▸ ws-alpha (worktree) — N pending    │
                  │        <worktree pending files, full actions>     │
                  │        [⧉ open worktree window]                   │
                  └───────────────────────────────────────────────────┘
 
- hook.py ─write─▶  worktree (ws-carriershipping) session  ◀─read/write─  worktree window (if open)
+ hook.py ─write─▶  worktree (ws-alpha) session  ◀─read/write─  worktree window (if open)
 ```
 
 ### New / changed units
@@ -125,15 +125,15 @@ Both `hook.py` and the extension must agree on "is path P a worktree root, and w
 
 ## 7. Data flow
 
-**Capture:** Claude edits `tms/ws-carriershipping/foo.ts` → `hook.py` detects the worktree boundary → writes one pending entry to the **worktree** session (`9d26…`). No entry is written to the tms session.
+**Capture:** Claude edits `monorepo/ws-alpha/foo.ts` → `hook.py` detects the worktree boundary → writes one pending entry to the **worktree** session (`9d26…`). No entry is written to the monorepo session.
 
-**Display:** the tms window's `WorktreeSessionRegistry` is watching `9d26…`; it sees the new pending file and fires `onChange`; the sidebar shows it under the `ws-carriershipping (worktree)` group with full actions. If the worktree window is also open, it shows the same file from the same session.
+**Display:** the monorepo window's `WorktreeSessionRegistry` is watching `9d26…`; it sees the new pending file and fires `onChange`; the sidebar shows it under the `ws-alpha (worktree)` group with full actions. If the worktree window is also open, it shows the same file from the same session.
 
-**Decision:** the user clicks Keep on the file in the **tms** window → the registry resolves the owning session (`9d26…`) and runs the shared `acceptFile` against it → the entry moves from `files{}` to `accepted[]` in `9d26…`. Both windows watch `9d26…`, so both drop it from pending. One record, one decision.
+**Decision:** the user clicks Keep on the file in the **monorepo** window → the registry resolves the owning session (`9d26…`) and runs the shared `acceptFile` against it → the entry moves from `files{}` to `accepted[]` in `9d26…`. Both windows watch `9d26…`, so both drop it from pending. One record, one decision.
 
 ## 8. Concurrency & performance
 
-- **Concurrency is unchanged.** Writes to a worktree session from the tms window use the **same** advisory lock + atomic `os.replace` + `mergeFreshCaptures` path already shared by `hook.py` and the extension. Two windows writing the same session file is the same model as hook↔extension today; both-windows-open is not a new hazard.
+- **Concurrency is unchanged.** Writes to a worktree session from the monorepo window use the **same** advisory lock + atomic `os.replace` + `mergeFreshCaptures` path already shared by `hook.py` and the extension. Two windows writing the same session file is the same model as hook↔extension today; both-windows-open is not a new hazard.
 - **Watchers:** one `fs.watch` per nested worktree session file (typically 1–5). Negligible; the window already watches its own session file identically.
 - **Detection:** filesystem reads at activation + cached; refresh only on window focus / manual refresh. No `git` subprocess, no polling.
 - **Rendering:** a group node plus a few children per worktree; the sidebar already rebuilds on session change.

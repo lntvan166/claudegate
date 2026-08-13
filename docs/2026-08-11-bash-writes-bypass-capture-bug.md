@@ -32,7 +32,7 @@ A full working session of code changes across 3 repos / 7 source files produced 
 
 ```
 $ grep "^2026-08-11" ~/.claudegate/hook.log
-2026-08-11T02:31:43.650612+00:00 captured /home/…/tms/features/AppManagerImproveV3/deploy/sql/prod.sql
+2026-08-11T02:31:43.650612+00:00 captured /home/…/repo/features/example-feature/deploy/sql/prod.sql
 ```
 
 The same source files had been captured normally on previous days — 19 hits for `es_reader.go`, 14 for `monitor_filter.go` / `shipment_monitor_completed.go` across the log's history. So the plumbing was healthy; nothing was misconfigured, excluded, or stale.

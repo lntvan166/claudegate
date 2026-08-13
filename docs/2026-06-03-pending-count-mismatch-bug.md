@@ -19,13 +19,13 @@ The pending **badge / status-bar count shows `2`**, but the **Pending review tre
 
 ## Evidence
 
-Session file for the tms workspace
+Session file for the monorepo workspace
 (`~/.claudegate/sessions/e6c7ce029d23a96e09ca9c8906a451f1.json`) contained
 **two** pending entries:
 
 | reviewStatus | path | inside workspace? |
 |---|---|---|
-| `pending` | `…/tms/docs/superpowers/specs/2026-06-03-…-design.md` | ✅ yes |
+| `pending` | `…/repo/docs/superpowers/specs/2026-06-03-…-design.md` | ✅ yes |
 | `pending` | `~/.claude/projects/<workspace-hash>/memory/notes.md` | ❌ no — lives under `~/.claude` |
 
 The second entry is a file edited in a prior session that physically lives
@@ -77,21 +77,21 @@ workspace roots; when **none match**, it falls back to `cwd`
 return os.path.normcase(os.path.abspath(cwd))
 ```
 
-So editing a `~/.claude/...` file while `cwd` is the tms workspace files that
-path under the tms session bucket, even though the file lives outside it.
+So editing a `~/.claude/...` file while `cwd` is the monorepo workspace files that
+path under the monorepo session bucket, even though the file lives outside it.
 
 ---
 
 ## Data flow summary
 
 ```
-Claude edits  ~/.claude/.../memory/foo.md   (cwd = /…/tms)
+Claude edits  ~/.claude/.../memory/foo.md   (cwd = /…/repo)
         │
         ▼
 hook.py: file matches no registered workspace root
         │  → falls back to cwd  (hook.py:45)
         ▼
-entry written into tms session JSON  (path is OUTSIDE the workspace)
+entry written into monorepo session JSON  (path is OUTSIDE the workspace)
         │
         ├─► count loop (extension.ts:269)  → no isInWorkspace filter → counts it  ⇒ 2
         └─► tree (reviewPanel.ts:129)       → isInWorkspace filter     → hides it  ⇒ 1

@@ -23,7 +23,7 @@ method are still correct and still useful; the premise is not.
 >
 > Capture never stopped. The reported "pending tab stops capturing" is fully
 > explained by two bugs **already fixed**: the nested-worktree attach cap (v1.12.0
-> — `tms` had 18 worktrees against a cap of 10, so whole feature directories were
+> — `monorepo` had 18 worktrees against a cap of 10, so whole feature directories were
 > silently dropped) and worktree decision records not surfacing (v1.12.1).
 >
 > **What survived from this design:** the hot/cold distinction under "The

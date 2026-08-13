@@ -401,11 +401,11 @@ def _names_a_file(tok: str, cwd: str | None) -> bool:
     wrong guess becomes a no-op entry the settle-window reconcile prunes. But on
     a large session it is not free. Each bogus entry costs a session-file write,
     a full reload (2 MB on the workspace where this was diagnosed), a reconcile,
-    the prune, and a second write + reload. Real examples harvested from one
-    session, none of which is a file:
+    the prune, and a second write + reload. The shapes that caused it, none of
+    which is a file:
 
-        origin/main, origin/sandbox           ← git refspecs
-        bitbucket.org/hasaki-tech/tms-protobuf ← a Go module path
+        origin/main, origin/release-1.4   ← git refspecs
+        github.com/acme/schema-lib        ← a Go module path
 
     Every one shares a shape: slashes, but no extension on the final segment and
     nothing on disk. So a speculative candidate is kept when EITHER
@@ -452,8 +452,8 @@ def _pathspec_shaped(tok: str) -> bool:
     Without an explicit `--`, `git checkout <x>` / `git reset --hard <x>` is
     ambiguous, and git itself resolves it by trying `<x>` as a ref first. The old
     rule accepted anything with a slash, so every `git checkout origin/main` and
-    `git reset --hard origin/sandbox` harvested the REF as a file path — the two
-    most frequent bogus captures in a real session's hook.log.
+    `git reset --hard origin/release-1.4` harvested the REF as a file path — the
+    two most frequent bogus captures in a real session's hook.log.
 
     A ref and a pathspec are cleanly separable in practice: a pathspec is either
     explicitly rooted (`./x`, `../x`, `/x`) or names a file (extension on the

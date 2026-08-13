@@ -7,7 +7,7 @@
 
 The Pending panel already offers **"Open Worktree in New Window"** on git-worktree
 group nodes, but there is no equivalent for ordinary folder nodes. In multi-repo /
-`go.work` layouts (e.g. `tms/ws-shipperstatus`), the directory a user wants to open
+`go.work` layouts (e.g. `monorepo/ws-beta`), the directory a user wants to open
 is a plain folder, not a worktree ClaudeGate can detect — so no such action exists.
 The user wants to right-click any folder in the Pending tree and open it as a new
 VS Code window.

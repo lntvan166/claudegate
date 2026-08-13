@@ -78,7 +78,7 @@ void (async () => {
   stubWorkspace.workspaceFolders = [{ uri: { fsPath: root } }];
 
   // 18 nested worktrees named so the LAST one alphabetically is the one holding
-  // pending work — exactly the ws-storedist shape that reproduced the bug.
+  // pending work — exactly the shape that reproduced the bug in the field.
   const names = Array.from({ length: 18 }, (_, i) => `ws-${String(i).padStart(2, "0")}`);
   for (const name of names) {
     const wt = path.join(root, name);

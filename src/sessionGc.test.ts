@@ -30,7 +30,7 @@ import { isOrphanedSession, referencedPaths, gcOrphanedSessions } from "./sessio
 
   // Removed git worktree: its working dir is gone → orphan.
   assert.equal(
-    isOrphanedSession(["/home/u/tms/ws-x/mod/a.go", "/home/u/tms/ws-x/mod/b.go"], () => false),
+    isOrphanedSession(["/home/u/proj/ws-x/mod/a.go", "/home/u/proj/ws-x/mod/b.go"], () => false),
     true,
     "removed worktree dir → orphan"
   );

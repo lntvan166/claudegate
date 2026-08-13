@@ -8,7 +8,7 @@ import { executedCommands } from "./test-stubs/vscode";
 // Backs the "Open in New Window" right-click action on Pending folder nodes.
 {
   executedCommands.length = 0;
-  const dir = path.join(path.sep, "tmp", "ws-shipperstatus");
+  const dir = path.join(path.sep, "tmp", "ws-beta");
 
   openFolderInNewWindow(dir);
 

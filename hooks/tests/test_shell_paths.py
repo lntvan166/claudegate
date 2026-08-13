@@ -237,9 +237,9 @@ class SpeculativeHarvestTest(unittest.TestCase):
     Observed in a real session's hook.log, each of these produced a pending
     entry for a file that does not exist and never would:
 
-        captured .../tms/origin/main
-        captured .../tms/origin/sandbox
-        captured .../tms/bitbucket.org/hasaki-tech/tms-protobuf
+        captured .../repo/origin/main
+        captured .../repo/origin/release-1.4
+        captured .../repo/github.com/acme/schema-lib
 
     A bogus entry is not merely cosmetic. Each one costs a session-file write,
     a full reload of that file (2 MB on the workspace where this was found), a
@@ -262,7 +262,7 @@ class SpeculativeHarvestTest(unittest.TestCase):
     def test_git_refspecs_are_not_paths(self):
         for cmd in [
             "git checkout origin/main",
-            "git checkout origin/sandbox -b feature",
+            "git checkout origin/release-1.4 -b feature",
             "git reset --hard origin/main",
             "git restore origin/main",
             "git checkout upstream/release-1.2",
@@ -270,7 +270,7 @@ class SpeculativeHarvestTest(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 got = hook.paths_from_command(cmd, self.tmp)
                 self.assertNotIn("origin/main", got, got)
-                self.assertNotIn("origin/sandbox", got, got)
+                self.assertNotIn("origin/release-1.4", got, got)
                 self.assertNotIn("upstream/release-1.2", got, got)
 
     def test_explicit_pathspec_after_dashdash_still_captured(self):
@@ -284,11 +284,11 @@ class SpeculativeHarvestTest(unittest.TestCase):
     def test_module_paths_are_not_speculative_targets(self):
         cmd = (
             "sed -i 's/a/b/' manager/biz/rule.go && "
-            "go mod edit -replace bitbucket.org/hasaki-tech/tms-protobuf=../tms-protobuf"
+            "go mod edit -replace github.com/acme/schema-lib=../schema-lib"
         )
         got = hook.paths_from_command(cmd, self.tmp)
         self.assertIn("manager/biz/rule.go", got, "the real sed target survives")
-        self.assertNotIn("bitbucket.org/hasaki-tech/tms-protobuf", got, got)
+        self.assertNotIn("github.com/acme/schema-lib", got, got)
 
     def test_extensionless_word_that_exists_on_disk_is_kept(self):
         # Existence is the escape hatch: a real extensionless file mentioned in a
