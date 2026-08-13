@@ -7,6 +7,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.13.2] — 2026-08-13
+
+### Internal
+
+- Documentation-only. The code examples added in 1.13.1 were taken verbatim from a private workspace, so an organisation name and some internal module and worktree names ended up in the published package — `hooks/hook.py` and the changelog both ship inside the extension. They are replaced with neutral stand-ins (`github.com/acme/schema-lib`, `origin/release-1.4`, `monorepo`/`ws-alpha`/`ws-beta`), here and in the older design documents that still carried them. No behavior, API, or session-format change; the tests assert the same shapes as before. Install 1.13.2 in place of 1.13.1 — the two are functionally identical.
+
 ## [1.13.1] — 2026-08-13
 
 ### Fixed
