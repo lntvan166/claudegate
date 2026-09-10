@@ -177,6 +177,273 @@ ls ~/.claudegate/sessions/
 - Unit tests are plain `assert` + `console.log("ok - …")`, bundled per-file by esbuild and run with node. **Each new `src/*.test.ts` must be appended to the `test:unit` script in `package.json`** or it won't run.
 - Tests that import VS Code-dependent modules bundle with `--alias:vscode=./src/test-stubs/vscode.ts`; isolate `~/.claudegate` via `process.env.HOME = fs.mkdtempSync(...)`.
 
+### Integration tests: driving a real VS Code
+
+`src/test-stubs/vscode.ts` is 89 lines. It proves the logic is right; it can
+never prove that VS Code does what we assumed. Everything that only breaks in a
+real editor — a command registered with the wrong argument shape, a tree view
+that never refreshes, a diff that opens on the wrong side, an activation event
+that does not fire — is currently caught by hand, with `MANUAL-TEST-1.3.0.md`
+and a human clicking. Integration tests automate exactly that checklist.
+
+**How it works.** `@vscode/test-electron` downloads a real VS Code, launches it
+with this extension loaded from source and a workspace folder open, and then
+`require`s one module of ours **inside the extension host**. In that module
+`import * as vscode from "vscode"` is the real API, not the stub — so the test
+sees what a user sees.
+
+Three processes, and it matters which code runs where:
+
+| Where | File | Can use |
+|---|---|---|
+| plain node | `src/integration/runTests.ts` | `@vscode/test-electron`, fs, spawn. **No `vscode`.** |
+| extension host | `src/integration/index.ts` | exports `run(): Promise<void>`, loads the tests |
+| extension host | `src/integration/*.itest.ts` | the **real** `vscode` API |
+
+Tests live under `src/` so `npm run typecheck` and `npm run lint` cover them,
+and are named `*.itest.ts` so the `test:unit` file list stays untouched.
+
+#### The hazards, in the order they will bite
+
+**1. Build the bundle first.** The host loads `out/extension.js`, never our
+TypeScript. A run that compiles only the tests silently exercises the *previous*
+build — the suite stays red against correct code, or green against broken code.
+`test:integration` must depend on `compile`.
+
+**2. Isolate `$HOME`. This is the big one for ClaudeGate.** `sessionManager.ts`,
+`historyPanel.ts` and `extension.ts` all resolve state under
+`os.homedir()/.claudegate`. `os.homedir()` reads `$HOME` on POSIX and
+`%USERPROFILE%` on Windows, so pass both through `extensionTestsEnv`. Skip this
+and the tests read your real sessions and `acceptAll` accepts your real pending
+changes — against your real files. The unit tests already do the equivalent with
+`process.env.HOME = fs.mkdtempSync(...)`; the same discipline, one process
+further away.
+
+**3. Activate explicitly.** We activate `onStartupFinished`, so whether the
+extension is up when a test runs depends on load order. Do not rely on it:
+
+```ts
+const ext = vscode.extensions.getExtension("lntvan166.claudegate");
+await ext!.activate();
+```
+
+**4. Poll, never sleep.** The extension reacts to fs watchers, debounced
+refreshes and `setTimeout`. `await sleep(500); assert(...)` is a flake generator
+in both directions. Use `waitFor` below. The same applies to the editor itself:
+the first `showTextDocument` after the host launches can resolve *before* the
+editor is actually active, so poll `vscode.window.activeTextEditor` until it is
+the document you asked for.
+
+**5. Assert on observable state.** `activate()` returns `void`, so there is no
+API object to inspect, and **context keys like `claudegate.acceptedCount` cannot
+be read back** — `setContext` is write-only. Assert on what the API does expose:
+
+- `vscode.commands.getCommands(true)` — registration
+- file contents on disk — the actual accept/reject outcome
+- the session JSON under the temp `$HOME` — model state
+- `vscode.window.tabGroups.all` — which editors and diffs are open
+- `vscode.window.activeTextEditor.selection` — where navigation landed
+
+**6. Seed with the script we already have.** `manual-test-seed.py <dir>` builds
+the workspace *and* the matching session file, and expands `~`, so running it
+with the temp `HOME` puts both in the sandbox. The fixture is already written —
+it is the same one the manual checklist uses.
+
+**7. Keep the artifacts out.** `.vscode-test/` is already in `.gitignore` and
+`.vscodeignore` — leave it there, it holds a ~1GB VS Code download. Add
+`out/integration/**` to `.vscodeignore` so the suite never ships.
+
+#### The runner
+
+```ts
+// src/integration/runTests.ts — runs OUTSIDE VS Code. Never import "vscode" here.
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
+import { spawnSync } from "child_process";
+import { downloadAndUnzipVSCode, runTests } from "@vscode/test-electron";
+
+async function main(): Promise<void> {
+  const repoRoot = path.resolve(__dirname, "..", "..");   // out/integration -> repo root
+  const extensionTestsPath = path.resolve(__dirname, "index.js");
+
+  // Throwaway HOME and workspace. Without the HOME override these tests would
+  // operate on your real ~/.claudegate sessions and your real files.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "claudegate-itest-home-"));
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "claudegate-itest-ws-"));
+
+  const seed = spawnSync("python3", [path.join(repoRoot, "manual-test-seed.py"), workspace], {
+    env: { ...process.env, HOME: home },
+    encoding: "utf-8",
+    stdio: "inherit",
+  });
+  if (seed.status !== 0) {
+    throw new Error("manual-test-seed.py failed");
+  }
+
+  await runTests({
+    vscodeExecutablePath: await downloadAndUnzipVSCode("stable"),
+    extensionDevelopmentPath: repoRoot,
+    extensionTestsPath,
+    launchArgs: [workspace, "--disable-extensions", "--disable-workspace-trust"],
+    extensionTestsEnv: {
+      HOME: home,
+      USERPROFILE: home,
+      CLAUDEGATE_ITEST_WS: workspace,
+    },
+  });
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
+```
+
+`--disable-extensions` turns off every *other* extension; the one under
+development still loads.
+
+#### The host entry and helpers
+
+```ts
+// src/integration/index.ts — the extension host requires this and calls run().
+import * as fs from "fs";
+import * as path from "path";
+import Mocha = require("mocha");   // `import Mocha from` needs esModuleInterop at runtime; this does not
+
+export function run(): Promise<void> {
+  const mocha = new Mocha({ ui: "bdd", color: true, timeout: 60000 });
+  for (const file of fs.readdirSync(__dirname)) {
+    if (file.endsWith(".itest.js")) {
+      mocha.addFile(path.join(__dirname, file));
+    }
+  }
+  return new Promise((resolve, reject) => {
+    mocha.run((failures) => (failures ? reject(new Error(`${failures} failing`)) : resolve()));
+  });
+}
+```
+
+```ts
+// src/integration/helpers.ts
+import * as assert from "assert";
+import * as vscode from "vscode";
+
+export function workspaceRoot(): string {
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  assert.ok(root, "no workspace folder open in the test host");
+  return root;
+}
+
+export async function activateExtension(): Promise<void> {
+  const ext = vscode.extensions.getExtension("lntvan166.claudegate");
+  assert.ok(ext, "claudegate not found in the test host");
+  await ext.activate();
+}
+
+/** Poll until `probe` returns something truthy. Reports the last error so a
+ *  genuine failure is legible instead of a bare timeout. */
+export async function waitFor<T>(
+  what: string,
+  probe: () => T | undefined | Promise<T | undefined>,
+  timeoutMs = 20000,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      const value = await probe();
+      if (value) {
+        return value;
+      }
+    } catch (err) {
+      lastError = err;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(`timed out waiting for ${what}${lastError ? ` — last error: ${lastError}` : ""}`);
+}
+```
+
+#### A test
+
+```ts
+// src/integration/review.itest.ts
+import * as assert from "assert";
+import * as fs from "fs";
+import * as path from "path";
+import * as vscode from "vscode";
+import { activateExtension, waitFor, workspaceRoot } from "./helpers";
+
+describe("review flow", () => {
+  before(async () => activateExtension());
+
+  it("registers its commands", async () => {
+    const all = await vscode.commands.getCommands(true);
+    for (const id of ["claudegate.acceptFile", "claudegate.rejectFile", "claudegate.acceptAll"]) {
+      assert.ok(all.includes(id), `${id} not registered`);
+    }
+  });
+
+  it("accepting everything keeps Claude's version on disk", async () => {
+    const file = path.join(workspaceRoot(), "src", "utils.ts");
+    const claudeVersion = fs.readFileSync(file, "utf8");
+
+    await vscode.commands.executeCommand("claudegate.acceptAll");
+
+    await waitFor("the pending set to drain", () => {
+      const sessions = path.join(process.env.HOME!, ".claudegate", "sessions");
+      return fs
+        .readdirSync(sessions)
+        .every((f) => !JSON.stringify(
+          JSON.parse(fs.readFileSync(path.join(sessions, f), "utf8")),
+        ).includes('"pending"'));
+    });
+
+    assert.strictEqual(fs.readFileSync(file, "utf8"), claudeVersion);
+  });
+});
+```
+
+Check argument shapes against `registerCommand` in `src/extension.ts` before
+writing a test — most of the per-file commands take a tree item, not a `Uri`.
+
+#### Wiring it up
+
+```json
+"build:itest": "esbuild src/integration/runTests.ts src/integration/index.ts src/integration/*.itest.ts --bundle --platform=node --format=cjs --external:vscode --external:mocha --external:@vscode/test-electron --outdir=out/integration",
+"test:integration": "npm run compile && npm run build:itest && node out/integration/runTests.js"
+```
+
+`--external:vscode` is mandatory: the module only exists inside the host and
+bundling it produces a build that fails at require time. Add
+`@vscode/test-electron` and `mocha` to `devDependencies`.
+
+Keep `test:integration` out of `npm test`. It downloads VS Code on first run and
+takes tens of seconds; `npm test` should stay fast enough to run on every save.
+Run it before a release, and in CI as its own job — headless Linux needs
+`xvfb-run -a npm run test:integration`.
+
+#### Verifying against a real workspace
+
+The same harness can be pointed at a real folder instead of a generated fixture,
+which is how you check behaviour that only shows up at real scale — a repo with
+hundreds of pending files, real worktrees, a real session history. Copy
+`runTests.ts` to `runReal.ts`, take the path from an environment variable, and
+seed nothing:
+
+```ts
+const workspace = process.env.CLAUDEGATE_REAL_WS;
+if (!workspace) {
+  throw new Error("set CLAUDEGATE_REAL_WS to the workspace to verify against");
+}
+```
+
+Two rules for that variant. Keep the temp `$HOME` — a real *workspace* is fine,
+a real `~/.claudegate` is not. And keep the assertions read-only, or point it at
+a scratch clone: `acceptAll` against a repo you care about is not a test, it is
+an incident.
+
 ## Subagent / Background-Task Git Safety
 
 Subagents run in the **same working directory** (no worktree isolation by default), so a stray `git checkout`/`reset` — or a race — can land a commit as a **dangling commit on the wrong base**, leaving the branch HEAD unmoved with a clean tree (work recoverable only via `git cherry-pick <sha>`).
