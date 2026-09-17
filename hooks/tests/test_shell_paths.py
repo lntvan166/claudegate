@@ -33,6 +33,25 @@ def session_file_for(claudegate_dir, root):
     return os.path.join(claudegate_dir, "sessions", f"{h}.json")
 
 
+def paths(cmd, cwd=None):
+    """Just the candidate tokens. `paths_from_command` returns (path, cwd) pairs
+    because a relative target resolves against the directory the command runs
+    in, not the session cwd; most cases below do not exercise that."""
+    return [p for p, _ in hook.paths_from_command(cmd, cwd)]
+
+
+def targets(cmd, cwd):
+    """The absolute targets, resolved the way main() resolves them. A relative
+    candidate whose cwd is unknowable is dropped, as main() drops it."""
+    out = []
+    for path, path_cwd in hook.paths_from_command(cmd, cwd):
+        if os.path.isabs(path):
+            out.append(path)
+        elif path_cwd:
+            out.append(os.path.normpath(os.path.join(path_cwd, path)))
+    return out
+
+
 PY_HEREDOC = (
     "python3 - <<'PY'\n"
     "p='manager/biz/monitor_filter.go'\n"
@@ -178,14 +197,14 @@ class PathExtractionTest(unittest.TestCase):
     def test_expected_paths_extracted(self):
         for cmd, expected in self.CASES:
             with self.subTest(cmd=cmd):
-                got = hook.paths_from_command(cmd)
+                got = paths(cmd)
                 for want in expected:
                     self.assertIn(want, got, f"{want!r} missing from {got!r}")
 
     def test_negative_controls_extract_nothing(self):
         for cmd in self.NEGATIVE:
             with self.subTest(cmd=cmd):
-                self.assertEqual([], hook.paths_from_command(cmd))
+                self.assertEqual([], paths(cmd))
 
     def test_devices_and_fd_dups_never_extracted(self):
         for cmd in ["echo x > /dev/null",
@@ -194,40 +213,40 @@ class PathExtractionTest(unittest.TestCase):
                     "sed -i s/a/b/ f.go 2>&1",
                     "sed -i s/a/b/ f.go >&2"]:
             with self.subTest(cmd=cmd):
-                for p in hook.paths_from_command(cmd):
+                for p in paths(cmd):
                     self.assertFalse(p.startswith("/dev/"), p)
                     self.assertNotIn("&", p)
 
     def test_directories_and_wildcards_dropped(self):
         for cmd in ["prettier --write src/", "gofmt -w ./...", "cp -r a/ b/"]:
             with self.subTest(cmd=cmd):
-                for p in hook.paths_from_command(cmd):
+                for p in paths(cmd):
                     self.assertFalse(p.endswith("/"), p)
                     self.assertNotIn("...", p)
 
     def test_sed_expression_is_not_a_path(self):
-        got = hook.paths_from_command("sed -i 's/old/new/g' src/app.go")
+        got = paths("sed -i 's/old/new/g' src/app.go")
         self.assertEqual(["src/app.go"], got)
 
     def test_deduplicated_and_ordered(self):
-        got = hook.paths_from_command("cp a/x.go a/x.go && touch a/x.go")
+        got = paths("cp a/x.go a/x.go && touch a/x.go")
         self.assertEqual(["a/x.go"], got)
-        got = hook.paths_from_command("cat > first.txt <<EOF\nEOF\ntouch second.txt")
+        got = paths("cat > first.txt <<EOF\nEOF\ntouch second.txt")
         self.assertEqual(["first.txt", "second.txt"], got)
 
     def test_candidates_are_bounded(self):
         cmd = "touch " + " ".join(f"f{i}.txt" for i in range(200))
-        self.assertLessEqual(len(hook.paths_from_command(cmd)), hook.MAX_CANDIDATES)
+        self.assertLessEqual(len(paths(cmd)), hook.MAX_CANDIDATES)
 
     def test_pathological_input_is_bounded_and_safe(self):
         cmd = "cat > out.txt <<EOF\n" + ("x/y.go " * 200000) + "\nEOF"
-        got = hook.paths_from_command(cmd)  # must simply return
+        got = paths(cmd)  # must simply return
         self.assertLessEqual(len(got), hook.MAX_CANDIDATES)
         self.assertIn("out.txt", got)
 
     def test_non_string_and_empty_input(self):
-        self.assertEqual([], hook.paths_from_command(""))
-        self.assertEqual([], hook.paths_from_command(None))
+        self.assertEqual([], paths(""))
+        self.assertEqual([], paths(None))
         self.assertFalse(hook.command_may_write(""))
 
 
@@ -268,14 +287,14 @@ class SpeculativeHarvestTest(unittest.TestCase):
             "git checkout upstream/release-1.2",
         ]:
             with self.subTest(cmd=cmd):
-                got = hook.paths_from_command(cmd, self.tmp)
+                got = paths(cmd, self.tmp)
                 self.assertNotIn("origin/main", got, got)
                 self.assertNotIn("origin/release-1.4", got, got)
                 self.assertNotIn("upstream/release-1.2", got, got)
 
     def test_explicit_pathspec_after_dashdash_still_captured(self):
         # `--` is git's own disambiguator: everything after it IS a path.
-        got = hook.paths_from_command(
+        got = paths(
             "git checkout origin/main -- manager/biz/rule.go", self.tmp
         )
         self.assertIn("manager/biz/rule.go", got)
@@ -286,7 +305,7 @@ class SpeculativeHarvestTest(unittest.TestCase):
             "sed -i 's/a/b/' manager/biz/rule.go && "
             "go mod edit -replace github.com/acme/schema-lib=../schema-lib"
         )
-        got = hook.paths_from_command(cmd, self.tmp)
+        got = paths(cmd, self.tmp)
         self.assertIn("manager/biz/rule.go", got, "the real sed target survives")
         self.assertNotIn("github.com/acme/schema-lib", got, got)
 
@@ -295,35 +314,268 @@ class SpeculativeHarvestTest(unittest.TestCase):
         # writing command is still a legitimate baseline.
         self.write("scripts/build")
         cmd = "sed -i 's/a/b/' scripts/build"
-        self.assertIn("scripts/build", hook.paths_from_command(cmd, self.tmp))
+        self.assertIn("scripts/build", paths(cmd, self.tmp))
 
     def test_speculative_extensionless_word_that_exists_is_kept(self):
         # Same file, but reached through Tier 2c (bound to a variable) rather
         # than named as the tool's argument.
         self.write("scripts/build")
         cmd = "p=scripts/build\nopen(p,'w').write(s)"
-        self.assertIn("scripts/build", hook.paths_from_command(cmd, self.tmp))
+        self.assertIn("scripts/build", paths(cmd, self.tmp))
+
+    def test_absolute_speculative_candidate_is_probed_without_a_cwd(self):
+        # An absolute path needs no cwd to be checked. Requiring one dropped
+        # real absolute candidates once the cwd could become unknown.
+        full = self.write("scripts/build")
+        cmd = "p=%s\nopen(p,'w').write(s)" % full
+        self.assertIn(full, paths(cmd, None))
+        self.assertIn(full, paths(cmd, self.tmp))
 
     def test_new_file_with_an_extension_is_still_captured(self):
         # The common create case: the file does NOT exist yet, and must still be
         # captured (originalContent stays null so a reject deletes it).
         cmd = "python3 - <<'PY'\np='pkg/generated_client.go'\nopen(p,'w').write(s)\nPY"
-        self.assertIn("pkg/generated_client.go", hook.paths_from_command(cmd, self.tmp))
+        self.assertIn("pkg/generated_client.go", paths(cmd, self.tmp))
 
     def test_explicit_targets_never_need_an_extension(self):
         # Tier 2a/2b are explicit, not speculative: a redirection or in-place
         # tool target is a write target by definition, extension or not.
-        self.assertIn("Makefile", hook.paths_from_command("cat > Makefile <<EOF\nx\nEOF", self.tmp))
-        self.assertIn("build/Dockerfile", hook.paths_from_command("cp a/Dockerfile build/Dockerfile", self.tmp))
-        self.assertIn("conf/nginx", hook.paths_from_command("sed -i 's/a/b/' conf/nginx", self.tmp))
+        self.assertIn("Makefile", paths("cat > Makefile <<EOF\nx\nEOF", self.tmp))
+        self.assertIn("build/Dockerfile", paths("cp a/Dockerfile build/Dockerfile", self.tmp))
+        self.assertIn("conf/nginx", paths("sed -i 's/a/b/' conf/nginx", self.tmp))
 
     def test_cwd_is_optional_and_defaults_to_no_existence_check(self):
         # Called without a cwd (the older signature), extensionless speculative
         # candidates are simply dropped rather than resolved against the process
         # cwd, which is not the session's directory.
-        got = hook.paths_from_command("sed -i 's/a/b/' manager/biz/rule.go && echo origin/main")
+        got = paths("sed -i 's/a/b/' manager/biz/rule.go && echo origin/main")
         self.assertIn("manager/biz/rule.go", got)
         self.assertNotIn("origin/main", got)
+
+
+class CdAwareResolutionTest(unittest.TestCase):
+    """A relative target resolves against the directory the command actually runs
+    in, not the session cwd.
+
+    Observed in a real monorepo session. The command was
+
+        cd <root>/sub && python3 - <<'PY'
+        p = pathlib.Path('manager/biz/rule.go')
+        ...
+
+    and the hook recorded <root>/manager/biz/rule.go — a path with no file
+    behind it, because the `cd` was ignored. That entry read as a no-op, the
+    settle-window reconcile pruned it, and the real edit never reached the
+    pending panel. One workspace had lost 47 captures this way, every one of
+    them a `cd <subdir> && <write>` in a repo of submodules.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.sub = os.path.join(self.tmp, "sub")
+        os.makedirs(self.sub)
+
+    def test_absolute_cd_relocates_a_heredoc_target(self):
+        cmd = (
+            "cd %s && python3 - <<'PY'\n"
+            "p = pathlib.Path('manager/biz/rule.go')\n"
+            "p.write_text(s)\n"
+            "PY" % self.sub
+        )
+        self.assertEqual(
+            [os.path.join(self.sub, "manager/biz/rule.go")],
+            targets(cmd, self.tmp),
+        )
+
+    def test_relative_cd_relocates_an_in_place_tool_target(self):
+        cmd = "cd sub && sed -i 's/a/b/' x.go"
+        self.assertIn(os.path.join(self.sub, "x.go"), targets(cmd, self.tmp))
+
+    def test_relative_cd_relocates_a_redirection_target(self):
+        cmd = "cd sub && cat > gen.go <<EOF\nx\nEOF"
+        self.assertEqual([os.path.join(self.sub, "gen.go")], targets(cmd, self.tmp))
+
+    def test_cd_is_applied_in_order_not_to_the_whole_command(self):
+        # a.go is written BEFORE the cd and must still resolve against the base.
+        cmd = "sed -i 's/a/b/' a.go && cd sub && sed -i 's/a/b/' b.go"
+        self.assertEqual(
+            [os.path.join(self.tmp, "a.go"), os.path.join(self.sub, "b.go")],
+            targets(cmd, self.tmp),
+        )
+
+    def test_cd_dotdot_walks_back_up(self):
+        cmd = "cd sub && cd .. && sed -i 's/a/b/' top.go"
+        self.assertEqual([os.path.join(self.tmp, "top.go")], targets(cmd, self.tmp))
+
+    def test_absolute_target_is_unaffected_by_cd(self):
+        other = os.path.join(self.tmp, "other.go")
+        cmd = "cd sub && sed -i 's/a/b/' %s" % other
+        self.assertEqual([other], targets(cmd, self.tmp))
+
+    def test_unknowable_cd_drops_later_relative_targets(self):
+        # Once we have lost track of where the shell is, resolving against the
+        # session cwd would invent a path that does not exist — the very bug
+        # this guards. Dropping the candidate is the honest answer.
+        for cmd in ['cd "$REPO_DIR" && sed -i \'s/a/b/\' x.go',
+                    "cd && sed -i 's/a/b/' x.go",
+                    "cd - && sed -i 's/a/b/' x.go",
+                    "cd ~/elsewhere && sed -i 's/a/b/' x.go"]:
+            with self.subTest(cmd=cmd):
+                self.assertEqual([], targets(cmd, self.tmp), cmd)
+
+    def test_unknowable_cd_is_sticky(self):
+        cmd = "cd $D && cd sub && sed -i 's/a/b/' x.go"
+        self.assertEqual([], targets(cmd, self.tmp))
+
+    def test_cd_before_the_write_does_not_itself_become_a_candidate(self):
+        cmd = "cd sub && sed -i 's/a/b/' x.go"
+        self.assertNotIn("sub", paths(cmd, self.tmp))
+        self.assertNotIn(self.sub, targets(cmd, self.tmp))
+
+    def test_existence_probe_uses_the_effective_directory(self):
+        # An extensionless speculative candidate is kept only if it exists. It
+        # exists under sub/, not under the session cwd, so the probe has to look
+        # in the directory the command actually runs in.
+        os.makedirs(os.path.join(self.sub, "scripts"))
+        with open(os.path.join(self.sub, "scripts", "build"), "w") as fh:
+            fh.write("x")
+        cmd = "cd sub && p=scripts/build\nopen(p,'w').write(s)"
+        self.assertEqual(
+            [os.path.join(self.sub, "scripts/build")], targets(cmd, self.tmp)
+        )
+
+    def test_same_relative_path_under_two_directories_is_two_targets(self):
+        os.makedirs(os.path.join(self.tmp, "other"))
+        cmd = "cd sub && touch x.go && cd ../other && touch x.go"
+        self.assertEqual(
+            [os.path.join(self.sub, "x.go"), os.path.join(self.tmp, "other/x.go")],
+            targets(cmd, self.tmp),
+        )
+
+    def test_subshell_cd_does_not_leak_past_the_closing_paren(self):
+        # `(cd sub` does not lex as a plain `cd` segment, so the subshell's cd is
+        # ignored entirely and y.go still resolves against the base. Tracking it
+        # would mean tracking paren depth to un-track it at the `)`; ignoring it
+        # keeps the pre-existing behaviour instead of getting y.go wrong.
+        # (x.go inside the parens is lost to the trailing `)` on its token, as it
+        # was before cd tracking existed — a separate, pre-existing gap.)
+        cmd = "(cd sub && sed -i 's/a/b/' x.go) && sed -i 's/a/b/' y.go"
+        self.assertEqual([os.path.join(self.tmp, "y.go")], targets(cmd, self.tmp))
+
+    def test_cd_inside_a_heredoc_body_is_data_not_shell(self):
+        # Found by replaying 9,091 real Bash commands against this change. Plans
+        # and docs are written with `cat >> f <<'PLAN'`, and their bodies quote
+        # shell examples. Treating those as real cds stacked them up and sent
+        # every later candidate into <root>/svc-lib/svc-lib/... —
+        # turning captures that had been CORRECT into phantoms.
+        cmd = (
+            "cat >> docs/plan.md <<'PLAN'\n"
+            "cd svc-lib && go build ./...\n"
+            "cd svc-lib\n"
+            "Then edit manager/repo/rule.go\n"
+            "PLAN"
+        )
+        self.assertEqual(
+            [os.path.join(self.tmp, "docs/plan.md"),
+             os.path.join(self.tmp, "manager/repo/rule.go")],
+            targets(cmd, self.tmp),
+        )
+
+    def test_a_real_cd_still_applies_to_the_heredoc_it_opens(self):
+        # The body is data, but the shell that opened it is not: candidates in
+        # the body resolve against wherever the heredoc was opened.
+        cmd = (
+            "cd sub && cat > gen.go <<'EOF'\n"
+            "cd somewhere-else\n"
+            "package x\n"
+            "EOF\n"
+            "sed -i 's/a/b/' after.go"
+        )
+        self.assertEqual(
+            [os.path.join(self.sub, "gen.go"), os.path.join(self.sub, "after.go")],
+            targets(cmd, self.tmp),
+        )
+
+    def test_unterminated_heredoc_still_suppresses_body_cds(self):
+        cmd = "cat > f.md <<'MD'\ncd svc-lib\nedit manager/rule.go"
+        self.assertEqual(
+            [os.path.join(self.tmp, "f.md"), os.path.join(self.tmp, "manager/rule.go")],
+            targets(cmd, self.tmp),
+        )
+
+    def test_cd_through_a_literal_variable_assignment(self):
+        # `W=/abs/path` then `cd "$W"` is how this workspace's commands are
+        # actually written. Without expansion the cd is unknowable and every
+        # relative target after it is dropped — a capture that used to work.
+        cmd = "T=%s\ncd \"$T\"\nsed -i 's/a/b/' x.go" % self.sub
+        self.assertEqual([os.path.join(self.sub, "x.go")], targets(cmd, self.tmp))
+
+    def test_cd_through_a_variable_with_a_suffix(self):
+        cmd = "T=%s\ncd \"$T/deep\"\nsed -i 's/a/b/' x.go" % self.sub
+        self.assertEqual(
+            [os.path.join(self.sub, "deep/x.go")], targets(cmd, self.tmp)
+        )
+
+    def test_cd_through_a_braced_variable(self):
+        cmd = "T=%s\ncd ${T}\nsed -i 's/a/b/' x.go" % self.sub
+        self.assertEqual([os.path.join(self.sub, "x.go")], targets(cmd, self.tmp))
+
+    def test_relative_variable_assignment_resolves_against_the_current_dir(self):
+        cmd = "cd sub\nD=deep\ncd \"$D\"\nsed -i 's/a/b/' x.go"
+        self.assertEqual(
+            [os.path.join(self.sub, "deep/x.go")], targets(cmd, self.tmp)
+        )
+
+    def test_variable_defined_from_another_variable(self):
+        cmd = "T=%s\nW=$T/deep\ncd \"$W\"\nsed -i 's/a/b/' x.go" % self.sub
+        self.assertEqual(
+            [os.path.join(self.sub, "deep/x.go")], targets(cmd, self.tmp)
+        )
+
+    def test_undefined_or_uncomputable_variable_stays_unknowable(self):
+        for cmd in ["cd \"$NEVER_SET\" && sed -i 's/a/b/' x.go",
+                    "D=$(pwd)\ncd \"$D\"\nsed -i 's/a/b/' x.go",
+                    "cd \"$HOME/x\" && sed -i 's/a/b/' x.go"]:
+            with self.subTest(cmd=cmd):
+                self.assertEqual([], targets(cmd, self.tmp), cmd)
+
+    def test_assignment_inside_a_heredoc_body_does_not_define_anything(self):
+        cmd = ("cat > doc.md <<'MD'\n"
+               "T=/somewhere/else\n"
+               "MD\n"
+               "cd \"$T\" && sed -i 's/a/b/' x.go")
+        self.assertEqual([os.path.join(self.tmp, "doc.md")], targets(cmd, self.tmp))
+
+    def test_cd_chain_past_path_max_becomes_unknowable(self):
+        # Resolving each cd against an ever-longer path is quadratic, and this
+        # runs synchronously before every Bash call (120 ms for one 64 KiB
+        # command before the bound). Past PATH_MAX the directory cannot be
+        # opened anyway, so the walk gives up rather than keep building.
+        chain = " && ".join("cd %s" % ("d" * 200) for _ in range(30))
+        self.assertGreater(30 * 201, hook._MAX_CWD_LEN, "fixture must exceed the cap")
+        self.assertEqual([], targets(chain + " && touch x.go", self.tmp))
+
+    def test_a_cd_chain_within_path_max_still_resolves(self):
+        chain = "cd a && cd b && cd c"
+        self.assertEqual(
+            [os.path.join(self.tmp, "a/b/c/x.go")],
+            targets(chain + " && touch x.go", self.tmp),
+        )
+
+    def test_worst_case_command_stays_off_the_hot_path(self):
+        # A backstop for the quadratic, not a benchmark: the threshold is loose
+        # enough not to flake and tight enough to catch the 120 ms shape.
+        import time
+        worst = " && ".join("cd d" for _ in range(hook.MAX_COMMAND_CHARS // 8))
+        start = time.perf_counter()
+        hook.paths_from_command(worst[: hook.MAX_COMMAND_CHARS], self.tmp)
+        elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, 0.09, "cd tracking went quadratic: %.3fs" % elapsed)
+
+    def test_cd_alone_writes_nothing(self):
+        self.assertEqual([], paths("cd sub", self.tmp))
+        self.assertFalse(hook.command_may_write("cd sub"))
 
 
 class ShellCaptureEndToEndTest(unittest.TestCase):
@@ -450,6 +702,29 @@ class ShellCaptureEndToEndTest(unittest.TestCase):
         subprocess.run([sys.executable, HOOK], input=payload, text=True,
                        env=dict(os.environ, HOME=self.home), check=True)
         self.assertEqual("v0", self.session()["files"][target]["originalContent"])
+
+
+    def test_cd_into_subdirectory_captures_the_real_file(self):
+        # The reported failure, end to end: without cd tracking this captured
+        # <root>/manager/biz/rule.go, which does not exist, and the real file
+        # under sub/ was never baselined.
+        target = self.seed("sub/manager/biz/rule.go", "package biz\n")
+        self.run_bash(
+            "cd %s && python3 - <<'PY'\n"
+            "import pathlib\n"
+            "p = pathlib.Path('manager/biz/rule.go')\n"
+            "p.write_text(p.read_text().replace('30', '90'))\n"
+            "PY" % os.path.join(self.root, "sub")
+        )
+        files = self.session()["files"]
+        self.assertIn(target, files)
+        self.assertEqual("package biz\n", files[target]["originalContent"])
+        self.assertNotIn(os.path.join(self.root, "manager/biz/rule.go"), files)
+
+    def test_unknowable_cd_captures_nothing_rather_than_a_phantom(self):
+        self.run_bash('cd "$REPO" && sed -i \'s/a/b/\' app.go')
+        self.assertFalse(os.path.exists(self.session_file))
+        self.assertIn("skip-unknown-cwd", self.log())
 
     def test_empty_bash_payload_fails_open(self):
         payload = json.dumps({

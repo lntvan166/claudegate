@@ -7,6 +7,24 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.13.3] — 2026-09-17
+
+### Fixed
+
+- **Files that Claude edits after a `cd` into a subdirectory are captured again.** Shell-write capture resolved a relative path against the session's working directory and ignored any `cd` in the command itself. So `cd sub && python3 - <<'EOF'` editing `manager/biz/rule.go` was recorded as `<root>/manager/biz/rule.go` — a path with no file behind it, while the real file one directory down was never given a baseline. The phantom entry then read as a change to nothing, the settle-window reconcile pruned it as a no-op, and the edit vanished without a trace: the hook log said `captured`, and the pending panel stayed empty. Nothing looked broken, which is why this went unnoticed — one workspace turned out to have lost 47 captures this way, and in a repository of submodules `cd <subdir> && <write>` is simply how most write commands are shaped. Candidate paths now carry the directory the command actually runs in, tracked segment by segment so ordering is respected: in `cd sub && sed -i b.go` the edit lands in `sub`, while in `sed -i a.go && cd sub` it does not.
+- **A document written with a heredoc no longer scrambles the capture of everything after it.** Plans and notes get written with `cat >> plan.md <<'PLAN'`, and their bodies quote shell examples — one real command carried seven `cd` lines of prose. A heredoc body is data, not commands, so those are no longer followed; only the directory in force where the heredoc was opened applies to what the body names.
+- **A directory the hook cannot work out is no longer guessed at.** `cd "$W"` is resolved when `W` was assigned a literal earlier in the same command, which is how these commands are typically written. When it cannot be — `$HOME`, `$(pwd)`, a name never set — the relative target is skipped and logged as `skip-unknown-cwd` instead of being pinned to the session directory. Guessing was how the original bug produced entries pointing at real but unrelated files.
+
+### Internal
+
+- Verified by replaying 9,091 real `Bash` commands through the old and new path scanners: 266 now resolve to a file that exists where they previously did not, and nothing that resolved correctly before stopped doing so. The heredoc problem above was found by that replay, not before it.
+- Resolving a long chain of relative `cd`s is quadratic — 120 ms for a single 64 KB command, on a hook that runs synchronously ahead of every shell call. A path longer than `PATH_MAX` cannot be opened anyway, so tracking stops there; the same worst case now costs 37 ms.
+- Hook tests go from 57 to 86 (156 unit assertions unchanged), covering ordering, `..`, heredoc bodies, variable expansion, the unknown-directory cases, and the size bound.
+
+### Notes
+
+- **No need to re-run Setup Hook.** The hook script is synced automatically and running Claude sessions pick it up on their next tool call.
+
 ## [1.13.2] — 2026-08-13
 
 ### Internal

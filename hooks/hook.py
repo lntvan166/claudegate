@@ -9,6 +9,7 @@ sessions in different projects don't interfere with each other.
 from __future__ import annotations
 
 import sys
+import bisect
 import json
 import os
 import re
@@ -286,9 +287,14 @@ _SED_EXPR_RE = re.compile(r"^[0-9,]*[sy]([^\w\s])")
 
 
 def _lex(text: str) -> list:
-    """Quote-aware shell-ish lexer. Returns [(kind, value)] with kind in
+    """Quote-aware shell-ish lexer. Returns [(kind, value, offset)] with kind in
     {"word", "sep", "redir"}. Quotes are stripped and their contents joined onto
-    the surrounding word, so `p='a/b.go'` lexes as one word `p=a/b.go`."""
+    the surrounding word, so `p='a/b.go'` lexes as one word `p=a/b.go`.
+
+    `offset` is where the token starts in `text`. It exists so a candidate found
+    by a regex over the raw text — a redirection target, a quoted literal inside
+    a heredoc — can be attributed to the command segment it sits in, and so pick
+    up that segment's working directory."""
     tokens: list = []
     i, n = 0, len(text)
     while i < n:
@@ -296,15 +302,16 @@ def _lex(text: str) -> list:
         if c in " \t\r":
             i += 1
             continue
+        start = i
         if c in _SEP_CHARS:
             while i < n and text[i] in _SEP_CHARS:
                 i += 1
-            tokens.append(("sep", ""))
+            tokens.append(("sep", "", start))
             continue
         if c in _REDIR_CHARS:
             while i < n and text[i] in _REDIR_CHARS:
                 i += 1
-            tokens.append(("redir", ""))
+            tokens.append(("redir", "", start))
             continue
         buf: list = []
         while i < n:
@@ -322,21 +329,23 @@ def _lex(text: str) -> list:
                 continue
             buf.append(c)
             i += 1
-        tokens.append(("word", "".join(buf)))
+        tokens.append(("word", "".join(buf), start))
     return tokens
 
 
 def _segments(tokens: list) -> list:
-    """Split lexed tokens into command segments. The word following a
-    redirection operator is dropped — `patch < fix.diff` reads that file, and
+    """Split lexed tokens into command segments, as [(words, offset)] where
+    offset is where the segment starts in the original text. The word following
+    a redirection operator is dropped — `patch < fix.diff` reads that file, and
     `> out` targets are harvested separately by _REDIRECT_RE."""
     segs: list = []
     cur: list = []
+    cur_start = 0
     skip_next = False
-    for kind, value in tokens:
+    for kind, value, pos in tokens:
         if kind == "sep":
             if cur:
-                segs.append(cur)
+                segs.append((cur, cur_start))
             cur, skip_next = [], False
         elif kind == "redir":
             skip_next = True
@@ -344,9 +353,11 @@ def _segments(tokens: list) -> list:
             if skip_next:
                 skip_next = False
                 continue
+            if not cur:
+                cur_start = pos
             cur.append(value)
     if cur:
-        segs.append(cur)
+        segs.append((cur, cur_start))
     return segs
 
 
@@ -417,10 +428,12 @@ def _names_a_file(tok: str, cwd: str | None) -> bool:
     """
     if _EXT_RE.search(os.path.basename(tok)):
         return True
-    if not cwd:
+    # An absolute path is checkable on its own; only a relative one needs to know
+    # which directory it hangs off.
+    if not os.path.isabs(tok) and not cwd:
         return False
     try:
-        return os.path.isfile(os.path.join(cwd, tok))
+        return os.path.isfile(tok if os.path.isabs(tok) else os.path.join(cwd, tok))
     except (OSError, ValueError):
         return False
 
@@ -439,10 +452,11 @@ _DQ_LITERAL_RE = re.compile(r'"([^"]*)"')
 
 
 def _quoted_literals(text: str) -> list:
+    """[(literal, offset)] — the offset attributes the literal to its segment."""
     out: list = []
     for pattern in (_SQ_LITERAL_RE, _DQ_LITERAL_RE):
         for m in pattern.finditer(text):
-            out.append(m.group(1))
+            out.append((m.group(1), m.start(1)))
     return out
 
 
@@ -526,12 +540,182 @@ def _tool_targets(words: list):
     return None
 
 
+# `<<EOF`, `<<-'EOF'`, `<<"EOF"` — the delimiter that ends the body.
+_HEREDOC_RE = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+# How many heredoc bodies we bother to map. Mapping them is linear in the text
+# (each closer search resumes where the last body ended), so this is a sanity
+# bound rather than a hot limit; the extras simply keep their `cd` tracking.
+_MAX_HEREDOCS = 256
+
+
+def _heredoc_spans(text: str) -> list:
+    """`[(start, end)]` of every heredoc BODY, ordered and non-overlapping.
+
+    A heredoc body is data, not shell. Plans and docs get written with
+    `cat >> plan.md <<'PLAN'`, and their bodies quote shell examples — one real
+    command carried seven `cd svc-lib` lines of prose. Honouring those as
+    directory changes stacked them up and sent every later candidate into
+    `<root>/svc-lib/svc-lib/...`, turning captures that had been correct into
+    phantoms.
+
+    Candidates are still harvested from the body — that is Tier 2c, and the
+    python heredoc is the main shell-capture path. They simply resolve against
+    the directory in force where the heredoc was opened.
+    """
+    spans: list = []
+    pos = 0
+    for m in _HEREDOC_RE.finditer(text):
+        if len(spans) >= _MAX_HEREDOCS:
+            break
+        if m.start() < pos:      # inside a body we already mapped
+            continue
+        nl = text.find("\n", m.end())
+        if nl == -1:
+            continue
+        body = nl + 1
+        closer = re.compile(r"^[ \t]*" + re.escape(m.group(2)) + r"[ \t]*$", re.M)
+        found = closer.search(text, body)
+        # An unterminated heredoc runs to the end of the command — it is still a
+        # body, and its contents still must not steer the working directory.
+        end = found.start() if found else len(text)
+        if end > body:
+            spans.append((body, end))
+        pos = found.end() if found else len(text)
+    return spans
+
+
+# `$W`, `${W}` — only the plain forms. Anything fancier (`${W:-x}`, `$(cmd)`)
+# leaves a `$` behind and the destination stays unknowable.
+_VAR_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+_ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
+
+
+def _expand_vars(value: str, env: dict) -> str | None:
+    """Substitute the literal assignments we have seen, or None if we cannot.
+
+    `W=/tmp/wt-sandbox` followed by `cd "$W"` is how these commands are written
+    in practice; without this the cd is unknowable and every relative target
+    after it is dropped. Only literals seen earlier in the same command are
+    substituted — the real environment is not consulted, so `$HOME` and
+    `$(pwd)` stay unknowable rather than being resolved against a process whose
+    directory is not the session's.
+    """
+    if "$" not in value:
+        return value
+    missing = False
+
+    def sub(m):
+        nonlocal missing
+        got = env.get(m.group(1) or m.group(2))
+        if got is None:
+            missing = True
+            return ""
+        return got
+
+    out = _VAR_REF_RE.sub(sub, value)
+    if missing or "$" in out:
+        return None
+    return out
+
+
+def _leading_assignments(words: list) -> list:
+    """The `VAR=value` words that prefix a segment. Shell only treats an
+    assignment as one before the command name; after it they are arguments."""
+    out: list = []
+    for w in words:
+        m = _ASSIGN_RE.match(w)
+        if not m:
+            break
+        out.append((m.group(1), m.group(2)))
+    return out
+
+
+# Shapes whose `cd` destination we cannot evaluate from the command text alone:
+# a variable, a substitution, a glob, a brace expansion.
+_UNKNOWABLE_CD_CHARS = frozenset("$`*?()[]{}")
+# PATH_MAX. A directory path longer than this cannot be opened, so it cannot
+# name a file we could baseline.
+_MAX_CWD_LEN = 4096
+
+
+def _cd_destination(words: list):
+    """The argument of a plain `cd` segment, or None if the segment is not one.
+
+    Returns "" for a `cd` whose destination is knowable only at runtime — bare
+    `cd` (HOME), `cd -` (OLDPWD), or `cd a b`. Only an exact leading `cd` counts:
+    `(cd sub && ...)` lexes with the paren attached, so a subshell keeps the
+    old behaviour instead of leaking its cd past the closing `)`.
+    """
+    if not words or words[0] != "cd":
+        return None
+    args = [a for a in words[1:] if not a.startswith("-")]
+    return args[0] if len(args) == 1 else ""
+
+
+def _apply_cd(cur: str | None, dest: str) -> str | None:
+    """The directory after `cd dest`, or None when it cannot be known.
+
+    An unknown directory is deliberately sticky: once we have lost track of
+    where the shell is, resolving a later relative path against the session cwd
+    would invent a path with no file behind it. That invented entry is a no-op,
+    the reconcile prunes it, and the real edit is never captured — silently.
+    Dropping the candidate is the honest answer.
+    """
+    if not dest or cur is None:
+        return None
+    if dest.startswith("~") or any(c in dest for c in _UNKNOWABLE_CD_CHARS):
+        return None
+    out = os.path.normpath(dest if os.path.isabs(dest) else os.path.join(cur, dest))
+    # A chain of relative cds grows the path on every step, and normpath over an
+    # ever-longer string is quadratic — 120 ms for one 64 KiB command, on a hook
+    # that runs synchronously before every Bash call. Past PATH_MAX the directory
+    # cannot exist anyway, so give up on it; `None` is sticky, which ends the walk.
+    if len(out) > _MAX_CWD_LEN:
+        return None
+    return out
+
+
+def _segment_cwds(segments: list, cwd: str | None, heredocs: list):
+    """Return (starts, cwds) — the working directory in force for each segment.
+
+    Ordering is the whole point. In `cd sub && sed -i b.go` the sed runs in
+    <cwd>/sub, while in `sed -i a.go && cd sub` the sed runs in <cwd>; a single
+    "final cwd" for the command would get one of the two wrong.
+
+    Segments inside a heredoc body are data (see _heredoc_spans): they inherit
+    the directory in force where the heredoc was opened and never change it.
+    """
+    starts: list = []
+    cwds: list = []
+    hd_starts = [a for a, _ in heredocs]
+    env: dict = {}
+    eff = cwd
+    for words, start in segments:
+        starts.append(start)
+        cwds.append(eff)
+        i = bisect.bisect_right(hd_starts, start) - 1
+        if i >= 0 and start < heredocs[i][1]:
+            continue                      # heredoc body — prose, not a command
+        for name, value in _leading_assignments(words):
+            expanded = _expand_vars(value, env)
+            if expanded is None:
+                env.pop(name, None)       # now holds something we cannot know
+            else:
+                env[name] = expanded
+        dest = _cd_destination(words)
+        if dest is not None:
+            expanded = _expand_vars(dest, env) if dest else dest
+            eff = _apply_cd(eff, expanded) if expanded is not None else None
+    return starts, cwds
+
+
 def _scan_command(command: str, cwd: str | None = None):
     """Return (may_write, candidates). Never raises for ordinary input.
 
-    `cwd` is only consulted to test whether a *speculative* (Tier 2c) candidate
-    already exists on disk; every other decision is a pure function of the
-    command text.
+    Each candidate is returned as `(path, cwd)`: a relative path means nothing
+    without the directory the command actually runs in, which a `cd` inside the
+    command can move. `cwd` seeds that and is also what a *speculative*
+    (Tier 2c) candidate's existence is probed against.
     """
     if not command or not isinstance(command, str):
         return False, []
@@ -541,20 +725,32 @@ def _scan_command(command: str, cwd: str | None = None):
     ordered: list = []
     seen: set = set()
 
-    def add(tok: str, require_shape: bool) -> None:
+    tokens = _lex(text)
+    segments = _segments(tokens)
+    seg_starts, seg_cwds = _segment_cwds(segments, cwd, _heredoc_spans(text))
+
+    def cwd_at(offset: int):
+        """The working directory in force at this point in the command text."""
+        i = bisect.bisect_right(seg_starts, offset) - 1
+        return seg_cwds[i] if i >= 0 else cwd
+
+    def add(tok: str, require_shape: bool, tok_cwd: str | None) -> None:
         tok = _normalize_token(tok)
         if not _plausible(tok):
             return
         # require_shape marks the speculative pass. Explicit targets (redirection,
         # in-place tool arguments) skip both checks — they are write targets by
         # definition, extension or not (`cat > Makefile`).
-        if require_shape and not (_path_shaped(tok) and _names_a_file(tok, cwd)):
+        if require_shape and not (_path_shaped(tok) and _names_a_file(tok, tok_cwd)):
             return
-        if tok in seen:
+        # The same relative token under two directories is two different files,
+        # so the directory is part of the identity.
+        key = (tok, tok_cwd)
+        if key in seen:
             return
-        seen.add(tok)
+        seen.add(key)
         if len(ordered) < MAX_CANDIDATES:
-            ordered.append(tok)
+            ordered.append((tok, tok_cwd))
 
     # Tier 2a — explicit redirection targets (write targets by definition, so
     # they need no path shape: `cat > f <<EOF` names `f`).
@@ -562,17 +758,16 @@ def _scan_command(command: str, cwd: str | None = None):
         target = _strip_quotes(m.group(1))
         if target and not _is_device(target):
             may_write = True
-            add(target, False)
+            add(target, False, cwd_at(m.start()))
 
     # Tier 1/2b — known in-place writer tools and their arguments.
-    tokens = _lex(text)
-    for segment in _segments(tokens):
+    for (segment, start), seg_cwd in zip(segments, seg_cwds):
         targets = _tool_targets(segment)
         if targets is None:
             continue
         may_write = True
         for t in targets:
-            add(t, False)
+            add(t, False, seg_cwd)
 
     # Tier 1 — in-language writes (python heredocs and -c one-liners).
     if _OPEN_WRITE_RE.search(text) or _WRITE_CALL_RE.search(text):
@@ -583,11 +778,11 @@ def _scan_command(command: str, cwd: str | None = None):
     #   p='manager/biz/monitor_filter.go'   ← harvested here
     #   open(p,'w').write(s)                ← fires Tier 1
     if may_write:
-        for kind, value in tokens:
+        for kind, value, pos in tokens:
             if kind == "word":
-                add(value, True)
-        for literal in _quoted_literals(text):
-            add(literal, True)
+                add(value, True, cwd_at(pos))
+        for literal, pos in _quoted_literals(text):
+            add(literal, True, cwd_at(pos))
 
     return may_write, ordered
 
@@ -599,9 +794,14 @@ def command_may_write(command: str) -> bool:
 
 
 def paths_from_command(command: str, cwd: str | None = None) -> list:
-    """Tier 2 — candidate write targets, deduplicated, in discovery order.
-    Gated on Tier 1: a command that cannot write yields no candidates at all,
-    so `cat file.go` and `grep -r foo .` extract nothing.
+    """Tier 2 — candidate write targets as `(path, cwd)`, deduplicated, in
+    discovery order. Gated on Tier 1: a command that cannot write yields no
+    candidates at all, so `cat file.go` and `grep -r foo .` extract nothing.
+
+    Each candidate carries the directory it resolves against, because a `cd`
+    inside the command moves it: `cd sub && sed -i x.go` writes <cwd>/sub/x.go.
+    A `cwd` of None means the directory is unknowable (`cd "$REPO"`) and the
+    caller must drop the candidate rather than guess.
 
     Pass the tool call's `cwd` so an extensionless speculative candidate can be
     confirmed against the filesystem. Without it such candidates are dropped —
@@ -700,9 +900,16 @@ def main() -> None:
     except Exception:
         log_event("error")
         sys.exit(0)
-    for candidate in candidates:
+    for candidate, candidate_cwd in candidates:
+        # A relative path whose directory the command made unknowable (`cd
+        # "$REPO"`) must be dropped. Falling back to the session cwd would
+        # record a path with no file behind it: a no-op entry the reconcile
+        # prunes, while the real edit goes uncaptured and unnoticed.
+        if not os.path.isabs(candidate) and not candidate_cwd:
+            log_event("skip-unknown-cwd", candidate)
+            continue
         try:
-            capture_file(candidate, cwd, session_id, captured_at)
+            capture_file(candidate, candidate_cwd or cwd, session_id, captured_at)
         except Exception:
             # One bad candidate must not cost us the rest of the command.
             log_event("error")
