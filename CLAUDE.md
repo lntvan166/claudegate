@@ -427,8 +427,14 @@ bundling it produces a build that fails at require time. Add
 
 Keep `test:integration` out of `npm test`. It downloads VS Code on first run and
 takes tens of seconds; `npm test` should stay fast enough to run on every save.
-Run it before a release, and in CI as its own job — headless Linux needs
-`xvfb-run -a npm run test:integration`.
+Run it before a release, and in CI as its own job.
+
+**Watching it run.** `npm run test:integration` on a machine with a display opens
+a real VS Code window: it switches tabs, selects rows and opens diffs, then closes
+itself. The whole suite is about three seconds, so it is easy to miss. Prefixing
+`xvfb-run -a` renders to a virtual framebuffer instead — nothing appears on
+screen. Use `xvfb-run` for CI and headless boxes, and plain
+`npm run test:integration` when you want to see the editor being driven.
 
 #### Verifying against a real workspace
 
@@ -449,6 +455,74 @@ Two rules for that variant. Keep the temp `$HOME` — a real *workspace* is fine
 a real `~/.claudegate` is not. And keep the assertions read-only, or point it at
 a scratch clone: `acceptAll` against a repo you care about is not a test, it is
 an incident.
+
+## Every Panel Action Must Span the Same Sessions the Panel Draws
+
+All three panels render rows from **two** sources: the primary session and every
+attached worktree session. Their counts already reflect that —
+`worktreeRegistry.totalPending()/totalAccepted()/totalRejected()` are summed into
+the badge and into the `claudegate.*Count` context keys that gate view
+visibility. An action that reads or writes `sessionManager` alone therefore acts
+on a *subset* of what the user is looking at.
+
+The failure is worse than a partial result, because these commands open with a
+`count === 0` early return computed from the primary session. With the pending
+or record set living entirely inside a worktree, the button did nothing **and
+said nothing** — no error, no message, the rows simply stayed. Reported from the
+field as "accepted clear not clear file in worktree".
+
+- **Bulk actions** go through `reviewScopes(primary, registry)` in
+  `src/reviewScopes.ts` — the primary followed by every attached worktree — and
+  apply to each scope. Counts for the confirmation prompt come from
+  `countAcceptedAcross` / `countRejectedAcross` / `pendingAcross` over that same
+  set, so the number in the modal is the number the panel shows. This covers
+  `acceptAll`, `rejectAll`, `clearAccepted`, `clearRejected`, `revertAcceptedAll`
+  and `reapplyAll`.
+- **Per-file and per-folder actions** resolve their owner with
+  `managerFor(path)`. `pendingAcross` pairs each file with its owning manager for
+  exactly this reason. `acceptFolder`/`rejectFolder`/`revertAccepted`/
+  `reapplyFile` already did; `revertAcceptedFolder` and `reapplyFolder` did not,
+  and were silent no-ops on any folder row inside a worktree group.
+
+When adding an action to these panels, ask which of the two shapes it is. There
+is no third shape, and "the primary session" is never the answer.
+
+---
+
+## Revealing the Active File in the Pending Panel
+
+`onDidChangeActiveTextEditor` reveals the active file's row (`extension.ts`).
+Three things about it are load-bearing and each was learned by getting it wrong:
+
+- **`getParent()` is derived, not written.** `TreeView.reveal()` is unusable
+  without it, but hand-writing it would duplicate the tree's shape across list
+  mode, tree mode, group-by-session, nested folders and worktree groups.
+  `FilteredTreeProvider.chainTo()` instead walks `getChildren()` down from the
+  root, recording each child→parent link, and prunes branches by path prefix.
+  The layout rules stay in one place. The link map is cleared on every
+  `onDidChangeTreeData` fire (`fireChanged()`) so a stale parent can never be
+  handed to `reveal()`.
+- **`{ select: true, focus: true }`.** Focus and selection are *different* things
+  in a VS Code tree, and a row shows its inline Accept/Reject actions when it is
+  either. Revealing with `focus: false` left the previously clicked row focused
+  and the revealed row merely selected — two rows wearing ✓/✗ at once. Measured
+  in a real host: `focus: true` does **not** take keyboard focus from the editor;
+  `activeTextEditor` is unchanged across the reveal. An earlier comment here
+  claimed the opposite, which is why it first shipped as `focus: false`.
+  `{ select: false, focus: false }` is worse still — it only scrolls, so a row
+  already on screen gets no indication at all and the feature looks dead.
+- **Selecting a row is what opens its diff**, so a selecting reveal would pop a
+  diff open on every tab switch. `revealingPath` marks the window in which a
+  selection is ours; the selection handler consumes the mark instead of opening.
+  It is cleared by the matching event, with `REVEAL_GUARD_MS` only as a backstop,
+  because `reveal()` crosses the ext-host/renderer boundary and the selection can
+  arrive after its promise resolves.
+
+The reveal is coalesced and runs only while the panel is visible; `chainTo()` is
+pure in-memory work with no disk I/O, so it stays off the expensive-trigger list
+in **Extension-Host Responsiveness**.
+
+---
 
 ## Subagent / Background-Task Git Safety
 

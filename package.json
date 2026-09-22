@@ -2,7 +2,7 @@
   "name": "claudegate",
   "displayName": "Claude Gate",
   "description": "Review Claude Code's file changes in a native diff panel — accept or reject each edit. The PreToolUse hook captures all Claude Code edits (terminal CLI and in-editor extension); the filesystem watcher is an optional fallback for non-Claude agents and is off by default.",
-  "version": "1.13.3",
+  "version": "1.14.0",
   "publisher": "lntvan166",
   "icon": "media/icon.png",
   "engines": {
@@ -254,8 +254,14 @@
         "title": "Claude Gate: Reject Current Diff"
       },
       {
+        "command": "claudegate.openActiveDiff",
+        "title": "Claude Gate: View Diff",
+        "icon": "$(diff)"
+      },
+      {
         "command": "claudegate.openFile",
-        "title": "Claude Gate: Open File"
+        "title": "Claude Gate: Open File",
+        "icon": "$(go-to-file)"
       },
       {
         "command": "claudegate.openToSide",
@@ -312,10 +318,25 @@
       {
         "command": "claudegate.toggleHistoryEnabled",
         "title": "Claude Gate: Toggle Session History"
+      },
+      {
+        "command": "claudegate.filterPending",
+        "title": "Claude Gate: Filter Pending Files",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "claudegate.clearPendingFilter",
+        "title": "Claude Gate: Clear Pending Filter",
+        "icon": "$(filter-filled)"
       }
     ],
     "menus": {
       "editor/title": [
+        {
+          "command": "claudegate.openActiveDiff",
+          "when": "claudegate.activeFileIsPending && !claudegate.activeIsClaudeGateDiff",
+          "group": "navigation@0"
+        },
         {
           "command": "claudegate.acceptFile",
           "when": "claudegate.activeFileIsPending",
@@ -328,6 +349,16 @@
         }
       ],
       "view/title": [
+        {
+          "command": "claudegate.filterPending",
+          "when": "view == claudegate.pendingPanel && !claudegate.hasPendingFilter",
+          "group": "navigation@0"
+        },
+        {
+          "command": "claudegate.clearPendingFilter",
+          "when": "view == claudegate.pendingPanel && claudegate.hasPendingFilter",
+          "group": "navigation@0"
+        },
         {
           "command": "claudegate.viewAsTree",
           "when": "view == claudegate.pendingPanel && claudegate.viewMode == 'list'",
@@ -374,16 +405,6 @@
           "group": "navigation@4"
         },
         {
-          "command": "claudegate.reviewAllPending",
-          "when": "view == claudegate.pendingPanel",
-          "group": "navigation@5"
-        },
-        {
-          "command": "claudegate.copyReviewFeedback",
-          "when": "view == claudegate.pendingPanel",
-          "group": "navigation@6"
-        },
-        {
           "command": "claudegate.revertAcceptedAll",
           "when": "view == claudegate.acceptedPanel && claudegate.acceptedCount > 0",
           "group": "navigation@1"
@@ -419,6 +440,11 @@
           "command": "claudegate.rejectFile",
           "when": "view == claudegate.pendingPanel && viewItem == claudegate.file.pending",
           "group": "inline@2"
+        },
+        {
+          "command": "claudegate.openFile",
+          "when": "view == claudegate.pendingPanel && viewItem == claudegate.file.pending",
+          "group": "inline@3"
         },
         {
           "command": "claudegate.acceptFolder",
@@ -686,6 +712,12 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "Write a diagnostic log of the capture hook's decisions to `~/.claudegate/hook.log` (captured / skipped / errors). Useful when Claude's edits aren't being captured. Off by default; the log is a bounded rolling file, kept local."
+        },
+        "claudegate.pendingAge.minDays": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "markdownDescription": "Show how long a file has been waiting in the **Pending** panel, for files at least this many days old. `0` (the default) shows no age on any row. Set `1` to label anything a day or older, or a larger number such as `14` to mark only long-stale files. The exact capture time is always available in the row's hover tooltip, whatever this is set to."
         }
       }
     },
@@ -763,18 +795,23 @@
     "watch": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --platform=node --sourcemap --watch",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext ts",
-    "test:unit": "esbuild src/excludeMatcher.test.ts --bundle --platform=node --format=cjs --outfile=out/excludeMatcher.test.cjs && node out/excludeMatcher.test.cjs && esbuild src/changeCount.test.ts --bundle --platform=node --format=cjs --outfile=out/changeCount.test.cjs && node out/changeCount.test.cjs && esbuild src/reviewFeedback.test.ts --bundle --platform=node --format=cjs --outfile=out/reviewFeedback.test.cjs && node out/reviewFeedback.test.cjs && esbuild src/reviewModel.test.ts --bundle --platform=node --format=cjs --outfile=out/reviewModel.test.cjs && node out/reviewModel.test.cjs && esbuild src/workspaceScope.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/workspaceScope.test.cjs && node out/workspaceScope.test.cjs && esbuild src/sessionManager.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/sessionManager.test.cjs && node out/sessionManager.test.cjs && esbuild src/hookInstaller.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/hookInstaller.test.cjs && node out/hookInstaller.test.cjs && esbuild src/worktrees.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/worktrees.test.cjs && node out/worktrees.test.cjs && esbuild src/worktreeSessionRegistry.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/worktreeSessionRegistry.test.cjs && node out/worktreeSessionRegistry.test.cjs && esbuild src/worktreePanel.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/worktreePanel.test.cjs && node out/worktreePanel.test.cjs && esbuild src/historyModel.test.ts --bundle --platform=node --format=cjs --outfile=out/historyModel.test.cjs && node out/historyModel.test.cjs && esbuild src/historyPanel.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/historyPanel.test.cjs && node out/historyPanel.test.cjs && esbuild src/saveEdits.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/saveEdits.test.cjs && node out/saveEdits.test.cjs && esbuild src/reviewNav.test.ts --bundle --platform=node --format=cjs --outfile=out/reviewNav.test.cjs && node out/reviewNav.test.cjs && esbuild src/sessionGc.test.ts --bundle --platform=node --format=cjs --outfile=out/sessionGc.test.cjs && node out/sessionGc.test.cjs && esbuild src/reviewPanel.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/reviewPanel.test.cjs && node out/reviewPanel.test.cjs && esbuild src/scheduling.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/scheduling.test.cjs && node out/scheduling.test.cjs && esbuild src/safeLog.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/safeLog.test.cjs && node out/safeLog.test.cjs",
+    "test:unit": "esbuild src/excludeMatcher.test.ts --bundle --platform=node --format=cjs --outfile=out/excludeMatcher.test.cjs && node out/excludeMatcher.test.cjs && esbuild src/changeCount.test.ts --bundle --platform=node --format=cjs --outfile=out/changeCount.test.cjs && node out/changeCount.test.cjs && esbuild src/reviewFeedback.test.ts --bundle --platform=node --format=cjs --outfile=out/reviewFeedback.test.cjs && node out/reviewFeedback.test.cjs && esbuild src/reviewModel.test.ts --bundle --platform=node --format=cjs --outfile=out/reviewModel.test.cjs && node out/reviewModel.test.cjs && esbuild src/workspaceScope.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/workspaceScope.test.cjs && node out/workspaceScope.test.cjs && esbuild src/sessionManager.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/sessionManager.test.cjs && node out/sessionManager.test.cjs && esbuild src/hookInstaller.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/hookInstaller.test.cjs && node out/hookInstaller.test.cjs && esbuild src/worktrees.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/worktrees.test.cjs && node out/worktrees.test.cjs && esbuild src/worktreeSessionRegistry.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/worktreeSessionRegistry.test.cjs && node out/worktreeSessionRegistry.test.cjs && esbuild src/worktreePanel.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/worktreePanel.test.cjs && node out/worktreePanel.test.cjs && esbuild src/historyModel.test.ts --bundle --platform=node --format=cjs --outfile=out/historyModel.test.cjs && node out/historyModel.test.cjs && esbuild src/historyPanel.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/historyPanel.test.cjs && node out/historyPanel.test.cjs && esbuild src/saveEdits.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/saveEdits.test.cjs && node out/saveEdits.test.cjs && esbuild src/reviewNav.test.ts --bundle --platform=node --format=cjs --outfile=out/reviewNav.test.cjs && node out/reviewNav.test.cjs && esbuild src/sessionGc.test.ts --bundle --platform=node --format=cjs --outfile=out/sessionGc.test.cjs && node out/sessionGc.test.cjs && esbuild src/reviewPanel.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/reviewPanel.test.cjs && node out/reviewPanel.test.cjs && esbuild src/scheduling.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/scheduling.test.cjs && node out/scheduling.test.cjs && esbuild src/safeLog.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/safeLog.test.cjs && node out/safeLog.test.cjs && esbuild src/revealChain.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/revealChain.test.cjs && node out/revealChain.test.cjs && esbuild src/reviewScopes.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/reviewScopes.test.cjs && node out/reviewScopes.test.cjs && esbuild src/panelFilter.test.ts --bundle --platform=node --format=cjs --outfile=out/panelFilter.test.cjs && node out/panelFilter.test.cjs && esbuild src/decorationProvider.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/decorationProvider.test.cjs && node out/decorationProvider.test.cjs && esbuild src/pendingAge.test.ts --bundle --platform=node --format=cjs --outfile=out/pendingAge.test.cjs && node out/pendingAge.test.cjs",
     "test:hook": "python3 -m unittest discover -s hooks/tests -p 'test_*.py'",
-    "test": "npm run test:unit && npm run test:hook"
+    "test": "npm run test:unit && npm run test:hook",
+    "build:itest": "esbuild src/integration/runTests.ts src/integration/index.ts src/integration/*.itest.ts --bundle --platform=node --format=cjs --external:vscode --external:mocha --external:@vscode/test-electron --outdir=out/integration",
+    "test:integration": "npm run compile && npm run build:itest && node out/integration/runTests.js"
   },
   "devDependencies": {
     "@types/diff": "^8.0.0",
+    "@types/mocha": "^10.0.10",
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",
+    "@vscode/test-electron": "^3.1.0",
     "esbuild": "^0.28.0",
     "eslint": "^8.0.0",
+    "mocha": "^12.0.2",
     "typescript": "^5.3.0"
   },
   "dependencies": {

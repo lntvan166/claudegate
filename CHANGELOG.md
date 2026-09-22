@@ -7,6 +7,36 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.14.0] — 2026-09-22
+
+### Added
+
+- **The Pending panel now follows the file you are looking at.** Opening a pending file in an ordinary editor — or stepping into its diff — selects its row in the panel and expands the folders above it, so the list and the editor stop drifting apart during a review. Keyboard focus stays in the editor; the sidebar never steals it. Revealing deliberately does not open a diff, which matters because selecting a row is exactly what opens one: without that guard, merely switching tabs would have popped a diff editor open every time.
+- **A View Diff button in the editor title bar.** While you are in a pending file, a `⇄` button sits beside the existing Accept and Reject actions and opens the same comparison the panel does — original against current, with the change count in the title and the view scrolled to the first change. It is also bindable as **Claude Gate: View Diff**. The button hides inside a Claude Gate diff, where it would only reopen what you are already reading.
+- **An Open File button on pending rows.** Clicking a row opens the diff, which is right for reviewing but wrong when you just want to edit the file. A third inline action, to the right of Accept and Reject, opens the file itself.
+- **A filter for the Pending panel.** A funnel in the panel title takes a substring and narrows the tree to matching rows — a file (`auth`), a directory (`pkg/ws`), or an entire worktree. The view title reports `auth — 4 of 16` while it is active, because a filtered panel showing four rows is otherwise indistinguishable from a panel with four pending files, and a forgotten filter would read as a finished review. The filter is held by the panel rather than by VS Code's find widget, so it survives the refreshes that fire on every accept — which is precisely when it is in use. **Accept All and Reject All still act on everything**, filtered or not; when the two numbers differ they say so and ask first.
+- **Optional age on a pending row, off by default.** `claudegate.pendingAge.minDays` labels files that have been waiting at least that many days (`1` for anything a day old, `14` for only the long-stale). At `0`, the default, no row carries a label. The exact capture time is always in the row's hover tooltip regardless, so leaving it off loses nothing.
+
+### Changed
+
+- **Files Claude created are now visually distinct from files it edited.** Every pending file was painted with git's *modified* colour, including the ones Claude had written from scratch — overpainting the untracked green git would otherwise give them, in the panel and in the Explorer alike. A new file now carries git's untracked colour and an edited file keeps the modified one. These are theme colours rather than git state, so a workspace with no git repository renders identically. The `!` badge is unchanged, deliberately: a letter there would collide with git's own `A`/`R`.
+- **Review All Pending and Copy Feedback to AI are no longer buttons in the Pending title bar.** Both remain available from the command palette and can be bound to a key.
+
+### Fixed
+
+- **Bulk actions no longer silently skip files inside a git worktree.** The panels draw rows from the primary session *and* from every attached worktree, and the counts that decide whether a view is even visible already summed both. The actions did not: they read and wrote the primary session alone. Where the pending files or decision records lived entirely inside a worktree, the command's own `count === 0` check fired first and the button did nothing at all — no error, no message, the rows simply stayed. Reported as "Clear Accepted does not clear files in a worktree". **Accept All**, **Reject All**, **Clear Accepted**, **Clear Rejected**, **Revert All Accepted** and **Re-apply All** now act on every session the panel draws from, and the count in the confirmation prompt is the count on screen. Reject All is the worst of the six, because it rewrites files on disk: a worktree's files previously kept Claude's version while the panel reported everything rejected.
+- **Revert Folder and Re-apply Folder work on a folder inside a worktree.** Both resolved the folder against the primary session, which holds no record for it, so both were silent no-ops on any folder row inside a worktree group. Their per-file counterparts already resolved the owning session correctly.
+
+### Internal
+
+- An integration suite now drives a **real VS Code** (`npm run test:integration`, 18 tests): it launches the editor with the extension loaded and a seeded multi-worktree workspace, then exercises command registration against the manifest, the reveal behaviour, the title-bar diff, the filter, and the worktree fan-out. This covers the class of bug the unit stub structurally cannot see — three of the fixes above were found or confirmed by it. Each assertion was checked by reverting the corresponding fix and watching the suite fail, rather than trusting a green run.
+- `CLAUDE.md` gains two sections: one recording that any panel action must span the same sessions the panel draws from (and that "the primary session" is never the answer), and one on revealing the active file — in particular that a tree's focus and its selection are different things, and that a row shows its inline actions when it is either.
+- Unit coverage goes from 156 to 182 assertions, plus 86 hook tests.
+
+### Notes
+
+- **No need to re-run Setup Hook.** No hook changes in this release.
+
 ## [1.13.3] — 2026-09-17
 
 ### Fixed

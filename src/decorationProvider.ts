@@ -2,9 +2,22 @@ import * as vscode from "vscode";
 import { SessionManager } from "./sessionManager";
 import { isExcluded, isProtected } from "./workspaceScope";
 
-const COLORS: Record<string, vscode.ThemeColor> = {
-  pending: new vscode.ThemeColor("gitDecoration.modifiedResourceForeground"),
-};
+// Colours are git's OWN semantic theme colours, deliberately — not an invented
+// palette. A file Claude created is untracked-green, a file Claude edited is
+// modified-orange, which is what git would say about them anyway. Agreeing with
+// git means the decoration reinforces it instead of fighting it in the Explorer,
+// where a FileDecorationProvider's colour necessarily also lands (decorations are
+// keyed by URI; there is no API to scope one to a single view).
+//
+// These resolve from the active THEME, not from git state, so a workspace with
+// no git repo — or a machine with no git at all — renders exactly the same.
+const COLOR_MODIFIED = new vscode.ThemeColor("gitDecoration.modifiedResourceForeground");
+const COLOR_NEW      = new vscode.ThemeColor("gitDecoration.untrackedResourceForeground");
+
+/** Claude created this file (no baseline) vs. edited an existing one. */
+export function isNewFile(entry: { originalContent: string | null }): boolean {
+  return entry.originalContent === null;
+}
 
 const BADGES: Record<string, string> = {
   pending: "!",
@@ -47,11 +60,17 @@ export class ClaudeGateDecorationProvider
       };
     }
 
+    // Until now every pending file got the "modified" colour, including the ones
+    // Claude had CREATED — overpainting the green git gives an untracked file and
+    // hiding the new/modified distinction in both the panel and the Explorer.
     const s = entry.reviewStatus;
+    const isNew = isNewFile(entry);
     return {
       badge: BADGES[s],
-      color: COLORS[s],
-      tooltip: TOOLTIPS[s] ?? `Claude Gate: ${s}`,
+      color: isNew ? COLOR_NEW : COLOR_MODIFIED,
+      tooltip: isNew
+        ? "Claude Gate: pending review — new file"
+        : TOOLTIPS[s] ?? `Claude Gate: ${s}`,
       propagate: false,
     };
   }

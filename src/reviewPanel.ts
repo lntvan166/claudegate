@@ -4,9 +4,11 @@ import * as fs from "fs";
 import { SessionManager, ReviewStatus, Session, FileEntry, ReviewRecord } from "./sessionManager";
 import { WorktreeSessionRegistry } from "./worktreeSessionRegistry";
 import { openDiff } from "./diffProvider";
-import { isInWorkspace, isExcluded, isProtected } from "./workspaceScope";
+import { isInWorkspace, isExcluded, isProtected, pathIsUnder } from "./workspaceScope";
 import { countChanges, formatChangeCount } from "./changeCount";
 import { createCoalescer } from "./scheduling";
+import { matchesFilter, normalizeFilter } from "./panelFilter";
+import { ageLabel, rowDescription, ageTooltipLine } from "./pendingAge";
 
 // How long a burst of session changes is collected before the tree repaints
 // once. Short enough to feel instant, long enough to swallow the persist() +
@@ -47,6 +49,17 @@ function relativeDir(filePath: string): string {
 // (ReviewRecord.sessionId).
 function matchesSession(itemSessionId: string | undefined, sessionId: string | null): boolean {
   return sessionId === null ? !itemSessionId : itemSessionId === sessionId;
+}
+
+// Path comparison for the reveal walk. Exact first (fast, and always right);
+// case-folded only on win32, where the editor URI's drive-letter case can differ
+// from the hook-stored session key — the same tolerance fileEntryFor() applies.
+export function samePath(
+  a: string,
+  b: string,
+  caseInsensitive: boolean = process.platform === "win32"
+): boolean {
+  return a === b || (caseInsensitive && a.toLowerCase() === b.toLowerCase());
 }
 
 /** Open `dir` as a new VS Code window. Shared by the folder-node and
@@ -143,13 +156,22 @@ export class FileReviewItem extends vscode.TreeItem {
     public readonly filePath: string,
     public readonly reviewStatus: ReviewStatus,
     public readonly sessionManager: SessionManager,
-    showPath = true
+    showPath = true,
+    // Pre-computed by the provider: the short row label (undefined when the entry
+    // is younger than the configured threshold) and the raw timestamp, which the
+    // tooltip reports regardless of that threshold.
+    private readonly age?: string,
+    public readonly capturedAt?: string
   ) {
     super(path.basename(filePath), vscode.TreeItemCollapsibleState.None);
     this.resourceUri  = vscode.Uri.file(filePath);
-    this.description  = showPath ? relativeDir(filePath) : undefined;
+    // In tree mode showPath is false, so the description slot is empty and the
+    // age has it to itself; in list mode it shares with the relative directory.
+    this.description  = rowDescription(showPath ? relativeDir(filePath) : undefined, age);
+    const capturedLine = capturedAt ? ageTooltipLine(capturedAt, new Date()) : undefined;
     this.tooltip      = new vscode.MarkdownString(
-      `**${path.basename(filePath)}**\n\n${filePath}\n\nStatus: *${reviewStatus}*`
+      `**${path.basename(filePath)}**\n\n${filePath}\n\nStatus: *${reviewStatus}*` +
+      (capturedLine ? `\n\n${capturedLine}` : "")
     );
     // FileReviewItem is only used for pending rows now (accepted/rejected use
     // RecordReviewItem), so the context value is always the pending one.
@@ -236,7 +258,7 @@ export class FilteredTreeProvider
   // removes the race and the redundant re-render of a 100+ row tree.
   private readonly coalescedRefresh = createCoalescer(
     TREE_REFRESH_COALESCE_MS,
-    () => this._onDidChangeTreeData.fire()
+    () => this.fireChanged()
   );
 
   constructor(
@@ -250,11 +272,86 @@ export class FilteredTreeProvider
     worktreeRegistry?.onChange(() => this.coalescedRefresh.schedule());
   }
 
+  // Free-text filter, Pending panel only (only that provider ever has one set).
+  // Provider state rather than a native tree find, so it survives the refreshes
+  // this panel fires on every decision — see panelFilter.ts.
+  private filter: string | null = null;
+
+  getFilter(): string | null {
+    return this.filter;
+  }
+
+  // claudegate.pendingAge.minDays, cached for a second. A full render of a large
+  // backlog builds hundreds of rows; reading the configuration once per row would
+  // be hundreds of lookups per repaint for a value that changes by hand. The TTL
+  // keeps a settings change taking effect promptly without that cost, and the
+  // config listener in activate() forces the repaint that shows it.
+  private minDaysCache: { at: number; value: number } | null = null;
+
+  private ageMinDays(): number {
+    const now = Date.now();
+    if (!this.minDaysCache || now - this.minDaysCache.at > 1000) {
+      const raw = vscode.workspace
+        .getConfiguration("claudegate")
+        .get<number>("pendingAge.minDays", 0);
+      // A hand-edited settings.json can hold anything; a negative or non-numeric
+      // threshold must not produce "NaNd" on every row.
+      // 0 or less is "off"; anything unparseable falls back to off rather than
+      // decorating every row on a hand-edited settings.json.
+      const value = Number.isFinite(raw) && (raw as number) > 0 ? Math.floor(raw as number) : 0;
+      this.minDaysCache = { at: now, value };
+    }
+    return this.minDaysCache.value;
+  }
+
+  /** Row label + raw timestamp for a pending file, resolved against the session
+   *  that owns it (primary or a worktree). */
+  private ageOf(filePath: string, mgr: SessionManager): { age?: string; capturedAt?: string } {
+    const capturedAt = mgr.getSession()?.files[filePath]?.capturedAt;
+    return { age: ageLabel(capturedAt, new Date(), this.ageMinDays()), capturedAt };
+  }
+
+  /** Returns true if the filter actually changed (so the caller can skip a
+   *  redundant repaint of a large tree). */
+  setFilter(raw: string | undefined | null): boolean {
+    const next = normalizeFilter(raw);
+    if (next === this.filter) return false;
+    this.filter = next;
+    // Direct, not coalesced: a user action on the view must repaint at once, and
+    // it cannot storm — it needs a prompt to be answered. Same reasoning as
+    // setViewMode below.
+    this.fireChanged();
+    return true;
+  }
+
+  /** In-scope pending files across the primary session AND every attached
+   *  worktree, ignoring the filter. This is what the view description counts
+   *  against, so "4 of 16" compares like with like. */
+  totalPendingInScope(): number {
+    const own = this.sessionManager.getSession();
+    let n = own ? Object.keys(own.files).filter((fp) => isInWorkspace(fp) && !isExcluded(fp)).length : 0;
+    for (const [, mgr] of this.worktreeRegistry?.getManagers() ?? []) {
+      const s = mgr.getSession();
+      if (s) n += Object.keys(s.files).filter((fp) => isInWorkspace(fp) && !isExcluded(fp)).length;
+    }
+    return n;
+  }
+
+  /** Same, but after the filter — the number of rows the panel will draw. */
+  shownPendingInScope(): number {
+    const own = this.sessionManager.getSession();
+    let n = own ? this.filteredFiles(own).length : 0;
+    for (const [, mgr] of this.worktreeRegistry?.getManagers() ?? []) {
+      n += this.pendingOf(mgr).length;
+    }
+    return n;
+  }
+
   setViewMode(mode: ViewMode): void {
     this.viewMode = mode;
     // Direct, not coalesced: this is a user action on the view itself and must
     // repaint immediately. It also can't storm — it needs a button press.
-    this._onDidChangeTreeData.fire();
+    this.fireChanged();
   }
 
   getViewMode(): ViewMode {
@@ -262,7 +359,7 @@ export class FilteredTreeProvider
   }
 
   refresh(): void {
-    this._onDidChangeTreeData.fire();
+    this.fireChanged();
   }
 
   dispose(): void {
@@ -326,7 +423,10 @@ export class FilteredTreeProvider
       if (this.viewMode === "list") {
         const rows = [...files]
           .sort((a, b) => (Number(isProtected(b)) - Number(isProtected(a))) || a.localeCompare(b))
-          .map((fp) => new FileReviewItem(fp, this.status, this.sessionManager));
+          .map((fp) => {
+            const a = this.ageOf(fp, this.sessionManager);
+            return new FileReviewItem(fp, this.status, this.sessionManager, true, a.age, a.capturedAt);
+          });
         return [...rows, ...this.worktreeGroups()];
       }
       // Tree mode: worktree groups nest under the folder they live in.
@@ -347,7 +447,10 @@ export class FilteredTreeProvider
           (a, b) =>
             (Number(isProtected(b)) - Number(isProtected(a))) || a.localeCompare(b)
         );
-        return ordered.map((fp) => new FileReviewItem(fp, this.status, this.sessionManager));
+        return ordered.map((fp) => {
+          const a = this.ageOf(fp, this.sessionManager);
+          return new FileReviewItem(fp, this.status, this.sessionManager, true, a.age, a.capturedAt);
+        });
       }
       return this.directChildren(files, getWorkspaceRoot(files), this.status, false, element.sessionId);
     }
@@ -363,6 +466,74 @@ export class FilteredTreeProvider
     }
 
     return [];
+  }
+
+  // ── reveal() support ──────────────────────────────────────────────────────
+  //
+  // TreeView.reveal() is unusable without getParent(). Rather than reimplement
+  // the tree's shape here — list vs tree mode, group-by-session, nested folders,
+  // worktree groups, five interacting branches — the chain is DERIVED by walking
+  // getChildren() down from the root and recording each child→parent link on the
+  // way. getChildren() is synchronous and reads only in-memory session state, so
+  // this is a pure in-process walk. Deriving it means the layout rules live in
+  // exactly one place and getParent() cannot drift out of step with them.
+
+  private readonly parentOf = new Map<string, vscode.TreeItem>();
+
+  /** Clear the derived parent links, then repaint. Every fire goes through here:
+   *  a link that outlived its tree would hand reveal() a node VS Code has already
+   *  discarded. */
+  private fireChanged(): void {
+    this.parentOf.clear();
+    this._onDidChangeTreeData.fire();
+  }
+
+  getParent(element: vscode.TreeItem): vscode.TreeItem | undefined {
+    const id = element.id;
+    if (!id) return undefined;
+    // A leaf VS Code asks about before anything has been expanded has no link
+    // yet; rebuilding the chain populates it (and costs one walk, once).
+    if (!this.parentOf.has(id) && element instanceof FileReviewItem) {
+      this.chainTo(element.filePath);
+    }
+    return this.parentOf.get(id);
+  }
+
+  /** The root→leaf chain of items leading to `filePath`, or [] if no pending row
+   *  for it is currently rendered. Populates `parentOf` for every node visited. */
+  chainTo(filePath: string): vscode.TreeItem[] {
+    const seen = new Set<string>();
+
+    const walk = (parent: vscode.TreeItem | undefined): vscode.TreeItem[] | null => {
+      for (const child of this.getChildren(parent)) {
+        if (child.id) {
+          if (seen.has(child.id)) continue;   // defensive: never loop on a malformed tree
+          seen.add(child.id);
+          if (parent) this.parentOf.set(child.id, parent);
+          else this.parentOf.delete(child.id);
+        }
+
+        if (child instanceof FileReviewItem) {
+          if (samePath(child.filePath, filePath)) return [child];
+          continue;
+        }
+
+        // Only descend where the target could actually live. Folder and worktree
+        // nodes carry a path, so a prefix test prunes most of the tree; a session
+        // bucket carries none, so it always has to be entered.
+        const branch =
+          child instanceof FolderItem        ? child.folderPath :
+          child instanceof WorktreeGroupItem ? child.worktreeRoot :
+          null;
+        if (branch !== null && !pathIsUnder(filePath, branch)) continue;
+
+        const rest = walk(child);
+        if (rest) return [child, ...rest];
+      }
+      return null;
+    };
+
+    return walk(undefined) ?? [];
   }
 
   // ── Accepted / Rejected: record-backed panels ─────────────────────────────
@@ -425,8 +596,10 @@ export class FilteredTreeProvider
         try {
           const current = fs.readFileSync(element.filePath, "utf-8");
           const counts = countChanges(entry.originalContent ?? "", current);
+          const captured = ageTooltipLine(entry.capturedAt, new Date());
           item.tooltip = new vscode.MarkdownString(
-            `**${path.basename(element.filePath)}**\n\n${element.filePath}\n\nStatus: *pending* · ${formatChangeCount(counts)}`
+            `**${path.basename(element.filePath)}**\n\n${element.filePath}\n\nStatus: *pending* · ${formatChangeCount(counts)}` +
+            (captured ? `\n\n${captured}` : "")
           );
         } catch {
           // Keep the existing tooltip on read failure.
@@ -444,7 +617,7 @@ export class FilteredTreeProvider
     // re-show it after the write lands. Settled no-op entries are pruned by the
     // grace-delayed reconcile instead.
     return Object.keys(session.files).filter(
-      (fp) => isInWorkspace(fp) && !isExcluded(fp)
+      (fp) => isInWorkspace(fp) && !isExcluded(fp) && matchesFilter(fp, this.filter)
     );
   }
 
@@ -452,7 +625,9 @@ export class FilteredTreeProvider
   private pendingOf(mgr: SessionManager): string[] {
     const s = mgr.getSession();
     if (!s) return [];
-    return Object.keys(s.files).filter((fp) => isInWorkspace(fp) && !isExcluded(fp));
+    return Object.keys(s.files).filter(
+      (fp) => isInWorkspace(fp) && !isExcluded(fp) && matchesFilter(fp, this.filter)
+    );
   }
 
   // Tree-mode children at `parentPath`, binding file rows to `mgr` (the primary
@@ -490,7 +665,10 @@ export class FilteredTreeProvider
     };
 
     for (const fp of files) {
-      if (isImmediateChild(fp)) fileItems.push(new FileReviewItem(fp, this.status, mgr, false));
+      if (isImmediateChild(fp)) {
+        const a = this.ageOf(fp, mgr);
+        fileItems.push(new FileReviewItem(fp, this.status, mgr, false, a.age, a.capturedAt));
+      }
     }
     if (includeWorktrees) {
       for (const g of this.worktreeGroupsUnder(parentPath)) {
@@ -555,7 +733,10 @@ export class FilteredTreeProvider
     if (this.viewMode === "list") {
       return [...files]
         .sort((a, b) => (Number(isProtected(b)) - Number(isProtected(a))) || a.localeCompare(b))
-        .map((fp) => new FileReviewItem(fp, "pending", group.sessionManager, true));
+        .map((fp) => {
+          const a = this.ageOf(fp, group.sessionManager);
+          return new FileReviewItem(fp, "pending", group.sessionManager, true, a.age, a.capturedAt);
+        });
     }
     // Tree mode: nest into folders; a worktree never re-nests worktree groups.
     return this.treeChildrenAt(group.worktreeRoot, files, group.sessionManager, false);
@@ -669,7 +850,8 @@ export class FilteredTreeProvider
       const rel   = path.relative(parentPath, fp);
       const parts = rel.split(path.sep);
       if (parts.length === 1) {
-        files.push(new FileReviewItem(fp, status, this.sessionManager, showFilePath));
+        const a = this.ageOf(fp, this.sessionManager);
+        files.push(new FileReviewItem(fp, status, this.sessionManager, showFilePath, a.age, a.capturedAt));
       } else {
         const folderPath = path.join(parentPath, parts[0]);
         if (!seenFolders.has(folderPath)) {

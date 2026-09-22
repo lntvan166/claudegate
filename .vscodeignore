@@ -62,3 +62,4 @@ manual-test-seed.py
 # Misc
 *.vsix
 test.txt
+out/integration/**

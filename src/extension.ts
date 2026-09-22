@@ -3,6 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { SessionManager } from "./sessionManager";
+import { reviewScopes, countAcceptedAcross, countRejectedAcross, pendingAcross } from "./reviewScopes";
 import {
   FilteredTreeProvider,
   FileReviewItem,
@@ -12,6 +13,7 @@ import {
   registerOpenDiff,
   closeDiffEditor,
   openFolderInNewWindow,
+  samePath,
 } from "./reviewPanel";
 import { WorktreeSessionRegistry } from "./worktreeSessionRegistry";
 import { HookInstaller } from "./hookInstaller";
@@ -43,8 +45,13 @@ const FOCUS_SWEEP_MIN_INTERVAL_MS = 15_000;
 // pendingReviewPaths() reads every pending file off disk to test it for a real
 // change — so it is worth collapsing.
 const SESSION_FANOUT_COALESCE_MS = 60;
+// How long a reveal-initiated tree selection stays recognisable as ours. Only a
+// backstop: the matching selection event normally clears the mark the moment it
+// arrives. Generous, because the event round-trips through the renderer.
+const REVEAL_GUARD_MS = 2000;
 import { stepPending, resolveCurrent } from "./reviewNav";
 import { gcOrphanedSessions } from "./sessionGc";
+import { filterLabel } from "./panelFilter";
 
 
 function getActivePendingFilePath(managerFor: (p?: string) => SessionManager): string | undefined {
@@ -90,6 +97,19 @@ async function confirmBulk(message: string, action: string): Promise<boolean> {
   return answer === action;
 }
 
+// Is the focused tab one of our own diffs? Inside a ClaudeGate diff the ACTIVE
+// editor is the right-hand (real, scheme "file") side, so activeFileIsPending is
+// true there too — without this the "View Diff" title button would render in the
+// diff it would only reopen. Accept/Reject still belong there, so only the new
+// button is gated on it.
+function activeTabIsClaudeGateDiff(): boolean {
+  const input = vscode.window.tabGroups?.activeTabGroup?.activeTab?.input;
+  return (
+    input instanceof vscode.TabInputTextDiff &&
+    input.original.scheme === SCHEME
+  );
+}
+
 function refreshActiveFilePendingContext(managerFor: (p?: string) => SessionManager): void {
   const editor = vscode.window.activeTextEditor;
   if (editor) {
@@ -98,6 +118,7 @@ function refreshActiveFilePendingContext(managerFor: (p?: string) => SessionMana
   }
   const pending = getActivePendingFilePath(managerFor);
   vscode.commands.executeCommand("setContext", "claudegate.activeFileIsPending", pending !== undefined);
+  vscode.commands.executeCommand("setContext", "claudegate.activeIsClaudeGateDiff", activeTabIsClaudeGateDiff());
 }
 
 
@@ -265,6 +286,9 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
       vscode.workspace.onDidChangeConfiguration((e) => {
         if (e.affectsConfiguration("claudegate.hookLog.enabled")) syncHookLogSentinel();
+        // The provider caches this for a second to avoid a config read per row on
+        // a large backlog, so a settings change needs an explicit repaint to show.
+        if (e.affectsConfiguration("claudegate.pendingAge.minDays")) pendingProvider.refresh();
       })
     );
 
@@ -332,14 +356,150 @@ export function activate(context: vscode.ExtensionContext): void {
     // refresh — e.g. right after accepting another file (microsoft/vscode#173233).
     // The selection event hands us the live element, so we call openDiff directly
     // with the row's own (possibly worktree) SessionManager — no fragile dispatch.
+    //
+    // A selection this window MADE (by revealing the active editor's row, below)
+    // must not be mistaken for a click: it would pop a diff open every time the
+    // user merely switched to a pending file's tab. `revealingPath` marks that
+    // window. It is cleared by the matching event rather than by a timer, because
+    // reveal() crosses the ext-host/renderer boundary and the selection can arrive
+    // after reveal()'s promise has already resolved; the timeout is only a
+    // backstop for a reveal whose event never comes.
+    let revealingPath: string | null = null;
+    let revealGuardTimer: ReturnType<typeof setTimeout> | undefined;
+    const markRevealing = (filePath: string): void => {
+      revealingPath = filePath;
+      clearTimeout(revealGuardTimer);
+      revealGuardTimer = setTimeout(() => { revealingPath = null; }, REVEAL_GUARD_MS);
+    };
+
     context.subscriptions.push(
+      { dispose: () => clearTimeout(revealGuardTimer) },
       pendingView.onDidChangeSelection((e) => {
         const item = e.selection[0];
         if (item instanceof FileReviewItem) {
+          if (revealingPath && samePath(item.filePath, revealingPath)) {
+            revealingPath = null;   // our own reveal, not a click — consume it
+            return;
+          }
           void openDiff(item.filePath, item.sessionManager);
         }
       })
     );
+    // Keeps the Pending view's description in step with the filter and with the
+    // pending set, which moves under it as files are accepted.
+    const refreshPendingFilterUi = (): void => {
+      const filter = pendingProvider.getFilter();
+      pendingView.description = filterLabel(
+        filter,
+        pendingProvider.shownPendingInScope(),
+        pendingProvider.totalPendingInScope()
+      );
+      void vscode.commands.executeCommand("setContext", "claudegate.hasPendingFilter", filter !== null);
+    };
+
+    // ── Keep the Pending panel in step with the editor ─────────────────────
+    //
+    // Open a pending file in a normal editor (or step into its diff) and the
+    // matching row is selected, with its parent folders expanded.
+    //
+    // `select: true` is what makes the row visibly the current one. An earlier
+    // version used { select: false, focus: false } to break the reveal → selection
+    // → openDiff → active-editor-change → reveal cycle structurally; that does
+    // work, but it also draws NOTHING — reveal with both flags off only scrolls,
+    // so a row already on screen got no indication at all and the feature looked
+    // dead. The cycle is broken by `revealingPath` instead (see above).
+    //
+    // `focus: true` moves the tree's FOCUS element, which is distinct from its
+    // selection. A row shows its inline Accept/Reject actions when it is focused
+    // OR selected, so revealing with focus:false left the previously clicked row
+    // focused and every revealed row merely selected — two rows wearing ✓/✗ at
+    // once, the buttons apparently stuck on a file the user had moved off.
+    //
+    // Measured in a real host before adopting it: focus:true sets the row focus
+    // WITHOUT taking keyboard focus from the editor — activeTextEditor is
+    // unchanged across the reveal. (The opposite was assumed when this was first
+    // written, which is why it shipped as focus:false.)
+    const revealActivePending = createCoalescer(SESSION_FANOUT_COALESCE_MS, () => {
+      // Cheap precheck first: a non-pending tab costs a session lookup, no walk.
+      if (!pendingView.visible) return;
+      const filePath = getActivePendingFilePath(managerFor);
+      if (!filePath) return;
+      let chain = pendingProvider.chainTo(filePath);
+      if (chain.length === 0 && pendingProvider.getFilter() !== null) {
+        // The user navigated to a pending file the filter hides. Silently not
+        // revealing would look like the reveal is broken, so clear the filter and
+        // show them where they are — the deliberate act (opening the file) wins
+        // over the stale one (a filter set earlier).
+        pendingProvider.setFilter(null);
+        refreshPendingFilterUi();
+        chain = pendingProvider.chainTo(filePath);
+      }
+      const leaf = chain[chain.length - 1];
+      if (!leaf) return;   // no row rendered for it (mid-refresh)
+      markRevealing(filePath);
+      void Promise.resolve(
+        pendingView.reveal(leaf, { select: true, focus: true, expand: true })
+      ).then(undefined, (err) => {
+        revealingPath = null;
+        // A reveal that loses a race with a refresh is not an error worth a popup.
+        log.appendLine(`[DEBUG] reveal skipped for ${filePath}: ${(err as Error).message}`);
+      });
+    });
+    // ── Integration-test seam ──────────────────────────────────────────────
+    //
+    // Registered ONLY when CLAUDEGATE_ITEST is set, which `runTests.ts` passes
+    // through extensionTestsEnv and a real install never has. It exists because
+    // the reveal behaviour is genuinely unobservable from outside: a TreeView's
+    // selection is readable only by whoever holds the TreeView, and setContext is
+    // write-only. Everything else the suite checks (diff tabs, file contents,
+    // session JSON) goes through the public API instead — see
+    // src/integration/README-less note in CLAUDE.md. Keep this surface minimal
+    // and READ-ONLY; a test that needs to mutate should drive a real command.
+    if (process.env.CLAUDEGATE_ITEST) {
+      context.subscriptions.push(
+        vscode.commands.registerCommand("claudegate._test.revealState", () => ({
+          visible: pendingView.visible,
+          selection: pendingView.selection.map((i) =>
+            i instanceof FileReviewItem ? i.filePath : String(i.label)
+          ),
+        })),
+        vscode.commands.registerCommand("claudegate._test.chainTo", (filePath: string) =>
+          pendingProvider.chainTo(filePath).map((i) => String(i.label))
+        ),
+        vscode.commands.registerCommand("claudegate._test.scopes", () => {
+          const scopes = reviewScopes(sessionManager, worktreeRegistry);
+          return {
+            count: scopes.length,
+            pending: pendingAcross(scopes).map((p) => p.filePath),
+            accepted: countAcceptedAcross(scopes),
+            rejected: countRejectedAcross(scopes),
+          };
+        }),
+        vscode.commands.registerCommand("claudegate._test.ownerIsPrimary", (p: string) =>
+          managerFor(p) === sessionManager
+        ),
+        vscode.commands.registerCommand("claudegate._test.filterState", () => ({
+          filter: pendingProvider.getFilter(),
+          shown: pendingProvider.shownPendingInScope(),
+          total: pendingProvider.totalPendingInScope(),
+          description: pendingView.description ?? null,
+        })),
+        vscode.commands.registerCommand("claudegate._test.setFilter", (f: string | null) => {
+          pendingProvider.setFilter(f);
+          refreshPendingFilterUi();
+        })
+      );
+      log.appendLine("[WARN] CLAUDEGATE_ITEST set — test-only commands registered.");
+    }
+
+    context.subscriptions.push(
+      revealActivePending,
+      vscode.window.onDidChangeActiveTextEditor(() => revealActivePending.schedule()),
+      // Opening the panel later should snap to whatever file is already focused,
+      // rather than waiting for the next tab switch.
+      pendingView.onDidChangeVisibility((e) => { if (e.visible) revealActivePending.schedule(); })
+    );
+
     const acceptedView = vscode.window.createTreeView("claudegate.acceptedPanel", {
       treeDataProvider: acceptedProvider,
       showCollapseAll:  true,
@@ -602,27 +762,36 @@ export function activate(context: vscode.ExtensionContext): void {
         if (id) managerFor(p).revertAccepted(id);
       }),
 
+      // Resolved through managerFor, like the file-level revertAccepted above: a
+      // folder row inside a worktree group belongs to that worktree's session, and
+      // the primary manager holds no record for it — the action was a silent no-op.
       vscode.commands.registerCommand(
         "claudegate.revertAcceptedFolder",
-        (item: FolderItem) => sessionManager.revertAcceptedFolder(item.folderPath)
+        (item: FolderItem) => managerFor(item.folderPath).revertAcceptedFolder(item.folderPath)
       ),
 
+      // Every bulk action on the record logs fans out over reviewScopes(): the
+      // panels show worktree records too, so acting on the primary alone left
+      // rows on screen the button claimed to have handled — or, with an empty
+      // primary, returned early and did nothing at all. See reviewScopes.ts.
       vscode.commands.registerCommand("claudegate.revertAcceptedAll", async () => {
-        const count = sessionManager.getSession()?.accepted.length ?? 0;
+        const scopes = reviewScopes(sessionManager, worktreeRegistry);
+        const count = countAcceptedAcross(scopes);
         if (count === 0) return;
         if (!(await confirmBulk(`Revert all ${count} accepted file(s) back to pending review?`, "Revert All"))) return;
-        sessionManager.revertAcceptedAll();
+        for (const mgr of scopes) mgr.revertAcceptedAll();
         vscode.window.showInformationMessage(`Claude Gate: reverted ${count} file(s) to pending.`);
       }),
 
       vscode.commands.registerCommand("claudegate.clearAccepted", async () => {
-        const count = sessionManager.getSession()?.accepted.length ?? 0;
+        const scopes = reviewScopes(sessionManager, worktreeRegistry);
+        const count = countAcceptedAcross(scopes);
         if (count === 0) return;
         if (!(await confirmBulk(
           `Permanently clear ${count} record(s) from the Accepted history? This cannot be undone.`,
           "Clear History"
         ))) return;
-        sessionManager.clearAccepted();
+        for (const mgr of scopes) mgr.clearAccepted();
         vscode.window.showInformationMessage(`Claude Gate: cleared ${count} accepted record(s).`);
       }),
 
@@ -632,67 +801,111 @@ export function activate(context: vscode.ExtensionContext): void {
         if (fp) managerFor(fp).reapplyRejected(fp);
       }),
 
+      // Same worktree resolution as reapplyFile above.
       vscode.commands.registerCommand(
         "claudegate.reapplyFolder",
-        (item: FolderItem) => sessionManager.reapplyFolder(item.folderPath)
+        (item: FolderItem) => managerFor(item.folderPath).reapplyFolder(item.folderPath)
       ),
 
       vscode.commands.registerCommand("claudegate.reapplyAll", async () => {
-        const count = Object.keys(sessionManager.getSession()?.rejected ?? {}).length;
+        const scopes = reviewScopes(sessionManager, worktreeRegistry);
+        const count = countRejectedAcross(scopes);
         if (count === 0) return;
         if (!(await confirmBulk(
           `Re-apply Claude's version to all ${count} rejected file(s) on disk?`,
           "Re-apply All"
         ))) return;
-        sessionManager.reapplyAll();
+        for (const mgr of scopes) mgr.reapplyAll();
       }),
 
       // ── Bulk pending actions ──
       vscode.commands.registerCommand("claudegate.acceptAll", async () => {
-        const session = sessionManager.getSession();
-        const pending = session
-          ? Object.entries(session.files).filter(
-              ([fp, e]) => e.reviewStatus === "pending" && isInWorkspace(fp) && !isExcluded(fp)
-            )
-          : [];
+        // Spans worktrees: the pending badge already sums worktreeRegistry
+        // .totalPending(), so acting on the primary alone accepted a subset of
+        // what the panel showed — and with pending only inside a worktree it
+        // returned early and did nothing at all. See reviewScopes.ts.
+        const scopes = reviewScopes(sessionManager, worktreeRegistry);
+        const pending = pendingAcross(scopes);
         if (pending.length === 0) return;
-        await saveDirtyPending(pending.map(([fp]) => fp));
-        sessionManager.acceptAll();
-        await Promise.all(pending.map(([fp]) => closeDiffEditor(fp)));
+        // A filter is a lens over the panel, not a selection: Accept All still
+        // means ALL. Silently accepting only the visible rows would be one bug;
+        // silently accepting the hidden ones is another. So when the two numbers
+        // differ, say both and make the user confirm.
+        const shown = pendingProvider.shownPendingInScope();
+        if (pendingProvider.getFilter() !== null && shown !== pending.length) {
+          const ok = await confirmBulk(
+            `The Pending panel is filtered — ${shown} of ${pending.length} file(s) are visible. ` +
+            `Accept All accepts all ${pending.length}, including the ${pending.length - shown} hidden by the filter.`,
+            "Accept All"
+          );
+          if (!ok) return;
+        }
+        await saveDirtyPending(pending.map((p) => p.filePath));
+        for (const mgr of scopes) mgr.acceptAll();
+        await Promise.all(pending.map((p) => closeDiffEditor(p.filePath)));
         // Accept keeps files as-is (non-destructive), so no modal — just confirm
         // what happened, mirroring the feedback Reject All already gives.
         vscode.window.showInformationMessage(`Claude Gate: accepted ${pending.length} file(s).`);
       }),
 
       vscode.commands.registerCommand("claudegate.rejectAll", async () => {
-        const pending = sessionManager.getPendingCount();
-        if (pending === 0) return;
+        // Spans worktrees, as acceptAll does — and this one WRITES to disk, so a
+        // primary-only reject left a worktree's files holding Claude's version
+        // while the panel reported everything rejected.
+        const scopes = reviewScopes(sessionManager, worktreeRegistry);
+        const files = pendingAcross(scopes);
+        if (files.length === 0) return;
+        const hiddenByFilter = pendingProvider.getFilter() !== null
+          ? files.length - pendingProvider.shownPendingInScope()
+          : 0;
         const answer = await vscode.window.showWarningMessage(
-          `Reject all ${pending} pending file(s)? This restores their original content.`,
+          `Reject all ${files.length} pending file(s)? This restores their original content.` +
+          (hiddenByFilter > 0
+            ? ` ${hiddenByFilter} of them are hidden by the current panel filter.`
+            : ""),
           { modal: true },
           "Reject All"
         );
         if (answer === "Reject All") {
-          const session = sessionManager.getSession();
-          const files = session
-            ? Object.entries(session.files).filter(
-                ([fp, e]) => e.reviewStatus === "pending" && isInWorkspace(fp) && !isExcluded(fp)
-              )
-            : [];
-          sessionManager.rejectAll();
-          await Promise.all(files.map(([fp]) => closeDiffEditor(fp)));
+          for (const mgr of scopes) mgr.rejectAll();
+          await Promise.all(files.map((f) => closeDiffEditor(f.filePath)));
         }
       }),
 
       vscode.commands.registerCommand("claudegate.clearRejected", async () => {
-        const count = Object.keys(sessionManager.getSession()?.rejected ?? {}).length;
+        const scopes = reviewScopes(sessionManager, worktreeRegistry);
+        const count = countRejectedAcross(scopes);
         if (count === 0) return;
         if (!(await confirmBulk(
           `Permanently clear ${count} record(s) from the Rejected history? This cannot be undone.`,
           "Clear History"
         ))) return;
-        sessionManager.clearRejected();
+        for (const mgr of scopes) mgr.clearRejected();
         vscode.window.showInformationMessage(`Claude Gate: cleared ${count} rejected record(s).`);
+      }),
+
+      // ── Pending filter ──
+      //
+      // The description is not decoration: a filtered panel showing 4 rows looks
+      // exactly like a panel with 4 pending files, so without "of 16" a user can
+      // believe the review is done while 12 files sit hidden behind a filter they
+      // set ten minutes ago.
+      vscode.commands.registerCommand("claudegate.filterPending", async () => {
+        const current = pendingProvider.getFilter();
+        const input = await vscode.window.showInputBox({
+          title: "Filter pending files",
+          prompt: "Substring of the path — a file (auth), a directory (pkg/ws) or a worktree (wt-feature).",
+          value: current ?? "",
+          placeHolder: "leave empty to show everything",
+        });
+        if (input === undefined) return;          // Esc — leave the filter as it was
+        pendingProvider.setFilter(input);
+        refreshPendingFilterUi();
+      }),
+
+      vscode.commands.registerCommand("claudegate.clearPendingFilter", () => {
+        pendingProvider.setFilter(null);
+        refreshPendingFilterUi();
       }),
 
       // ── View mode toggle (all panels) ──
@@ -917,7 +1130,21 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
       vscode.commands.registerCommand("claudegate.openReviewRecord", (id: string) =>
         openReviewRecord(id, sessionManager)
-      )
+      ),
+      // Editor title-bar "View Diff" (and a palette-bindable command). Resolves
+      // the focused file and hands off to the existing openDiff, so it inherits
+      // the change-count title, the "N of M pending" counter and the scroll to
+      // the first change — no second diff path to keep in sync.
+      vscode.commands.registerCommand("claudegate.openActiveDiff", () => {
+        const filePath = getActivePendingFilePath(managerFor);
+        if (!filePath) {
+          vscode.window.showInformationMessage(
+            "Claude Gate: the active editor has no pending change to diff."
+          );
+          return;
+        }
+        return openDiff(filePath, managerFor(filePath));
+      })
     );
     // ── Reactive updates ──────────────────────────────────────────────────
     context.subscriptions.push(
@@ -958,6 +1185,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const refreshCounts = createCoalescer(SESSION_FANOUT_COALESCE_MS, () => {
       const session = sessionManager.getSession();
       refreshActiveFilePendingContext(managerFor);
+      refreshPendingFilterUi();
       let pending = 0;
       let accepted = 0;
       let rejected = 0;
