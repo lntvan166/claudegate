@@ -353,7 +353,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
     const decorationProvider = new ClaudeGateDecorationProvider(sessionManager, worktreeRegistry);
     context.subscriptions.push(
-      vscode.window.registerFileDecorationProvider(decorationProvider)
+      vscode.window.registerFileDecorationProvider(decorationProvider),
+      // The registration disposable only UNREGISTERS the provider; it does not
+      // dispose the instance. The provider now holds a coalescing timer, so
+      // without this it survives a window reload — the same leak shape that once
+      // left an fs.watch and a reconcile timer behind per worktree.
+      decorationProvider
     );
     // ── Three sidebar panels ───────────────────────────────────────────────
     const pendingView = vscode.window.createTreeView("claudegate.pendingPanel", {

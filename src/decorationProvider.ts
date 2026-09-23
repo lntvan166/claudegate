@@ -2,6 +2,11 @@ import * as vscode from "vscode";
 import { SessionManager } from "./sessionManager";
 import { WorktreeSessionRegistry } from "./worktreeSessionRegistry";
 import { isExcluded, isProtected } from "./workspaceScope";
+import { createCoalescer } from "./scheduling";
+
+// Same window the tree providers use: short enough to feel instant, long enough
+// to swallow the persist() + fs.watch-reload pair a single decision produces.
+const DECORATION_COALESCE_MS = 60;
 
 // Colours are git's OWN semantic theme colours, deliberately — not an invented
 // palette. A file Claude created is untracked-green, a file Claude edited is
@@ -38,6 +43,11 @@ export class ClaudeGateDecorationProvider
   >();
   readonly onDidChangeFileDecorations = this._onDidChange.event;
 
+  private readonly coalescedInvalidate = createCoalescer(
+    DECORATION_COALESCE_MS,
+    () => this._onDidChange.fire(undefined)
+  );
+
   // The registry is how a file inside a nested worktree finds its OWN session.
   // Without it this provider read the primary session alone, and a worktree's
   // pending files are never in there — they live in the worktree's own session
@@ -53,10 +63,22 @@ export class ClaudeGateDecorationProvider
     private readonly sessionManager: SessionManager,
     private readonly worktreeRegistry?: WorktreeSessionRegistry
   ) {
-    sessionManager.onSessionChange(() => this._onDidChange.fire(undefined));
+    // Coalesced, like every other consumer of this burst. Firing undefined
+    // invalidates EVERY decoration in the Explorer, and a session change arrives
+    // at least twice per decision — once from persist() and once from the
+    // fs.watch reload that write triggers — so a multi-file accept repainted the
+    // whole Explorer several times over. CLAUDE.md's Extension-Host
+    // Responsiveness section already describes the two consumers that coalesce;
+    // this was a third that never did.
+    sessionManager.onSessionChange(() => this.coalescedInvalidate.schedule());
     // A decision taken inside a worktree must repaint the Explorer too, or the
     // badge lingers on a file that is no longer pending.
-    worktreeRegistry?.onChange(() => this._onDidChange.fire(undefined));
+    worktreeRegistry?.onChange(() => this.coalescedInvalidate.schedule());
+  }
+
+  dispose(): void {
+    this.coalescedInvalidate.dispose();
+    this._onDidChange.dispose();
   }
 
   provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {

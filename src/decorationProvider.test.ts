@@ -173,3 +173,36 @@ const entry = (originalContent: string | null) => ({
   );
   console.log("ok - a path owned by no worktree falls back to the primary session");
 }
+
+// ── The full-Explorer invalidation is coalesced ─────────────────────────────
+// Firing `undefined` invalidates EVERY decoration in the Explorer, and a session
+// change arrives at least twice per decision (persist, then the fs.watch reload
+// that write triggers). Uncoalesced, a multi-file accept repainted the whole
+// Explorer several times over. Every other consumer of this burst already
+// collapses it; this one did not.
+void (async () => {
+  let fires = 0;
+  const listeners: Array<() => void> = [];
+  const mgr = {
+    onSessionChange: (cb: () => void) => { listeners.push(cb); return { dispose() {} }; },
+    getSession: () => ({ files: {} }),
+  } as unknown as SessionManager;
+
+  const p = new ClaudeGateDecorationProvider(mgr);
+  p.onDidChangeFileDecorations(() => { fires++; });
+
+  // A burst, as one multi-file accept produces.
+  for (let i = 0; i < 6; i++) listeners.forEach((l) => l());
+  assert.strictEqual(fires, 0, "nothing fires synchronously inside the burst");
+
+  await new Promise((r) => setTimeout(r, 200));
+  assert.strictEqual(fires, 1, `a burst of 6 changes must repaint once, got ${fires}`);
+
+  // A later, separate change still repaints — coalescing must not swallow it.
+  listeners.forEach((l) => l());
+  await new Promise((r) => setTimeout(r, 200));
+  assert.strictEqual(fires, 2, "a later change still repaints");
+
+  p.dispose();
+  console.log("ok - a burst of session changes invalidates the Explorer once, not once each");
+})().catch((err) => { console.error(err); process.exit(1); });
