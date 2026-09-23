@@ -6,3 +6,7 @@ node_modules/
 .superpowers/
 .qodo
 __pycache__/
+
+# Local screen recordings used to cut the demo GIF. Kept out of git (they are
+# large and regenerable); .vscodeignore already keeps them out of the VSIX.
+media/*.mp4
