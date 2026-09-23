@@ -25,17 +25,27 @@ export function isNewFile(entry: { originalContent: string | null }): boolean {
   return entry.originalContent === null;
 }
 
-// Two badges, because colour alone must not be the only difference. A file
-// Claude CREATED and a file Claude EDITED were previously distinguished purely
-// by untracked-green versus modified-orange — which is the single most
-// confusable pair for deuteranopia and protanopia, and invisible to anyone
-// reading a screenshot in greyscale. The information existed only in the tooltip.
+// ONE badge for every pending file, whether Claude created it or edited it.
 //
-// `+` reads as "added" everywhere, costs nothing (the badge slot is already
-// ours), and does not collide with git's own A/M/U/D/R — the constraint that
-// keeps this extension's badge from being mistaken for a git status.
+// A separate `+` for created files was tried and deliberately reverted. VS Code
+// merges the badges of every decoration provider into a single slot, so wherever
+// git also has an opinion the row reads `+,M` — and since raising
+// git.repositoryScanMaxDepth makes git decorate files inside worktrees too, that
+// is most rows on a real workspace. The maintainer judged the clutter worse than
+// what the second badge bought.
+//
+// The cost is real and accepted, not overlooked: new versus edited is now
+// carried by colour alone (untracked-green versus modified-orange), which is the
+// most confusable pair for deuteranopia and protanopia and vanishes in a
+// greyscale screenshot. The tooltip still names it. Do not "fix" this back by
+// citing the colour-only accessibility rule without asking — it was raised,
+// weighed, and decided against.
+//
+// What the badge DOES carry is worth keeping: our colours are git's colours by
+// design, so colour cannot distinguish "ClaudeGate is waiting on your review"
+// from "git says this file changed". The badge is the only thing that does, and
+// `!` does not collide with git's own A/M/U/D/R.
 const BADGE_PENDING = "!";
-const BADGE_NEW = "+";
 
 const TOOLTIPS: Record<string, string> = {
   pending:  "Claude Gate: pending review",
@@ -157,7 +167,7 @@ export class ClaudeGateDecorationProvider
     const s = entry.reviewStatus;
     const isNew = isNewFile(entry);
     return {
-      badge: isNew ? BADGE_NEW : BADGE_PENDING,
+      badge: BADGE_PENDING,
       color: isNew ? COLOR_NEW : COLOR_MODIFIED,
       tooltip: isNew
         ? "Claude Gate: pending review — new file"

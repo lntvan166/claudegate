@@ -65,44 +65,39 @@ const entry = (originalContent: string | null) => ({
   console.log("ok - created vs edited files carry git's own untracked/modified colours");
 }
 
-// ── The badge distinguishes new from edited, so colour is not the only cue ───
-// Conveying "created" vs "edited" by untracked-green against modified-orange
-// alone fails the colour-only accessibility rule, and that pair is the most
-// confusable one for deuteranopia and protanopia. It was also invisible in a
-// greyscale screenshot. The badge carries it too now.
+// ── One badge for every pending file ────────────────────────────────────────
+// A separate "+" for created files was tried and reverted: VS Code merges every
+// provider's badge into one slot, so wherever git also decorates, the row reads
+// "+,M". The clutter was judged worse than the second badge was worth.
 //
-// Still must not collide with git's own A/M/U/D/R, per CLAUDE.md — a new-file
-// badge of "A" would read as git's "added".
+// The trade is explicit — new versus edited is carried by colour alone now, with
+// the tooltip as the only non-colour cue. What the badge still carries is that
+// ClaudeGate is waiting on this file at all, which colour cannot say because our
+// colours ARE git's colours.
 {
   const p = providerWith({ [NEW]: entry(null), [EDIT]: entry("before\n") });
   const nb = p.provideFileDecoration(Uri.file(NEW) as never)!.badge;
   const eb = p.provideFileDecoration(Uri.file(EDIT) as never)!.badge;
-  assert.strictEqual(nb, "+", "a file Claude created is badged '+'");
-  assert.strictEqual(eb, "!", "a file Claude edited keeps '!'");
-  assert.notStrictEqual(nb, eb, "the badges must differ — that is the non-colour cue");
-  for (const b of [nb, eb]) {
-    assert.ok(!"AMUDR".includes(String(b)), `badge ${b} collides with a git status letter`);
-    assert.ok(String(b).length === 1, "a badge is one character; VS Code clips longer ones");
-  }
-  console.log("ok - new and edited carry different badges, and neither collides with git's letters");
+  assert.strictEqual(nb, "!", "created files use the pending badge");
+  assert.strictEqual(eb, "!", "edited files use the same one");
+  assert.ok(!"AMUDR".includes(String(nb)), "and it must not collide with a git status letter");
+  assert.strictEqual(String(nb).length, 1, "one character; VS Code clips longer badges");
+  console.log("ok - one '!' badge for every pending file, not colliding with git's letters");
 }
 
-// ── A protected file still outranks both ────────────────────────────────────
-// Sensitive files are the one case where the warning matters more than which
-// kind of change it was.
+// ── A protected file still outranks it ──────────────────────────────────────
 {
   const PROT = path.join(path.sep, "repo", ".env");
-  setProtectedMatcher(new ExcludeMatcher());
   const m = new ExcludeMatcher();
   m.reload({ "**/.env": true }, path.join(path.sep, "repo"));
   setProtectedMatcher(m);
   const p = providerWith({ [PROT]: entry(null) });
   assert.strictEqual(
     p.provideFileDecoration(Uri.file(PROT) as never)!.badge, "\u26a0",
-    "a protected NEW file still shows the warning badge, not '+'",
+    "a protected file shows the warning badge instead",
   );
   setProtectedMatcher(new ExcludeMatcher());
-  console.log("ok - a protected file keeps its warning badge regardless of new vs edited");
+  console.log("ok - a protected file keeps its warning badge");
 }
 
 // ── Tooltips distinguish them ───────────────────────────────────────────────
@@ -160,8 +155,7 @@ const entry = (originalContent: string | null) => ({
   const withRegistry = new ClaudeGateDecorationProvider(primary, registry);
   const d = withRegistry.provideFileDecoration(Uri.file(WT_FILE) as never);
   assert.ok(d, "a pending file inside a worktree must be decorated");
-  // entry(null) — Claude created it — so the new-file badge, same as anywhere else.
-  assert.strictEqual(d!.badge, "+", "a worktree file gets the same badge it would outside one");
+  assert.strictEqual(d!.badge, "!", "a worktree file gets the same badge it would outside one");
   assert.strictEqual(
     (d!.color as unknown as { id: string }).id,
     "gitDecoration.untrackedResourceForeground",
