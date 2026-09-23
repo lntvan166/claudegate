@@ -45,6 +45,30 @@ describe("actions span every session the panels draw from", () => {
     );
   });
 
+  // Must precede the Accept All case below: that one drains every pending file,
+  // and a decoration only exists while the file is still pending.
+  it("decorates a pending file that lives in a worktree session", async () => {
+    // Decorations are not readable through the public API, so this goes through
+    // the read-only seam and asks the very provider the Explorer is using.
+    const file = someWorktreeFile();
+    const d = await vscode.commands.executeCommand<{ badge: string; color: string } | null>(
+      "claudegate._test.decorationFor", file);
+    // The regression is `null`: before the fix the provider read the primary
+    // session, which never holds a worktree's paths, so every such file came back
+    // undecorated. Being decorated AT ALL is the thing under test.
+    assert.ok(d, `${file} came back undecorated — the provider is not seeing the worktree session`);
+
+    // Which badge depends on the file: a protected path outranks the pending
+    // badge and carries a warning colour instead of a git one. Both are correct;
+    // pinning one would just make this test depend on the fixture's file names.
+    assert.ok(["!", "\u26a0"].includes(String(d!.badge)),
+      `unexpected badge ${d!.badge} — expected the pending '!' or the protected warning`);
+    if (d!.badge === "!") {
+      assert.match(String(d!.color), /^gitDecoration\./,
+        "an ordinary pending file uses one of git's own semantic colours");
+    }
+  });
+
   it("Accept All accepts worktree files too, not just the primary's", async () => {
     const wt = someWorktreeRoot();
     const wtPendingBefore = Object.keys(readSession(wt)?.files ?? {}).length;
@@ -78,4 +102,3 @@ describe("actions span every session the panels draw from", () => {
       (await scopes()).accepted > 0);
   });
 });
-

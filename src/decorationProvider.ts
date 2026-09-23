@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { SessionManager } from "./sessionManager";
+import { WorktreeSessionRegistry } from "./worktreeSessionRegistry";
 import { isExcluded, isProtected } from "./workspaceScope";
 
 // Colours are git's OWN semantic theme colours, deliberately — not an invented
@@ -37,13 +38,31 @@ export class ClaudeGateDecorationProvider
   >();
   readonly onDidChangeFileDecorations = this._onDidChange.event;
 
-  constructor(private readonly sessionManager: SessionManager) {
+  // The registry is how a file inside a nested worktree finds its OWN session.
+  // Without it this provider read the primary session alone, and a worktree's
+  // pending files are never in there — they live in the worktree's own session
+  // file (verified: zero path overlap between a worktree session and its
+  // parent's). So every one of them fell through the `!entry` guard below and
+  // got no badge and no colour at all, anywhere in the Explorer.
+  //
+  // That was silent for most people — the file simply looked undecorated. It
+  // only became visible to a user whose worktree parent directory is gitignored,
+  // where git's ignored-grey filled the vacuum. Same root cause as the bulk
+  // actions in reviewScopes.ts: "the primary session" is never the answer.
+  constructor(
+    private readonly sessionManager: SessionManager,
+    private readonly worktreeRegistry?: WorktreeSessionRegistry
+  ) {
     sessionManager.onSessionChange(() => this._onDidChange.fire(undefined));
+    // A decision taken inside a worktree must repaint the Explorer too, or the
+    // badge lingers on a file that is no longer pending.
+    worktreeRegistry?.onChange(() => this._onDidChange.fire(undefined));
   }
 
   provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
     if (uri.scheme !== "file") return undefined;
-    const session = this.sessionManager.getSession();
+    const owner = this.worktreeRegistry?.managerFor(uri.fsPath) ?? this.sessionManager;
+    const session = owner.getSession();
     const entry = session?.files[uri.fsPath];
     if (!entry) return undefined;
     if (isExcluded(uri.fsPath)) return undefined;

@@ -5,6 +5,7 @@ import { ExcludeMatcher } from "./excludeMatcher";
 import { setExcludeMatcher, setProtectedMatcher } from "./workspaceScope";
 import { Uri } from "./test-stubs/vscode";
 import type { SessionManager } from "./sessionManager";
+import type { WorktreeSessionRegistry } from "./worktreeSessionRegistry";
 
 // Until this split, every pending file got gitDecoration.modifiedResourceForeground
 // — including files Claude had CREATED. That overpainted the untracked-green git
@@ -92,4 +93,83 @@ const entry = (originalContent: string | null) => ({
     "files ClaudeGate knows nothing about must stay undecorated",
   );
   console.log("ok - a file with no pending entry is left undecorated");
+}
+
+// ── A pending file inside a WORKTREE is decorated ───────────────────────────
+// This provider read the primary session alone, and a worktree's pending files
+// are never in there — they live in the worktree's own session file (verified
+// against real data: zero path overlap between a worktree session and its
+// parent's). Every one of them fell through the `!entry` guard and came back
+// undecorated: no badge, no colour, anywhere in the Explorer. Silent for most
+// people, because an undecorated file just looks normal; visible only to someone
+// whose worktree parent is gitignored, where git's ignored-grey filled the gap.
+{
+  setExcludeMatcher(new ExcludeMatcher());
+  setProtectedMatcher(new ExcludeMatcher());
+
+  const WT_ROOT = path.join(path.sep, "repo", "ws-alpha", "service-api");
+  const WT_FILE = path.join(WT_ROOT, "handler.go");
+
+  // The primary session knows nothing about the worktree's file — the shape the
+  // bug depended on.
+  const primary = {
+    onSessionChange: () => ({ dispose() {} }),
+    getSession: () => ({ files: { [EDIT]: entry("before\n") } }),
+  } as unknown as SessionManager;
+
+  const worktreeMgr = {
+    onSessionChange: () => ({ dispose() {} }),
+    getSession: () => ({ files: { [WT_FILE]: entry(null) } }),
+  } as unknown as SessionManager;
+
+  const registry = {
+    onChange: () => ({ dispose() {} }),
+    managerFor: (fp: string) => (fp.startsWith(WT_ROOT + path.sep) ? worktreeMgr : null),
+  } as unknown as WorktreeSessionRegistry;
+
+  const withRegistry = new ClaudeGateDecorationProvider(primary, registry);
+  const d = withRegistry.provideFileDecoration(Uri.file(WT_FILE) as never);
+  assert.ok(d, "a pending file inside a worktree must be decorated");
+  assert.strictEqual(d!.badge, "!", "it gets the pending badge like any other file");
+  assert.strictEqual(
+    (d!.color as unknown as { id: string }).id,
+    "gitDecoration.untrackedResourceForeground",
+    "and the right colour for a file Claude created inside that worktree",
+  );
+
+  // The primary's own files still resolve through the primary.
+  const dPrimary = withRegistry.provideFileDecoration(Uri.file(EDIT) as never);
+  assert.strictEqual(
+    (dPrimary!.color as unknown as { id: string }).id,
+    "gitDecoration.modifiedResourceForeground",
+    "a file outside every worktree still resolves against the primary session",
+  );
+
+  // And the regression itself: without a registry, that same file is invisible.
+  const withoutRegistry = new ClaudeGateDecorationProvider(primary);
+  assert.strictEqual(
+    withoutRegistry.provideFileDecoration(Uri.file(WT_FILE) as never),
+    undefined,
+    "no registry → the worktree file is undecorated (this was the bug)",
+  );
+  console.log("ok - a pending file inside a worktree is decorated via its own session");
+}
+
+// ── An unknown path falls back to the primary, never throws ─────────────────
+{
+  const primary = {
+    onSessionChange: () => ({ dispose() {} }),
+    getSession: () => ({ files: {} }),
+  } as unknown as SessionManager;
+  const registry = {
+    onChange: () => ({ dispose() {} }),
+    managerFor: () => null,
+  } as unknown as WorktreeSessionRegistry;
+  const p = new ClaudeGateDecorationProvider(primary, registry);
+  assert.strictEqual(
+    p.provideFileDecoration(Uri.file(path.join(path.sep, "elsewhere", "x.go")) as never),
+    undefined,
+    "managerFor returning null falls back to the primary, which knows nothing",
+  );
+  console.log("ok - a path owned by no worktree falls back to the primary session");
 }

@@ -339,10 +339,9 @@ export function activate(context: vscode.ExtensionContext): void {
       )
     );
 
+    const decorationProvider = new ClaudeGateDecorationProvider(sessionManager, worktreeRegistry);
     context.subscriptions.push(
-      vscode.window.registerFileDecorationProvider(
-        new ClaudeGateDecorationProvider(sessionManager)
-      )
+      vscode.window.registerFileDecorationProvider(decorationProvider)
     );
     // ── Three sidebar panels ───────────────────────────────────────────────
     const pendingView = vscode.window.createTreeView("claudegate.pendingPanel", {
@@ -484,6 +483,12 @@ export function activate(context: vscode.ExtensionContext): void {
           total: pendingProvider.totalPendingInScope(),
           description: pendingView.description ?? null,
         })),
+        // Decorations are not readable through the public API, so the seam asks
+        // the provider directly — the same instance the Explorer is using.
+        vscode.commands.registerCommand("claudegate._test.decorationFor", (p: string) => {
+          const d = decorationProvider.provideFileDecoration(vscode.Uri.file(p));
+          return d ? { badge: d.badge, color: (d.color as { id?: string })?.id ?? null } : null;
+        }),
         vscode.commands.registerCommand("claudegate._test.setFilter", (f: string | null) => {
           pendingProvider.setFilter(f);
           refreshPendingFilterUi();

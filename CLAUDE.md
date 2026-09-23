@@ -484,8 +484,20 @@ field as "accepted clear not clear file in worktree".
   `reapplyFile` already did; `revertAcceptedFolder` and `reapplyFolder` did not,
   and were silent no-ops on any folder row inside a worktree group.
 
+- **The Explorer decoration is the same question wearing different clothes.**
+  `ClaudeGateDecorationProvider` took only the primary `SessionManager`, so a
+  pending file inside a worktree matched no entry and came back undecorated — no
+  `!` badge, no colour, anywhere in the Explorer. Unlike the bulk actions this was
+  invisible even to the person affected, because an undecorated file just looks
+  like a normal file; it only surfaced for a user whose worktree parent directory
+  is gitignored, where git's ignored-grey filled the vacuum. It now resolves the
+  owning session with `managerFor(uri.fsPath)` and repaints on the registry's
+  `onChange` as well as the primary's, so a decision taken inside a worktree
+  clears the badge.
+
 When adding an action to these panels, ask which of the two shapes it is. There
-is no third shape, and "the primary session" is never the answer.
+is no third shape, and "the primary session" is never the answer. That includes
+anything keyed by file path rather than by panel row — decorations count.
 
 ---
 
