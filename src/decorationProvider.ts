@@ -25,9 +25,17 @@ export function isNewFile(entry: { originalContent: string | null }): boolean {
   return entry.originalContent === null;
 }
 
-const BADGES: Record<string, string> = {
-  pending: "!",
-};
+// Two badges, because colour alone must not be the only difference. A file
+// Claude CREATED and a file Claude EDITED were previously distinguished purely
+// by untracked-green versus modified-orange — which is the single most
+// confusable pair for deuteranopia and protanopia, and invisible to anyone
+// reading a screenshot in greyscale. The information existed only in the tooltip.
+//
+// `+` reads as "added" everywhere, costs nothing (the badge slot is already
+// ours), and does not collide with git's own A/M/U/D/R — the constraint that
+// keeps this extension's badge from being mistaken for a git status.
+const BADGE_PENDING = "!";
+const BADGE_NEW = "+";
 
 const TOOLTIPS: Record<string, string> = {
   pending:  "Claude Gate: pending review",
@@ -149,7 +157,7 @@ export class ClaudeGateDecorationProvider
     const s = entry.reviewStatus;
     const isNew = isNewFile(entry);
     return {
-      badge: BADGES[s],
+      badge: isNew ? BADGE_NEW : BADGE_PENDING,
       color: isNew ? COLOR_NEW : COLOR_MODIFIED,
       tooltip: isNew
         ? "Claude Gate: pending review — new file"

@@ -61,9 +61,11 @@ describe("actions span every session the panels draw from", () => {
     // Which badge depends on the file: a protected path outranks the pending
     // badge and carries a warning colour instead of a git one. Both are correct;
     // pinning one would just make this test depend on the fixture's file names.
-    assert.ok(["!", "\u26a0"].includes(String(d!.badge)),
-      `unexpected badge ${d!.badge} — expected the pending '!' or the protected warning`);
-    if (d!.badge === "!") {
+    // "!" edited, "+" created, warning for a protected path — all three are valid
+    // here; pinning one would make this depend on the fixture's file contents.
+    assert.ok(["!", "+", "\u26a0"].includes(String(d!.badge)),
+      `unexpected badge ${d!.badge} — expected '!', '+' or the protected warning`);
+    if (d!.badge === "!" || d!.badge === "+") {
       assert.match(String(d!.color), /^gitDecoration\./,
         "an ordinary pending file uses one of git's own semantic colours");
     }
