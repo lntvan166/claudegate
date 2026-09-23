@@ -392,6 +392,11 @@
           "group": "navigation@1"
         },
         {
+          "command": "claudegate.reviewAllPending",
+          "when": "view == claudegate.pendingPanel",
+          "group": "navigation@1.5"
+        },
+        {
           "command": "claudegate.viewAsTree",
           "when": "view == claudegate.acceptedPanel && claudegate.viewMode == 'list'",
           "group": "navigation@1"
