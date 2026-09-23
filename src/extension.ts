@@ -172,17 +172,27 @@ export function activate(context: vscode.ExtensionContext): void {
     // One-time sweep: drop session files whose workspace tree is gone from disk
     // (deleted projects, stray test fixtures). Fail-soft and never touches a
     // live workspace's session — see sessionGc.isOrphanedSession.
-    try {
-      const removed = gcOrphanedSessions(
-        path.join(os.homedir(), ".claudegate", "sessions"),
-        { log: (m) => log.appendLine(m) }
-      );
-      if (removed.length > 0) {
-        log.appendLine(`[INFO] GC removed ${removed.length} orphaned session file(s).`);
+    //
+    // Deferred off the first tick. VS Code counts everything activate() does
+    // before it returns as the extension's activation time, and this reads and
+    // parses EVERY session file in the directory — measured at 5-16 ms over 42
+    // files / 2.45 MB. Nobody is waiting on the result: it deletes files for
+    // workspaces that no longer exist. A setTimeout(0) takes it off the number
+    // the user sees in Show Running Extensions without changing what it does.
+    const gcTimer = setTimeout(() => {
+      try {
+        const removed = gcOrphanedSessions(
+          path.join(os.homedir(), ".claudegate", "sessions"),
+          { log: (m) => log.appendLine(m) }
+        );
+        if (removed.length > 0) {
+          log.appendLine(`[INFO] GC removed ${removed.length} orphaned session file(s).`);
+        }
+      } catch (err) {
+        log.appendLine(`[WARN] session GC failed: ${(err as Error).message}`);
       }
-    } catch (err) {
-      log.appendLine(`[WARN] session GC failed: ${(err as Error).message}`);
-    }
+    }, 0);
+    context.subscriptions.push({ dispose: () => clearTimeout(gcTimer) });
 
     const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     const excludeMatcher = new ExcludeMatcher();
@@ -594,7 +604,14 @@ export function activate(context: vscode.ExtensionContext): void {
 
     // ── History panel (view-only archives from Clear Session) ───────────────
     const historyProvider = new HistoryTreeProvider(workspacePath ?? null);
-    historyProvider.start();
+    // Also deferred, and for the same reason but a bigger number: start() reads
+    // and parses every archive in ~/.claudegate/history before filtering them by
+    // workspace — measured at 34-40 ms over 12.4 MB, to render zero rows in a
+    // workspace with no archives. It is the largest single synchronous item in
+    // activate(). The History view is collapsed and gated on historyCount
+    // anyway, so nothing on screen is waiting for it.
+    const historyStartTimer = setTimeout(() => historyProvider.start(), 0);
+    context.subscriptions.push({ dispose: () => clearTimeout(historyStartTimer) });
     const historyView = vscode.window.createTreeView("claudegate.historyPanel", {
       treeDataProvider: historyProvider,
     });

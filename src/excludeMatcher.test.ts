@@ -116,3 +116,62 @@ run("package.json default maps match the DEFAULT_ constants (no drift)", () => {
 });
 
 console.log("done");
+
+// ── The memo must not outlive the pattern set that produced it ───────────────
+// isExcluded() caches per path because it is asked O(nodes x files) times per
+// tree render — 15.5 us uncached, measured on a real monorepo path. The whole
+// risk of that cache is staleness: a cached "not excluded" surviving a config
+// change would silently keep showing files the user just asked to hide, and a
+// cached "excluded" would silently keep hiding files they just un-hid.
+{
+  const m = new ExcludeMatcher();
+  const file = "/repo/docs/plan.md";
+
+  m.reload({ "**/*.md": true }, "/repo");
+  assert.strictEqual(m.isExcluded(file), true, "matches the active pattern");
+  assert.strictEqual(m.isExcluded(file), true, "and again, from cache");
+
+  // Same path, different rules — the cached answer must not survive.
+  m.reload({ "**/*.ts": true }, "/repo");
+  assert.strictEqual(m.isExcluded(file), false,
+    "reload() must invalidate: the .md rule is gone, so this file is no longer excluded");
+
+  m.reload({ "**/*.md": true }, "/repo");
+  assert.strictEqual(m.isExcluded(file), true, "and back again when the rule returns");
+  console.log("ok - reload() invalidates cached answers in both directions");
+}
+
+// ── Changing only the workspace root also invalidates ───────────────────────
+// The relative path and its ancestor dirs are derived from the root, so the same
+// absolute path can match under one root and not another.
+{
+  const m = new ExcludeMatcher();
+  const file = "/repo/build/out.js";
+
+  m.reload({ "build/**": true }, "/repo");
+  assert.strictEqual(m.isExcluded(file), true, "relative to /repo the path is build/out.js");
+
+  m.reload({ "build/**": true }, "/elsewhere");
+  assert.strictEqual(m.isExcluded(file), false,
+    "under a different root there is no relative path to match, so the cache must not answer");
+  console.log("ok - a workspace-root change invalidates the cache too");
+}
+
+// ── Caching does not change any answer ──────────────────────────────────────
+// Ask every path twice and compare: the second (cached) answer must equal the
+// first (computed) one, for matches and non-matches alike.
+{
+  const m = new ExcludeMatcher();
+  m.reload({ "**/*.md": true, "**/node_modules/**": true, "dist/**": true }, "/repo");
+  const paths = [
+    "/repo/docs/plan.md", "/repo/src/a.ts", "/repo/node_modules/x/y.js",
+    "/repo/dist/bundle.js", "/repo/distant/file.ts", "/elsewhere/z.md", "/repo/README",
+  ];
+  for (const p of paths) {
+    const first = m.isExcluded(p);
+    assert.strictEqual(m.isExcluded(p), first, `cached answer differs for ${p}`);
+  }
+  assert.strictEqual(m.isExcluded("/repo/distant/file.ts"), false,
+    "sanity: `dist/**` must not match `distant/` — the cache is not hiding a wrong answer");
+  console.log("ok - cached answers are identical to computed ones");
+}

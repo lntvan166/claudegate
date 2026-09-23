@@ -44,15 +44,34 @@ export function globToRegExp(glob: string): RegExp {
   return new RegExp("^" + re + "$");
 }
 
+// A matched path is cached because the answer only changes when the pattern set
+// or the workspace root does, and the question is asked an enormous number of
+// times: filteredFiles()/pendingOf() run it over every pending entry, and the
+// tree calls those afresh for the root and for EVERY expanded folder — so the
+// work is O(nodes x files). isProtected() is the same class and is asked again
+// inside every sort comparator. Measured at 15.5 us per uncached call on a real
+// monorepo path: ~150 anchored regexes, each with a leading `.*`, against the
+// absolute path, the relative path and every ancestor directory, plus a fresh
+// array and a string allocation every time.
+//
+// Bounded because isExcluded() is also called from provideFileDecoration() for
+// arbitrary Explorer paths, not just the pending set — an unbounded map would
+// grow with everything the user ever scrolls past.
+const CACHE_MAX = 20_000;
+
 export class ExcludeMatcher {
   private patterns: RegExp[] = [];
   private root = "";
+  private cache = new Map<string, boolean>();
 
   // Rebuild the active pattern set. Only entries mapped to `true` are active.
   // An individual glob that fails to compile is skipped (fail open).
   reload(excludeMap: Record<string, boolean> | undefined, workspaceRoot?: string): void {
     this.root = (workspaceRoot ?? "").replace(/\\/g, "/");
     this.patterns = [];
+    // The cached answers were computed against the OLD pattern set and root, so
+    // they are all invalid now. This is the only thing either input depends on.
+    this.cache.clear();
     if (!excludeMap) return;
     for (const [glob, active] of Object.entries(excludeMap)) {
       if (!active) continue;
@@ -70,6 +89,18 @@ export class ExcludeMatcher {
   // "**/dist") excludes everything inside it, which is what users expect.
   isExcluded(filePath: string): boolean {
     if (this.patterns.length === 0) return false;
+    const hit = this.cache.get(filePath);
+    if (hit !== undefined) return hit;
+    const value = this.compute(filePath);
+    // Simplest bound that cannot leak: drop everything and start again. A tree
+    // render re-warms in one pass, and the alternative (LRU bookkeeping) costs
+    // more per call than the regex test it is protecting.
+    if (this.cache.size >= CACHE_MAX) this.cache.clear();
+    this.cache.set(filePath, value);
+    return value;
+  }
+
+  private compute(filePath: string): boolean {
     const abs = filePath.replace(/\\/g, "/");
     const candidates: string[] = [abs];
     if (this.root && abs.startsWith(this.root + "/")) {
