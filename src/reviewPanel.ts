@@ -180,15 +180,30 @@ export class FileReviewItem extends vscode.TreeItem {
     // across refreshes (a pending path is unique in the tree: each file belongs
     // to exactly one session/worktree scope).
     this.id = `pending::${filePath}`;
-    // NB: intentionally NO `this.command`. Opening the diff is wired to the tree
-    // view's onDidChangeSelection in extension.ts instead. Binding the open to a
-    // TreeItem.command means VS Code dispatches it through the tree's own
-    // click→command path, which — when the row's node is stale mid-refresh (e.g.
-    // right after accepting another file) — executes a MALFORMED command id
-    // ("claudegate.openDiff/<treeHandle>", e.g. ".../59") and shows "Actual
-    // command not found" (microsoft/vscode#173233). Handling selection ourselves
-    // and calling openDiff(filePath, sessionManager) directly removes that
-    // fragile dispatch entirely.
+    // Opening runs through TWO paths, deliberately.
+    //
+    // `onDidChangeSelection` alone cannot see a click on a row that is ALREADY
+    // selected — measured in a real host: selecting the same row twice fires the
+    // event once. That used to be a rare edge case, but revealing the active
+    // file's row made it the normal one: open a file and its row is already
+    // selected, so clicking it could never re-open the diff.
+    //
+    // `TreeItem.command` fires on every click regardless, and is the only API
+    // that does — TreeView exposes no open/click event. It was dropped once
+    // before, because a stale node mid-refresh made VS Code dispatch a malformed
+    // id ("claudegate.openDiff/<treeHandle>", microsoft/vscode#173233). The
+    // stable `id` below postdates that decision and is exactly what stops a node
+    // going stale across a refresh, so the condition it depended on should no
+    // longer hold — but since that cannot be proven without a real click during a
+    // refresh, the selection path stays as a fallback rather than being replaced.
+    // openDiff() collapses the pair when a click triggers both.
+    this.command = {
+      command: "claudegate.openDiff",
+      title: "Open Diff",
+      // The command resolves the owning (possibly worktree) session itself, so a
+      // row only has to name its file.
+      arguments: [filePath],
+    };
     if (isProtected(filePath)) {
       this.iconPath = new vscode.ThemeIcon("warning", new vscode.ThemeColor("list.warningForeground"));
       this.tooltip = new vscode.MarkdownString(
@@ -216,6 +231,14 @@ export class RecordReviewItem extends vscode.TreeItem {
     this.filePath = record.path;
     this.recordId = record.id;
     this.contextValue = decision === "accepted" ? "claudegate.file.accepted" : "claudegate.file.rejected";
+    // Same two-path reasoning as FileReviewItem above: the Accepted/Rejected
+    // panels open on selection too, so re-clicking an already-selected record row
+    // was equally dead.
+    this.command = {
+      command: "claudegate.openReviewRecord",
+      title: "Open Record Diff",
+      arguments: [record.id],
+    };
     // Stable across refreshes (see FileReviewItem). record.id is already unique
     // (`<decidedAt>::<path>`); prefix with the decision to stay unique if the
     // same record id ever surfaced in both logs.

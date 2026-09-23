@@ -119,10 +119,29 @@ export async function openHistoryRecord(archiveFile: string, rec: HistoryRecordR
 // files{} is pending-only now; accepted/rejected records are shown via
 // openReviewRecord() below, diffing each record's own before/after snapshot.
 
+// A single click can arrive down two paths: TreeItem.command fires on every
+// click, and a click that also CHANGES the selection fires onDidChangeSelection
+// as well (see FileReviewItem). VS Code reuses the diff editor, so a double open
+// is invisible — but openDiff reads the file off disk to compute the change
+// count, and on a large file that is real work to do twice per click.
+//
+// Short window on purpose: it only has to span one click's two events, never a
+// user deliberately re-opening the same diff.
+const OPEN_DEDUPE_MS = 300;
+let lastOpened: { key: string; at: number } | null = null;
+
+function openedJustNow(key: string): boolean {
+  const now = Date.now();
+  if (lastOpened && lastOpened.key === key && now - lastOpened.at < OPEN_DEDUPE_MS) return true;
+  lastOpened = { key, at: now };
+  return false;
+}
+
 export async function openDiff(
   filePath: string,
   sessionManager: SessionManager
 ): Promise<void> {
+  if (openedJustNow(`file:${filePath}`)) return;
   const session = sessionManager.getSession();
   if (!session?.files[filePath]) return;
 
@@ -172,6 +191,7 @@ export async function openDiff(
 // ─── Open a record diff (Accepted / Rejected rows) ──────────────────────────
 
 export async function openReviewRecord(id: string, sessionManager: SessionManager): Promise<void> {
+  if (openedJustNow(`rec:${id}`)) return;
   const session = sessionManager.getSession();
   if (!session) return;
   const rec = [...session.accepted, ...Object.values(session.rejected)].find((r) => r.id === id);

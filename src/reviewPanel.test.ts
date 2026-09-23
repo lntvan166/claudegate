@@ -62,10 +62,12 @@ import { executedCommands } from "./test-stubs/vscode";
   const r2 = new RecordReviewItem(rec, "accepted");
   assert.ok(r.id, "RecordReviewItem has an id");
   assert.equal(r.id, r2.id, "same record → same id across refreshes");
-  // Opened via the Accepted/Rejected views' onDidChangeSelection, not a command.
-  assert.equal(r.command, undefined, "no TreeItem.command (opened via onDidChangeSelection)");
-  assert.equal(r.recordId, rec.id, "exposes recordId for the selection handler");
-  console.log("ok - RecordReviewItem carries a stable id, recordId, and no command");
+  const cmd = r.command as { command: string; arguments: unknown[] };
+  assert.equal(cmd?.command, "claudegate.openReviewRecord",
+    "carries a TreeItem.command — onDidChangeSelection cannot see a click on an already-selected row");
+  assert.deepEqual(cmd?.arguments, [rec.id], "the command is given the record id to open");
+  assert.equal(r.recordId, rec.id, "still exposes recordId for the selection fallback path");
+  console.log("ok - RecordReviewItem carries a stable id, recordId, and its open command");
 }
 
 // ── Container nodes (Folder / Session) carry ids so leaves keep their parent ──
@@ -81,17 +83,21 @@ import { executedCommands } from "./test-stubs/vscode";
   console.log("ok - Folder/Session container nodes carry ids");
 }
 
-// ── Pending rows open via selection, NOT a TreeItem.command ───────────────────
-// Binding the open to TreeItem.command lets VS Code dispatch it through the tree's
-// click→command path, which fails with "Actual command not found, wanted to
-// execute claudegate.openDiff/<handle>" when the node is stale mid-refresh (right
-// after accepting another file — microsoft/vscode#173233). The pending panel's
-// onDidChangeSelection handler opens the diff instead, so the row must (a) carry
-// no command and (b) expose the SessionManager the handler passes to openDiff.
+// ── Pending rows open via BOTH a TreeItem.command and selection ───────────────
+// onDidChangeSelection cannot see a click on a row that is already selected —
+// measured in a real host, selecting the same row twice fires the event once.
+// Revealing the active file's row made that the normal case rather than an edge
+// case, so clicking the row of the file you already have open did nothing.
+// TreeItem.command fires on every click and is the only API that does; the
+// selection path is kept as a fallback, and openDiff() collapses the pair.
 {
   const mgr = {} as unknown as SessionManager;
-  const item = new FileReviewItem(path.join(path.sep, "tmp", "x.ts"), "pending", mgr);
-  assert.equal(item.command, undefined, "no TreeItem.command (opened via onDidChangeSelection)");
-  assert.equal(item.sessionManager, mgr, "exposes its SessionManager for the selection handler");
-  console.log("ok - FileReviewItem opens via selection, carries its manager, has no command");
+  const fp = path.join(path.sep, "tmp", "x.ts");
+  const item = new FileReviewItem(fp, "pending", mgr);
+  const cmd = item.command as { command: string; arguments: unknown[] };
+  assert.equal(cmd?.command, "claudegate.openDiff", "clicking a row dispatches the open command");
+  assert.deepEqual(cmd?.arguments, [fp],
+    "given only the path — the command resolves the owning worktree session itself");
+  assert.equal(item.sessionManager, mgr, "still exposes its SessionManager for the selection fallback");
+  console.log("ok - FileReviewItem opens via a click command, with selection as a fallback");
 }

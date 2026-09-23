@@ -523,12 +523,28 @@ Three things about it are load-bearing and each was learned by getting it wrong:
   claimed the opposite, which is why it first shipped as `focus: false`.
   `{ select: false, focus: false }` is worse still — it only scrolls, so a row
   already on screen gets no indication at all and the feature looks dead.
-- **Selecting a row is what opens its diff**, so a selecting reveal would pop a
-  diff open on every tab switch. `revealingPath` marks the window in which a
-  selection is ours; the selection handler consumes the mark instead of opening.
-  It is cleared by the matching event, with `REVEAL_GUARD_MS` only as a backstop,
-  because `reveal()` crosses the ext-host/renderer boundary and the selection can
-  arrive after its promise resolves.
+- **Selecting a row is one of two ways its diff opens**, so a selecting reveal
+  would pop a diff open on every tab switch. `revealingPath` marks the window in
+  which a selection is ours; the selection handler consumes the mark instead of
+  opening. It is cleared by the matching event, with `REVEAL_GUARD_MS` only as a
+  backstop, because `reveal()` crosses the ext-host/renderer boundary and the
+  selection can arrive after its promise resolves.
+- **A row also carries a `TreeItem.command`, and must.** `onDidChangeSelection`
+  cannot see a click on a row that is *already* selected — measured in a real
+  host, selecting the same row twice fires the event exactly once. That was a
+  rare edge case until this reveal landed and started selecting the row for
+  whatever file you are viewing; after that, clicking the row of the file you
+  already had open did nothing at all, which is how it was reported. No TreeView
+  open/click event exists, so `TreeItem.command` is the only fix. It had been
+  dropped once before (microsoft/vscode#173233, a malformed dispatched id when a
+  node went stale mid-refresh) — but the stable row `id`s postdate that decision
+  and are precisely what stops a node going stale, so the condition it depended
+  on should no longer hold — **confirmed by hand on 1.138**: clicking rows,
+  including during refreshes right after an accept, dispatches cleanly with no
+  "command not found". The selection path is nonetheless kept as a fallback
+  rather than replaced, because one session of clicking is weaker evidence than
+  the bug report that removed it, and `openDiff()` collapses the two events one
+  click can produce.
 
 The reveal is coalesced and runs only while the panel is visible; `chainTo()` is
 pure in-memory work with no disk I/O, so it stays off the expensive-trigger list

@@ -19,7 +19,11 @@ describe("command registration", () => {
       "claudegate.clearRejected",
       "claudegate.revertAcceptedFolder",
       "claudegate.reapplyFolder",
+      // Both of these are dispatched by TreeItem.command on every row click. An
+      // unregistered id here means an error toast on every click, so this list is
+      // the cheap guard for that.
       "claudegate.openDiff",
+      "claudegate.openReviewRecord",
       "claudegate.openActiveDiff",
       "claudegate.openFile",
     ]) {
