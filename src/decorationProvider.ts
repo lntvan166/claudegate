@@ -43,9 +43,13 @@ export class ClaudeGateDecorationProvider
   >();
   readonly onDidChangeFileDecorations = this._onDidChange.event;
 
+  // The set of pending paths at the last repaint. Diffing against it is what
+  // lets us invalidate only what changed — see invalidateChanged().
+  private lastPaths = new Set<string>();
+
   private readonly coalescedInvalidate = createCoalescer(
     DECORATION_COALESCE_MS,
-    () => this._onDidChange.fire(undefined)
+    () => this.invalidateChanged()
   );
 
   // The registry is how a file inside a nested worktree finds its OWN session.
@@ -74,6 +78,44 @@ export class ClaudeGateDecorationProvider
     // A decision taken inside a worktree must repaint the Explorer too, or the
     // badge lingers on a file that is no longer pending.
     worktreeRegistry?.onChange(() => this.coalescedInvalidate.schedule());
+  }
+
+  /** Every path that currently has a pending entry, across the primary session
+   *  and every attached worktree — the only paths this provider decorates. */
+  private currentPaths(): Set<string> {
+    const out = new Set<string>();
+    const add = (m: SessionManager): void => {
+      const session = m.getSession();
+      if (!session) return;
+      for (const fp of Object.keys(session.files)) out.add(fp);
+    };
+    add(this.sessionManager);
+    for (const [, m] of this.worktreeRegistry?.getManagers() ?? []) add(m);
+    return out;
+  }
+
+  /** Invalidate the rows that changed, never the whole Explorer.
+   *
+   *  Firing `undefined` tells VS Code every decoration is stale, so it drops all
+   *  of them and re-queries — and in the gap each row falls back to the default
+   *  theme foreground. That reads as the panel blinking white and reloading on
+   *  every accept. Firing a path list repaints only those rows, so everything
+   *  else keeps its colour untouched.
+   *
+   *  A path's decoration can only change when it enters or leaves the pending
+   *  set: the hook never rewrites an entry that is already pending, and the
+   *  colour depends on `originalContent === null`, which is fixed for the life
+   *  of an entry. So the symmetric difference is the complete change set. */
+  private invalidateChanged(): void {
+    const now = this.currentPaths();
+    const changed: vscode.Uri[] = [];
+    for (const fp of now) if (!this.lastPaths.has(fp)) changed.push(vscode.Uri.file(fp));
+    for (const fp of this.lastPaths) if (!now.has(fp)) changed.push(vscode.Uri.file(fp));
+    this.lastPaths = now;
+    // A session change that touched no pending path — a decision recorded in the
+    // accepted log, say — needs no repaint at all.
+    if (changed.length === 0) return;
+    this._onDidChange.fire(changed);
   }
 
   dispose(): void {

@@ -182,10 +182,11 @@ const entry = (originalContent: string | null) => ({
 // collapses it; this one did not.
 void (async () => {
   let fires = 0;
+  let files: Record<string, unknown> = { [EDIT]: entry("before\n") };
   const listeners: Array<() => void> = [];
   const mgr = {
     onSessionChange: (cb: () => void) => { listeners.push(cb); return { dispose() {} }; },
-    getSession: () => ({ files: {} }),
+    getSession: () => ({ files }),
   } as unknown as SessionManager;
 
   const p = new ClaudeGateDecorationProvider(mgr);
@@ -199,10 +200,60 @@ void (async () => {
   assert.strictEqual(fires, 1, `a burst of 6 changes must repaint once, got ${fires}`);
 
   // A later, separate change still repaints — coalescing must not swallow it.
+  files = { [NEW]: entry(null) };
   listeners.forEach((l) => l());
   await new Promise((r) => setTimeout(r, 200));
   assert.strictEqual(fires, 2, "a later change still repaints");
 
   p.dispose();
   console.log("ok - a burst of session changes invalidates the Explorer once, not once each");
+})().catch((err) => { console.error(err); process.exit(1); });
+
+// ── Only the rows that CHANGED are invalidated ──────────────────────────────
+// Firing `undefined` tells VS Code every decoration is stale, so it drops them
+// all and re-queries — and in that gap every row falls back to the default theme
+// foreground. That is what the panel "blinking white and reloading" on every
+// accept actually was. Firing a path list repaints only those rows.
+void (async () => {
+  const A = path.join(path.sep, "repo", "a.go");
+  const B = path.join(path.sep, "repo", "b.go");
+  const C = path.join(path.sep, "repo", "c.go");
+
+  let files: Record<string, unknown> = { [A]: entry("x"), [B]: entry("x") };
+  const listeners: Array<() => void> = [];
+  const mgr = {
+    onSessionChange: (cb: () => void) => { listeners.push(cb); return { dispose() {} }; },
+    getSession: () => ({ files }),
+  } as unknown as SessionManager;
+
+  const p = new ClaudeGateDecorationProvider(mgr);
+  const seen: unknown[] = [];
+  p.onDidChangeFileDecorations((e) => seen.push(e));
+
+  // First change: both paths are new to the provider.
+  listeners.forEach((l) => l());
+  await new Promise((r) => setTimeout(r, 200));
+  assert.ok(Array.isArray(seen[0]), "invalidation must carry a path list, never undefined");
+  assert.strictEqual((seen[0] as unknown[]).length, 2, "both newly-pending paths");
+
+  // Accept A, leave B alone, add C. Only A and C changed.
+  files = { [B]: entry("x"), [C]: entry("x") };
+  listeners.forEach((l) => l());
+  await new Promise((r) => setTimeout(r, 200));
+  const second = seen[1] as Array<{ fsPath: string }>;
+  assert.ok(Array.isArray(second), "still a path list");
+  const paths = second.map((u) => u.fsPath).sort();
+  assert.deepStrictEqual(paths, [A, C].sort(),
+    "only the accepted path and the new one repaint — B keeps its decoration untouched");
+  assert.ok(!paths.includes(B), "B must NOT be invalidated: that is the flicker");
+
+  // A change that touches no pending path must not repaint at all.
+  const before = seen.length;
+  listeners.forEach((l) => l());
+  await new Promise((r) => setTimeout(r, 200));
+  assert.strictEqual(seen.length, before,
+    "a session change that alters no pending path needs no repaint");
+
+  p.dispose();
+  console.log("ok - only changed paths are invalidated, and an unchanged set repaints nothing");
 })().catch((err) => { console.error(err); process.exit(1); });
