@@ -7,6 +7,30 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.15.0] — 2026-09-23
+
+### Added
+
+- **Exclude a whole category of file from review, from the row itself.** A setting for this has always existed, but only in the Settings panel, which means writing a glob by hand at a moment when you are not thinking about globs — whereas the realisation that a category does not belong in the review happens while looking at a row. Right-clicking a pending file now offers **Exclude This File Type** and **Exclude This Folder**. One workspace had 139 markdown plans and reports sitting in a 438-file backlog; that is one click now. The prompt names the rule in plain words ("every .md file"), reports how many pending files would leave the panel, and says explicitly that this **hides rather than decides** — nothing is accepted or rejected, the changes stay on disk, and removing the pattern in the Settings panel brings the files back. Both actions refuse to build a pattern that would match too much: a name with no extension would become `**/*`, and a file sitting directly in the workspace root would become `**/<root>/**`, either of which hides the entire review. Deliberately right-click only — pending rows already carry three inline actions, and a fourth on several hundred rows is clutter.
+- **Accept or reject only the files matching the current filter.** Bulk review was all-or-nothing: to clear one category you either clicked through it file by file, or took everything with Accept All. Filter the panel and the title bar offers **Accept 139** / **Reject 139**, acting on exactly the matching files and leaving the rest pending. This makes bulk *scopeable*, which is safer than what existed rather than riskier — you type a filter, see the count, and confirm. The buttons appear only while the filter is actually narrowing the set, so they can never be a confusing duplicate of Accept All. They are called "matching" rather than "visible" on purpose: rows scroll and collapse, and accepting the wrong files is not something you can undo by scrolling back.
+- **`claudegate.autoRevealPending`** (default on) turns off the panel following the active editor. Revealing a row necessarily scrolls it into view — that is what revealing means in the editor's API, and there is no way to select a row without it — so this exists for anyone who would rather the panel never moved on its own. **Claude Gate: Reveal Active File** remains available on demand.
+
+### Fixed
+
+- **Clicking a row in the panel opens its diff again, even when that row is already selected.** Opening was wired only to the tree's selection-changed event, and selecting a row that is already selected raises no such event — measured in a real editor, selecting the same row twice fires it exactly once. That was a rare edge case until 1.14.0 started selecting the row for whatever file you were viewing; after that, the row of the file you already had open was *always* the selected one, so clicking it did nothing at all. Reported as: open a file's diff, switch to another tab, click that file in the panel, and the editor stays where it is. Rows now also carry a click command, which fires every time. The Accepted and Rejected panels had the identical dead re-click and are fixed the same way.
+- **The panel no longer nudges its own scroll position every time you click a row.** Clicking a row selects it, opens the diff, changes the active editor and so triggers the reveal added in 1.14.0 — and revealing re-scrolls even a row already on screen. The result was a list that shifted slightly under the cursor on every click. VS Code's own Explorer never re-reveals a row you just clicked; this now matches it, by skipping the reveal entirely when the row is already selected. Switching editor tabs to a file whose row is *not* selected still reveals it.
+- **Files inside a nested git worktree are decorated in the file explorer again.** The decoration provider read only the primary session, and a worktree's pending files live in that worktree's own session — verified against real data, the two never overlap. So every file inside every worktree came back undecorated: no `!` badge, no colour, no tooltip. This was silent for almost everyone, because an undecorated file simply looks like a normal file; it only became visible to a user whose worktree parent directory is gitignored, where git's ignored-grey filled the vacuum. Note that where git also decorates a path, git's colour still wins: the editor pins every extension's decorations to the same priority, so ties fall to load order and the git extension loads first. Raising `git.repositoryScanMaxDepth` so the editor opens each worktree as its own repository is the real remedy there, and it is a setting rather than something an extension can change.
+
+### Internal
+
+- Integration coverage grows to 26 tests against a real editor, now covering the filter, the scoped bulk actions, the reveal's no-op skip, and worktree decorations. Each new assertion was validated by reverting the fix it guards and confirming the suite goes red, rather than by trusting a green run.
+- `build:itest` clears its output directory first. A deleted test file left its compiled copy behind and kept running, which produced a confusing red run against correct code.
+- Two guards came directly from tests written before the code: an exclude pattern derived from a file in the workspace root would have hidden the entire review, and checking "is this row already selected" before confirming the row exists stopped the filter clearing itself.
+
+### Notes
+
+- **No need to re-run Setup Hook.** No hook changes in this release.
+
 ## [1.14.0] — 2026-09-22
 
 ### Added
