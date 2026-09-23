@@ -88,3 +88,103 @@ describe("revealing the active file in the Pending panel", () => {
     );
   });
 });
+
+// Revealing necessarily scrolls — that is what "reveal" means in the TreeView
+// API, and there is no option to select without it. So the panel following the
+// editor has to be switchable off, or a user who wants a stable scroll position
+// has no way out.
+describe("auto-reveal can be turned off", () => {
+  before(async () => activateExtension());
+
+  after(async () => {
+    await vscode.workspace.getConfiguration("claudegate")
+      .update("autoRevealPending", undefined, vscode.ConfigurationTarget.Global);
+  });
+
+  it("registers the on-demand command, so turning it off loses nothing", async () => {
+    const all = await vscode.commands.getCommands(true);
+    assert.ok(all.includes("claudegate.revealActiveFile"),
+      "claudegate.revealActiveFile must exist as the manual escape hatch");
+  });
+
+  it("stops following the editor when disabled", async () => {
+    const files = await waitFor("two pending files", () => {
+      const a = sessionRoots().flatMap((r) => Object.keys(readSession(r)?.files ?? {})).sort();
+      return a.length >= 2 ? a : undefined;
+    });
+    await showPendingPanel();
+
+    // Establish a known selection while the feature is on.
+    await openEditor(files[0]);
+    await waitFor("the first row selected", async () =>
+      (await revealState()).selection.includes(files[0]));
+
+    await vscode.workspace.getConfiguration("claudegate")
+      .update("autoRevealPending", false, vscode.ConfigurationTarget.Global);
+
+    await openEditor(files[1]);
+    await new Promise((r) => setTimeout(r, 1200));
+    const after = await revealState();
+    assert.deepStrictEqual(after.selection, [files[0]],
+      "with auto-reveal off the selection must NOT follow the editor — that is what keeps the scroll position still");
+
+    // And the manual command still does the job on request.
+    await vscode.commands.executeCommand("claudegate.revealActiveFile");
+    await waitFor("the manual reveal to move the selection", async () =>
+      (await revealState()).selection.includes(files[1]));
+  });
+});
+
+// The panel nudged its own scroll position after every click: clicking a row
+// selects it, opens the diff, changes the active editor and comes straight back
+// here — and reveal() re-scrolls even an element already on screen. The Explorer
+// does not do this because it never re-reveals a row you just clicked.
+describe("does not re-reveal a row that is already selected", () => {
+  const revealCount = () => vscode.commands.executeCommand<number>("claudegate._test.revealCount");
+
+  before(async () => {
+    await activateExtension();
+    await showPendingPanel();
+  });
+
+  it("skips the reveal when the active file's row is already the selection", async () => {
+    const files = await waitFor("two pending files", () => {
+      const a = sessionRoots().flatMap((r) => Object.keys(readSession(r)?.files ?? {})).sort();
+      return a.length >= 2 ? a : undefined;
+    });
+
+    // Moving to a NOT-selected row must reveal: that is the feature.
+    await openEditor(files[0]);
+    await waitFor("the row to be selected", async () =>
+      (await revealState()).selection.includes(files[0]));
+    const afterFirst = await revealCount();
+
+    // Re-activating the same file must NOT reveal again — its row is already
+    // selected, so there is nothing to scroll to.
+    await closeAllEditors();
+    await openEditor(files[0]);
+    await new Promise((r) => setTimeout(r, 1200));
+    assert.strictEqual(await revealCount(), afterFirst,
+      "re-opening the already-selected file must not reveal again (this is what moved the scroll)");
+
+    // A different file still reveals.
+    await openEditor(files[1]);
+    await waitFor("the second row to be selected", async () =>
+      (await revealState()).selection.includes(files[1]));
+    assert.ok(await revealCount() > afterFirst, "a different row still reveals");
+  });
+
+  it("the explicit command reveals even when already selected", async () => {
+    const files = await waitFor("a pending file", () => {
+      const a = sessionRoots().flatMap((r) => Object.keys(readSession(r)?.files ?? {})).sort();
+      return a.length ? a : undefined;
+    });
+    await openEditor(files[0]);
+    await waitFor("selected", async () => (await revealState()).selection.includes(files[0]));
+    const before = await revealCount();
+    await vscode.commands.executeCommand("claudegate.revealActiveFile");
+    await new Promise((r) => setTimeout(r, 600));
+    assert.ok(await revealCount() > before,
+      "asking to be shown the active file must scroll to it even if its row is selected");
+  });
+});

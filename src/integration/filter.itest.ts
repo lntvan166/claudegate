@@ -94,3 +94,46 @@ describe("Pending panel filter", () => {
     );
   });
 });
+
+// Accept/Reject-matching are the scoped counterpart to Accept All, which
+// deliberately ignores the filter. The risk they carry is the opposite of the
+// bug that motivated them: acting on MORE than the filter describes.
+describe("Accept / Reject matching", () => {
+  before(async () => {
+    await activateExtension();
+    await showPendingPanel();
+  });
+
+  afterEach(async () => setFilter(null));
+
+  it("registers both commands", async () => {
+    const all = await vscode.commands.getCommands(true);
+    assert.ok(all.includes("claudegate.acceptFiltered"), "acceptFiltered not registered");
+    assert.ok(all.includes("claudegate.rejectFiltered"), "rejectFiltered not registered");
+  });
+
+  it("does nothing at all when no filter is set", async () => {
+    // Without this guard the command would silently behave as Accept All — the
+    // exact all-or-nothing trap it exists to remove.
+    const before = totalPendingOnDisk();
+    assert.ok(before > 0, "precondition: something is pending");
+    await vscode.commands.executeCommand("claudegate.acceptFiltered");
+    await new Promise((r) => setTimeout(r, 800));
+    assert.strictEqual(totalPendingOnDisk(), before,
+      "an unfiltered panel must leave every pending file untouched");
+  });
+
+  it("acts on strictly fewer files than Accept All would", async () => {
+    const state0 = await filterState();
+    await setFilter("zzz-matches-nothing");
+    const narrowed = await filterState();
+    assert.strictEqual(narrowed.shown, 0, "nothing matches");
+    assert.strictEqual(narrowed.total, state0.total, "but the total is unchanged");
+
+    const before = totalPendingOnDisk();
+    await vscode.commands.executeCommand("claudegate.acceptFiltered");
+    await new Promise((r) => setTimeout(r, 800));
+    assert.strictEqual(totalPendingOnDisk(), before,
+      "a filter matching nothing must accept nothing — not everything");
+  });
+});

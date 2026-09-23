@@ -51,7 +51,9 @@ const SESSION_FANOUT_COALESCE_MS = 60;
 const REVEAL_GUARD_MS = 2000;
 import { stepPending, resolveCurrent } from "./reviewNav";
 import { gcOrphanedSessions } from "./sessionGc";
-import { filterLabel } from "./panelFilter";
+import { filterLabel, matchesFilter } from "./panelFilter";
+import { extensionGlob, folderGlob, describeGlob } from "./excludeSuggest";
+import { globToRegExp } from "./excludeMatcher";
 
 
 function getActivePendingFilePath(managerFor: (p?: string) => SessionManager): string | undefined {
@@ -394,6 +396,15 @@ export function activate(context: vscode.ExtensionContext): void {
         pendingProvider.totalPendingInScope()
       );
       void vscode.commands.executeCommand("setContext", "claudegate.hasPendingFilter", filter !== null);
+      // Accept/Reject-matching only make sense while the filter is actually
+      // narrowing something. When everything matches they would be a confusing
+      // duplicate of Accept All / Reject All, so the buttons stay hidden.
+      void vscode.commands.executeCommand(
+        "setContext",
+        "claudegate.filterNarrows",
+        filter !== null &&
+          pendingProvider.shownPendingInScope() < pendingProvider.totalPendingInScope()
+      );
     };
 
     // ── Keep the Pending panel in step with the editor ─────────────────────
@@ -418,31 +429,70 @@ export function activate(context: vscode.ExtensionContext): void {
     // WITHOUT taking keyboard focus from the editor — activeTextEditor is
     // unchanged across the reveal. (The opposite was assumed when this was first
     // written, which is why it shipped as focus:false.)
-    const revealActivePending = createCoalescer(SESSION_FANOUT_COALESCE_MS, () => {
-      // Cheap precheck first: a non-pending tab costs a session lookup, no walk.
+    // Reveal always scrolls: "reveal" IS "scroll into view" in the TreeView API,
+    // and there is no option to set the selection without it. So following the
+    // active file and never moving the panel are mutually exclusive, and which
+    // one you want is a preference rather than a bug — hence the setting. Off,
+    // the panel only ever moves when you move it; the explicit
+    // claudegate.revealActiveFile command still works on demand.
+    const autoRevealEnabled = (): boolean =>
+      vscode.workspace.getConfiguration("claudegate").get<boolean>("autoRevealPending", true);
+
+    // Counts actual reveal() calls. Read through the test seam to prove the
+    // no-op reveal after a click is skipped — the thing that moved the scroll.
+    let revealCount = 0;
+
+    /** Already the selected row? Then there is nothing to reveal, and revealing
+     *  anyway is what made the panel nudge itself after every click.
+     *
+     *  reveal() re-scrolls even an element that is already on screen, so clicking
+     *  a row — which selects it, opens the diff, changes the active editor and
+     *  brings us straight back here — moved the view a little each time. The
+     *  Explorer does not do this because it never re-reveals a row you just
+     *  clicked. Skipping the no-op reveal matches that, and leaves the scroll
+     *  position alone in exactly the case where the user is driving. */
+    const alreadySelected = (filePath: string): boolean =>
+      pendingView.selection.some(
+        (i) => i instanceof FileReviewItem && samePath(i.filePath, filePath)
+      );
+
+    const revealActiveFile = (opts: { force?: boolean } = {}): void => {
       if (!pendingView.visible) return;
       const filePath = getActivePendingFilePath(managerFor);
       if (!filePath) return;
       let chain = pendingProvider.chainTo(filePath);
       if (chain.length === 0 && pendingProvider.getFilter() !== null) {
-        // The user navigated to a pending file the filter hides. Silently not
-        // revealing would look like the reveal is broken, so clear the filter and
-        // show them where they are — the deliberate act (opening the file) wins
-        // over the stale one (a filter set earlier).
+        // Navigating to a pending file the filter hides is a deliberate act; the
+        // filter set earlier is stale. Silently failing to reveal would look
+        // broken, so clear it and show them where they are.
         pendingProvider.setFilter(null);
         refreshPendingFilterUi();
         chain = pendingProvider.chainTo(filePath);
       }
       const leaf = chain[chain.length - 1];
-      if (!leaf) return;   // no row rendered for it (mid-refresh)
+      if (!leaf) return;
+      // Checked HERE, not earlier: pendingView.selection can still name a row the
+      // filter has since hidden, and testing it up front short-circuited the
+      // filter-clearing branch above — the filter then never cleared. Only once
+      // the row is known to exist does "already selected" mean there is nothing
+      // to scroll to.
+      //
+      // `force` is for the explicit command: if the user asks to be shown the
+      // active file, scrolling to it is the whole point even when it is selected.
+      if (!opts.force && alreadySelected(filePath)) return;
       markRevealing(filePath);
+      revealCount++;
       void Promise.resolve(
         pendingView.reveal(leaf, { select: true, focus: true, expand: true })
       ).then(undefined, (err) => {
         revealingPath = null;
-        // A reveal that loses a race with a refresh is not an error worth a popup.
         log.appendLine(`[DEBUG] reveal skipped for ${filePath}: ${(err as Error).message}`);
       });
+    };
+
+    const revealActivePending = createCoalescer(SESSION_FANOUT_COALESCE_MS, () => {
+      if (!autoRevealEnabled()) return;
+      revealActiveFile();
     });
     // ── Integration-test seam ──────────────────────────────────────────────
     //
@@ -477,6 +527,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand("claudegate._test.ownerIsPrimary", (p: string) =>
           managerFor(p) === sessionManager
         ),
+        vscode.commands.registerCommand("claudegate._test.revealCount", () => revealCount),
         vscode.commands.registerCommand("claudegate._test.filterState", () => ({
           filter: pendingProvider.getFilter(),
           shown: pendingProvider.shownPendingInScope(),
@@ -889,6 +940,66 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage(`Claude Gate: cleared ${count} rejected record(s).`);
       }),
 
+      // ── Exclude from a row (right-click only) ──
+      //
+      // claudegate.exclude has always existed, but only via the Settings panel,
+      // which means writing a glob by hand at a moment when you are not thinking
+      // about globs. The realisation that a whole category does not belong in the
+      // review happens while looking at a row.
+      //
+      // Deliberately NOT an inline row action: pending rows already carry three,
+      // and a fourth on several hundred rows is clutter.
+      //
+      // The prompt says "hide", never "accept". Excluding removes the rows from
+      // the panel but decides nothing — the entries stay in the session file and
+      // the changes stay on disk. Blurring that would make this a silent bulk
+      // accept, which is the one thing this extension exists to prevent.
+      ...(() => {
+        const addExclude = async (glob: string | undefined, what: string): Promise<void> => {
+          if (!glob) {
+            vscode.window.showInformationMessage(
+              `Claude Gate: can't build a safe exclude pattern from ${what} — it would match too much.`
+            );
+            return;
+          }
+          const map = userExcludeMap();
+          if (map[glob] === true) {
+            vscode.window.showInformationMessage(`Claude Gate: "${glob}" is already excluded.`);
+            return;
+          }
+          const scopes = reviewScopes(sessionManager, worktreeRegistry);
+          const affected = pendingAcross(scopes).filter((f) => globToRegExp(glob).test(
+            f.filePath.replace(/\\/g, "/"))).length;
+
+          const ok = await confirmBulk(
+            `Hide ${describeGlob(glob)} from review?\n\n` +
+            `${affected} pending file(s) would leave the panel, and future ones would not appear. ` +
+            `This does NOT accept or reject anything — the changes stay on disk and the entries stay ` +
+            `in the session. Pattern: ${glob}`,
+            "Hide From Review"
+          );
+          if (!ok) return;
+          map[glob] = true;
+          await updateClaudegateConfig("exclude", map);
+          vscode.window.showInformationMessage(
+            `Claude Gate: excluded ${glob}. Remove it from the Settings panel to bring those files back.`
+          );
+        };
+
+        return [
+          vscode.commands.registerCommand("claudegate.excludeExtension", (item: FileReviewItem) => {
+            const fp = item?.filePath;
+            if (!fp) return;
+            return addExclude(extensionGlob(fp), `"${path.basename(fp)}"`);
+          }),
+          vscode.commands.registerCommand("claudegate.excludeFolder", (item: FileReviewItem) => {
+            const fp = item?.filePath;
+            if (!fp) return;
+            return addExclude(folderGlob(fp, workspacePath ?? undefined), `"${path.basename(fp)}"`);
+          }),
+        ];
+      })(),
+
       // ── Pending filter ──
       //
       // The description is not decoration: a filtered panel showing 4 rows looks
@@ -907,6 +1018,68 @@ export function activate(context: vscode.ExtensionContext): void {
         pendingProvider.setFilter(input);
         refreshPendingFilterUi();
       }),
+
+      // ── Accept / Reject the filtered set ──
+      //
+      // Bulk was all-or-nothing: to clear one category you either clicked through
+      // it file by file, or took everything with Accept All. This makes bulk
+      // SCOPEABLE, which makes it safer than what existed, not riskier — you type
+      // a filter, see the count, and confirm.
+      //
+      // Called "matching", never "visible": rows scroll and collapse, and
+      // accepting the wrong N files is not recoverable by scrolling back. The
+      // label has to name the rule, not the viewport.
+      ...(() => {
+        const filteredPending = (): { filter: string; files: { filePath: string; manager: SessionManager }[] } | null => {
+          const filter = pendingProvider.getFilter();
+          if (filter === null) return null;
+          const scopes = reviewScopes(sessionManager, worktreeRegistry);
+          return { filter, files: pendingAcross(scopes).filter((f) => matchesFilter(f.filePath, filter)) };
+        };
+
+        return [
+          vscode.commands.registerCommand("claudegate.acceptFiltered", async () => {
+            const sel = filteredPending();
+            if (!sel || sel.files.length === 0) return;
+            const ok = await confirmBulk(
+              `Accept ${sel.files.length} file(s) matching "${sel.filter}"?\n\n` +
+              `Only files matching the current panel filter are accepted. Anything the filter hides ` +
+              `stays pending.`,
+              `Accept ${sel.files.length}`
+            );
+            if (!ok) return;
+            await saveDirtyPending(sel.files.map((f) => f.filePath));
+            for (const f of sel.files) f.manager.acceptFile(f.filePath);
+            await Promise.all(sel.files.map((f) => closeDiffEditor(f.filePath)));
+            vscode.window.showInformationMessage(
+              `Claude Gate: accepted ${sel.files.length} file(s) matching "${sel.filter}".`
+            );
+          }),
+
+          vscode.commands.registerCommand("claudegate.rejectFiltered", async () => {
+            const sel = filteredPending();
+            if (!sel || sel.files.length === 0) return;
+            // Reject WRITES to disk, so this one is worded as destructive.
+            const answer = await vscode.window.showWarningMessage(
+              `Reject ${sel.files.length} file(s) matching "${sel.filter}"? ` +
+              `This restores their original content on disk. Files the filter hides are untouched.`,
+              { modal: true },
+              `Reject ${sel.files.length}`
+            );
+            if (answer !== `Reject ${sel.files.length}`) return;
+            for (const f of sel.files) f.manager.rejectFile(f.filePath);
+            await Promise.all(sel.files.map((f) => closeDiffEditor(f.filePath)));
+            vscode.window.showInformationMessage(
+              `Claude Gate: rejected ${sel.files.length} file(s) matching "${sel.filter}".`
+            );
+          }),
+        ];
+      })(),
+
+      // On-demand reveal, so turning autoRevealPending off does not lose the
+      // ability entirely — bind it to a key and the panel moves only when asked.
+      vscode.commands.registerCommand("claudegate.revealActiveFile", () =>
+        revealActiveFile({ force: true })),
 
       vscode.commands.registerCommand("claudegate.clearPendingFilter", () => {
         pendingProvider.setFilter(null);

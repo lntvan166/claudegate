@@ -328,6 +328,28 @@
         "command": "claudegate.clearPendingFilter",
         "title": "Claude Gate: Clear Pending Filter",
         "icon": "$(filter-filled)"
+      },
+      {
+        "command": "claudegate.excludeExtension",
+        "title": "Exclude This File Type From Review"
+      },
+      {
+        "command": "claudegate.excludeFolder",
+        "title": "Exclude This Folder From Review"
+      },
+      {
+        "command": "claudegate.acceptFiltered",
+        "title": "Claude Gate: Accept Matching Files",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "claudegate.rejectFiltered",
+        "title": "Claude Gate: Reject Matching Files",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "claudegate.revealActiveFile",
+        "title": "Claude Gate: Reveal Active File in Pending"
       }
     ],
     "menus": {
@@ -398,6 +420,16 @@
           "command": "claudegate.rejectAll",
           "when": "view == claudegate.pendingPanel",
           "group": "navigation@3"
+        },
+        {
+          "command": "claudegate.acceptFiltered",
+          "when": "view == claudegate.pendingPanel && claudegate.filterNarrows",
+          "group": "navigation@2.1"
+        },
+        {
+          "command": "claudegate.rejectFiltered",
+          "when": "view == claudegate.pendingPanel && claudegate.filterNarrows",
+          "group": "navigation@3.1"
         },
         {
           "command": "claudegate.clearSession",
@@ -535,6 +567,16 @@
           "command": "claudegate.deleteHistorySession",
           "when": "view == claudegate.historyPanel && viewItem == claudegate.historySession",
           "group": "inline@1"
+        },
+        {
+          "command": "claudegate.excludeExtension",
+          "when": "view == claudegate.pendingPanel && viewItem == claudegate.file.pending",
+          "group": "y_exclude@1"
+        },
+        {
+          "command": "claudegate.excludeFolder",
+          "when": "view == claudegate.pendingPanel && viewItem == claudegate.file.pending",
+          "group": "y_exclude@2"
         }
       ],
       "commandPalette": [
@@ -633,6 +675,14 @@
         {
           "command": "claudegate.deleteHistorySession",
           "when": "false"
+        },
+        {
+          "command": "claudegate.excludeExtension",
+          "when": "false"
+        },
+        {
+          "command": "claudegate.excludeFolder",
+          "when": "false"
         }
       ]
     },
@@ -718,6 +768,11 @@
           "default": 0,
           "minimum": 0,
           "markdownDescription": "Show how long a file has been waiting in the **Pending** panel, for files at least this many days old. `0` (the default) shows no age on any row. Set `1` to label anything a day or older, or a larger number such as `14` to mark only long-stale files. The exact capture time is always available in the row's hover tooltip, whatever this is set to."
+        },
+        "claudegate.autoRevealPending": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Select the **Pending** panel row for the file you are viewing, as you switch editors. Revealing a row also scrolls it into view — that is what revealing means in VS Code, and there is no way to select a row without it — so turn this off if you would rather the panel never moved on its own. The **Claude Gate: Reveal Active File** command still works on demand when this is off."
         }
       }
     },
@@ -795,7 +850,7 @@
     "watch": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --platform=node --sourcemap --watch",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext ts",
-    "test:unit": "esbuild src/excludeMatcher.test.ts --bundle --platform=node --format=cjs --outfile=out/excludeMatcher.test.cjs && node out/excludeMatcher.test.cjs && esbuild src/changeCount.test.ts --bundle --platform=node --format=cjs --outfile=out/changeCount.test.cjs && node out/changeCount.test.cjs && esbuild src/reviewFeedback.test.ts --bundle --platform=node --format=cjs --outfile=out/reviewFeedback.test.cjs && node out/reviewFeedback.test.cjs && esbuild src/reviewModel.test.ts --bundle --platform=node --format=cjs --outfile=out/reviewModel.test.cjs && node out/reviewModel.test.cjs && esbuild src/workspaceScope.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/workspaceScope.test.cjs && node out/workspaceScope.test.cjs && esbuild src/sessionManager.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/sessionManager.test.cjs && node out/sessionManager.test.cjs && esbuild src/hookInstaller.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/hookInstaller.test.cjs && node out/hookInstaller.test.cjs && esbuild src/worktrees.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/worktrees.test.cjs && node out/worktrees.test.cjs && esbuild src/worktreeSessionRegistry.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/worktreeSessionRegistry.test.cjs && node out/worktreeSessionRegistry.test.cjs && esbuild src/worktreePanel.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/worktreePanel.test.cjs && node out/worktreePanel.test.cjs && esbuild src/historyModel.test.ts --bundle --platform=node --format=cjs --outfile=out/historyModel.test.cjs && node out/historyModel.test.cjs && esbuild src/historyPanel.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/historyPanel.test.cjs && node out/historyPanel.test.cjs && esbuild src/saveEdits.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/saveEdits.test.cjs && node out/saveEdits.test.cjs && esbuild src/reviewNav.test.ts --bundle --platform=node --format=cjs --outfile=out/reviewNav.test.cjs && node out/reviewNav.test.cjs && esbuild src/sessionGc.test.ts --bundle --platform=node --format=cjs --outfile=out/sessionGc.test.cjs && node out/sessionGc.test.cjs && esbuild src/reviewPanel.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/reviewPanel.test.cjs && node out/reviewPanel.test.cjs && esbuild src/scheduling.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/scheduling.test.cjs && node out/scheduling.test.cjs && esbuild src/safeLog.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/safeLog.test.cjs && node out/safeLog.test.cjs && esbuild src/revealChain.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/revealChain.test.cjs && node out/revealChain.test.cjs && esbuild src/reviewScopes.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/reviewScopes.test.cjs && node out/reviewScopes.test.cjs && esbuild src/panelFilter.test.ts --bundle --platform=node --format=cjs --outfile=out/panelFilter.test.cjs && node out/panelFilter.test.cjs && esbuild src/decorationProvider.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/decorationProvider.test.cjs && node out/decorationProvider.test.cjs && esbuild src/pendingAge.test.ts --bundle --platform=node --format=cjs --outfile=out/pendingAge.test.cjs && node out/pendingAge.test.cjs && esbuild src/openDedupe.test.ts --bundle --platform=node --format=cjs --outfile=out/openDedupe.test.cjs && node out/openDedupe.test.cjs",
+    "test:unit": "esbuild src/excludeMatcher.test.ts --bundle --platform=node --format=cjs --outfile=out/excludeMatcher.test.cjs && node out/excludeMatcher.test.cjs && esbuild src/changeCount.test.ts --bundle --platform=node --format=cjs --outfile=out/changeCount.test.cjs && node out/changeCount.test.cjs && esbuild src/reviewFeedback.test.ts --bundle --platform=node --format=cjs --outfile=out/reviewFeedback.test.cjs && node out/reviewFeedback.test.cjs && esbuild src/reviewModel.test.ts --bundle --platform=node --format=cjs --outfile=out/reviewModel.test.cjs && node out/reviewModel.test.cjs && esbuild src/workspaceScope.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/workspaceScope.test.cjs && node out/workspaceScope.test.cjs && esbuild src/sessionManager.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/sessionManager.test.cjs && node out/sessionManager.test.cjs && esbuild src/hookInstaller.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/hookInstaller.test.cjs && node out/hookInstaller.test.cjs && esbuild src/worktrees.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/worktrees.test.cjs && node out/worktrees.test.cjs && esbuild src/worktreeSessionRegistry.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/worktreeSessionRegistry.test.cjs && node out/worktreeSessionRegistry.test.cjs && esbuild src/worktreePanel.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/worktreePanel.test.cjs && node out/worktreePanel.test.cjs && esbuild src/historyModel.test.ts --bundle --platform=node --format=cjs --outfile=out/historyModel.test.cjs && node out/historyModel.test.cjs && esbuild src/historyPanel.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/historyPanel.test.cjs && node out/historyPanel.test.cjs && esbuild src/saveEdits.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/saveEdits.test.cjs && node out/saveEdits.test.cjs && esbuild src/reviewNav.test.ts --bundle --platform=node --format=cjs --outfile=out/reviewNav.test.cjs && node out/reviewNav.test.cjs && esbuild src/sessionGc.test.ts --bundle --platform=node --format=cjs --outfile=out/sessionGc.test.cjs && node out/sessionGc.test.cjs && esbuild src/reviewPanel.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/reviewPanel.test.cjs && node out/reviewPanel.test.cjs && esbuild src/scheduling.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/scheduling.test.cjs && node out/scheduling.test.cjs && esbuild src/safeLog.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/safeLog.test.cjs && node out/safeLog.test.cjs && esbuild src/revealChain.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/revealChain.test.cjs && node out/revealChain.test.cjs && esbuild src/reviewScopes.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/reviewScopes.test.cjs && node out/reviewScopes.test.cjs && esbuild src/panelFilter.test.ts --bundle --platform=node --format=cjs --outfile=out/panelFilter.test.cjs && node out/panelFilter.test.cjs && esbuild src/decorationProvider.test.ts --bundle --platform=node --format=cjs --alias:vscode=./src/test-stubs/vscode.ts --outfile=out/decorationProvider.test.cjs && node out/decorationProvider.test.cjs && esbuild src/pendingAge.test.ts --bundle --platform=node --format=cjs --outfile=out/pendingAge.test.cjs && node out/pendingAge.test.cjs && esbuild src/openDedupe.test.ts --bundle --platform=node --format=cjs --outfile=out/openDedupe.test.cjs && node out/openDedupe.test.cjs && esbuild src/excludeSuggest.test.ts --bundle --platform=node --format=cjs --outfile=out/excludeSuggest.test.cjs && node out/excludeSuggest.test.cjs",
     "test:hook": "python3 -m unittest discover -s hooks/tests -p 'test_*.py'",
     "test": "npm run test:unit && npm run test:hook",
     "build:itest": "rm -rf out/integration && esbuild src/integration/runTests.ts src/integration/index.ts src/integration/*.itest.ts --bundle --platform=node --format=cjs --external:vscode --external:mocha --external:@vscode/test-electron --outdir=out/integration",
