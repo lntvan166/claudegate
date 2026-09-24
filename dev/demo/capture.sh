@@ -218,14 +218,31 @@ xdotool key --clearmodifiers shift+Tab; sleep 0.6
 xdotool key --clearmodifiers space; sleep 1.0
 cmd "Claude Gate: Focus on Pending View" 1.5
 
+# ── Stills first, and deliberately before the recording starts ───────────────
+# shot() opens the Command Palette to clear toasts, so taking a still in the
+# middle of the GIF filmed the palette being typed — ugly, and a third of the
+# runtime. The stills are set up with the palette here, then everything is closed
+# and the same ground is covered again with the mouse for the GIF.
+ROW0_Y=102; ROWH=22; ROW_X=150; OK_X=258; NO_X=277
+row_y() { echo $((ROW0_Y + $1 * ROWH)); }
+hover() { xdotool mousemove "$1" "$2"; sleep "${3:-0.5}"; }
+tap()   { xdotool mousemove "$1" "$2"; sleep 0.35; xdotool click 1; sleep "${3:-1.2}"; }
+CHECKOUT_Y=$(row_y 2)
+
+tap $ROW_X $CHECKOUT_Y 2.2
+shot 01-diff
+cmd "Claude Gate: Review All Pending" 3.0
+shot 02-review-all
+cmd "View: Close All Editors" 1.5
+
 # ── The GIF: the core loop, and nothing else ─────────────────────────────────
 # Claude's edits are waiting → open one as a real diff → accept it → reject the
-# next → see the whole set at once. That is the product in fifteen seconds; the
-# filter, excludes and scoped bulk actions are left to the README screenshots.
+# next. That is the product; the filter, excludes and scoped bulk actions are
+# left to the stills.
 ffmpeg -loglevel error -y -f x11grab -framerate 15 -video_size 1440x900 -i :99 \
   "$PROFILE/demo.mp4" &
 FF=$!
-sleep 1.5
+sleep 1.0
 
 # Driven by the mouse, because that is what a user does. The Command Palette is
 # more robust to film, but it records someone typing command names rather than
@@ -241,37 +258,25 @@ sleep 1.5
 # The tree is: service-api / handlers / checkout.go / service-core / pricing /
 # discount.go, so checkout.go is row 2. After it is accepted its now-empty parent
 # folders disappear too, which puts discount.go at that same row.
-ROW0_Y=102; ROWH=22; ROW_X=150; OK_X=258; NO_X=277
-row_y() { echo $((ROW0_Y + $1 * ROWH)); }
-hover() { xdotool mousemove "$1" "$2"; sleep "${3:-0.7}"; }
-tap()   { xdotool mousemove "$1" "$2"; sleep 0.45; xdotool click 1; sleep "${3:-1.6}"; }
+# Beats are tight on purpose. A README GIF is glanced at, not studied, and every
+# extra second is weight GitHub serves on each page view. Long enough to follow
+# the cursor, no longer.
+hover $ROW_X $CHECKOUT_Y 0.6            # the inline actions appear on hover
+tap   $ROW_X $CHECKOUT_Y 2.0            # click the row: its diff opens
 
-CHECKOUT_Y=$(row_y 2)
-
-hover $ROW_X $CHECKOUT_Y 1.0            # the inline actions appear on hover
-tap   $ROW_X $CHECKOUT_Y 3.2            # click the row: its diff opens
-shot 01-diff
-sleep 1.2                                # let the viewer read the diff
-
-tap   $OK_X  $CHECKOUT_Y 2.8            # click the tick: accepted, auto-advances
+tap   $OK_X  $CHECKOUT_Y 1.8            # click the tick: accepted, auto-advances
 
 # Accepting empties service-api/handlers, so those rows go and discount.go takes
 # the same position. Re-derived rather than assumed, so a fixture change shows up
 # as a wrong click in the step PNGs instead of silently filming nothing.
 DISCOUNT_Y=$(row_y 2)
-hover $ROW_X $DISCOUNT_Y 0.9
-tap   $ROW_X $DISCOUNT_Y 2.8
-sleep 1.0
-tap   $NO_X  $DISCOUNT_Y 1.3            # click the cross: reject
-xdotool key --clearmodifiers Return; sleep 2.4   # blank reason = plain reject
-sleep 1.5
+hover $ROW_X $DISCOUNT_Y 0.5
+tap   $ROW_X $DISCOUNT_Y 1.8
+tap   $NO_X  $DISCOUNT_Y 0.9            # click the cross: reject
+xdotool key --clearmodifiers Return; sleep 1.6   # blank reason = plain reject
+sleep 0.8
 
 kill -INT $FF; wait $FF 2>/dev/null || true
-
-# The remaining stills are not part of the GIF, so they use the palette — a
-# static image does not care how it was reached, and the palette cannot drift.
-cmd "Claude Gate: Review All Pending" 3.5
-shot 02-review-all
 
 # ── Encode ───────────────────────────────────────────────────────────────────
 # Two-pass palette: a single-pass GIF of an editor screenshot bands badly on the
@@ -280,9 +285,9 @@ shot 02-review-all
 # recording of mostly-static text loses little at 10 fps.
 echo "[6/6] encoding"
 ffmpeg -loglevel error -y -i "$PROFILE/demo.mp4" \
-  -vf "crop=1440:865:0:35,fps=10,scale=800:-1:flags=lanczos,palettegen=stats_mode=diff" "$PROFILE/pal.png"
+  -vf "crop=1440:865:0:35,fps=12,scale=860:-1:flags=lanczos,palettegen=stats_mode=diff" "$PROFILE/pal.png"
 ffmpeg -loglevel error -y -i "$PROFILE/demo.mp4" -i "$PROFILE/pal.png" \
-  -lavfi "crop=1440:865:0:35,fps=10,scale=800:-1:flags=lanczos[v];[v][1:v]paletteuse=dither=bayer:bayer_scale=3" \
+  -lavfi "crop=1440:865:0:35,fps=12,scale=860:-1:flags=lanczos[v];[v][1:v]paletteuse=dither=bayer:bayer_scale=3" \
   "$OUT/demo.gif"
 
 echo
