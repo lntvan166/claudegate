@@ -33,7 +33,7 @@ mkdir -p "$OUT"
 
 # ── Fixture: generic names only, under a throwaway HOME ──────────────────────
 rm -rf "$HOME_DIR" "$PROFILE"
-mkdir -p "$HOME_DIR" "$PROFILE/user/User"
+mkdir -p "$HOME_DIR" "$PROFILE/user/User" "$PROFILE/ext"
 echo "[1/6] seeding fixture"
 HOME=$HOME_DIR python3 "$ROOT/manual-test-seed.py" --demo >/dev/null
 [ -d "$WS" ] || { echo "seed did not create $WS" >&2; exit 1; }
@@ -72,9 +72,31 @@ cat > "$HOME_DIR/.claude/settings.json" <<EOF
 }
 EOF
 
+# ── Borrow the maintainer's theme and file icons ─────────────────────────────
+# The default profile has no icon theme, so every file renders with the same
+# generic glyph and the tree looks lifeless. Copying just these two extensions
+# into the throwaway profile keeps the recording clean — no account, no other
+# extensions, nothing else that could appear on screen — while giving the demo
+# real file icons and a considered palette.
+#
+# ClaudeGate's own colours are gitDecoration.* theme tokens, so they follow
+# whatever theme is active. Filming under a third-party theme therefore shows the
+# extension as a themed user sees it rather than only under the default.
+for ext in dracula-theme.theme-dracula-* pkief.material-icon-theme-*; do
+  src=$(ls -d "$HOME/.vscode/extensions/"$ext 2>/dev/null | sort -V | tail -1) || true
+  [ -n "${src:-}" ] && [ -d "$src" ] && cp -r "$src" "$PROFILE/ext/" 2>/dev/null || true
+done
+# extensions.json is a cache written by whatever last touched this directory, and
+# its recorded locations point at wherever that was. Copied-in directories are
+# invisible until it is gone and VS Code rescans.
+rm -f "$PROFILE/ext/extensions.json"
+
 cat > "$PROFILE/user/User/settings.json" <<EOF
 {
-  "workbench.colorTheme": "Default Dark Modern",
+  "workbench.colorTheme": "Dracula Theme",
+  "workbench.iconTheme": "material-icon-theme",
+  "editor.fontFamily": "JetBrains Mono",
+  "editor.fontLigatures": true,
   "workbench.startupEditor": "none",
   "window.titleBarStyle": "custom",
   "window.commandCenter": false,
@@ -172,26 +194,51 @@ ffmpeg -loglevel error -y -f x11grab -framerate 15 -video_size 1440x900 -i :99 \
 FF=$!
 sleep 1.5
 
-# Driven by the extension's own keybindings, not the Command Palette. The
-# palette is more robust than clicking fixed pixels, but it is also slow and it
-# films badly: most of the runtime becomes someone typing command names, which is
-# not what the product does. The keybindings are gated on a pending file being
-# open, so exactly one palette invocation is needed to get started.
-cmd "Claude Gate: Next Pending File" 3.0          # baseline vs Claude's version
+# Driven by the mouse, because that is what a user does. The Command Palette is
+# more robust to film, but it records someone typing command names rather than
+# the product being used.
+#
+# COORD — the only fixed pixel positions in this script, and the first suspects
+# if a run looks wrong. Verified against dev/demo/out/*.png at 1440x900 with
+# Dark Modern and editor.fontSize 13:
+#   ROW0_Y   screen y of the first row under the "Pending" header
+#   ROWH     row pitch
+#   ROW_X    x of a row's label (safe to click; away from the twisties)
+#   OK_X/NO_X  x of the inline accept / reject icons, which appear on hover
+# The tree is: service-api / handlers / checkout.go / service-core / pricing /
+# discount.go, so checkout.go is row 2. After it is accepted its now-empty parent
+# folders disappear too, which puts discount.go at that same row.
+ROW0_Y=102; ROWH=22; ROW_X=150; OK_X=258; NO_X=277
+row_y() { echo $((ROW0_Y + $1 * ROWH)); }
+hover() { xdotool mousemove "$1" "$2"; sleep "${3:-0.7}"; }
+tap()   { xdotool mousemove "$1" "$2"; sleep 0.45; xdotool click 1; sleep "${3:-1.6}"; }
+
+CHECKOUT_Y=$(row_y 2)
+
+hover $ROW_X $CHECKOUT_Y 1.0            # the inline actions appear on hover
+tap   $ROW_X $CHECKOUT_Y 3.2            # click the row: its diff opens
 shot 01-diff
+sleep 1.2                                # let the viewer read the diff
 
-xdotool key --clearmodifiers ctrl+Return; sleep 2.6   # accept, auto-advances
-shot 02-accepted
+tap   $OK_X  $CHECKOUT_Y 2.8            # click the tick: accepted, auto-advances
 
-xdotool key --clearmodifiers ctrl+shift+BackSpace; sleep 1.2
-xdotool key --clearmodifiers Return; sleep 2.4        # blank reason = plain reject
-shot 03-rejected
-
-cmd "Claude Gate: Review All Pending" 3.5             # every change, one scroll
-shot 04-review-all
+# Accepting empties service-api/handlers, so those rows go and discount.go takes
+# the same position. Re-derived rather than assumed, so a fixture change shows up
+# as a wrong click in the step PNGs instead of silently filming nothing.
+DISCOUNT_Y=$(row_y 2)
+hover $ROW_X $DISCOUNT_Y 0.9
+tap   $ROW_X $DISCOUNT_Y 2.8
+sleep 1.0
+tap   $NO_X  $DISCOUNT_Y 1.3            # click the cross: reject
+xdotool key --clearmodifiers Return; sleep 2.4   # blank reason = plain reject
 sleep 1.5
 
 kill -INT $FF; wait $FF 2>/dev/null || true
+
+# The remaining stills are not part of the GIF, so they use the palette — a
+# static image does not care how it was reached, and the palette cannot drift.
+cmd "Claude Gate: Review All Pending" 3.5
+shot 02-review-all
 
 # ── Encode ───────────────────────────────────────────────────────────────────
 # Two-pass palette: a single-pass GIF of an editor screenshot bands badly on the
