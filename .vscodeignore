@@ -63,3 +63,4 @@ manual-test-seed.py
 *.vsix
 test.txt
 out/integration/**
+dev/**

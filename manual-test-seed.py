@@ -120,7 +120,7 @@ DEMO_WORKTREES = [
          'package handlers\n\nimport "errors"\n\nvar (\n\tErrEmptyCart    = errors.New("cart is empty")\n\tErrInvalidTotal = errors.New("order total must be positive")\n)\n'),
         (".env",
          'API_URL=https://api.example.com\n',
-         'API_URL=https://api.example.com\nPAYMENT_KEY=sk-live-0000000000\n'),
+         'API_URL=https://api.example.com\nPAYMENT_KEY=<set-in-deployment>\n'),
     ]),
     ("ws-alpha", "service-core", "feat/checkout-validation", DEMO_AGENT_A, [], [
         ("pricing/discount.go",
@@ -405,7 +405,7 @@ FILES = [
      S_B),
     (".env",
      'API_URL=https://api.example.com\nDEBUG=false\n',
-     'API_URL=https://api.example.com\nDEBUG=false\nSECRET_KEY=sk-live-0000000000\n',
+     'API_URL=https://api.example.com\nDEBUG=false\nSECRET_KEY=<set-in-deployment>\n',
      S_B),
     ("package-lock.json",
      '{ "lockfileVersion": 2, "requires": true }\n',

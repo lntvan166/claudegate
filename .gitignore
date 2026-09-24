@@ -10,3 +10,6 @@ __pycache__/
 # Local screen recordings used to cut the demo GIF. Kept out of git (they are
 # large and regenerable); .vscodeignore already keeps them out of the VSIX.
 media/*.mp4
+
+# Capture output from dev/demo/capture.sh — regenerable, and large.
+dev/demo/out/
