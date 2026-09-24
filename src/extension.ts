@@ -631,14 +631,35 @@ export function activate(context: vscode.ExtensionContext): void {
     );
     updateHistoryContext();
 
-    const orderedPending = (): string[] => orderedPendingPaths(sessionManager);
+    // Pending navigation honours the panel filter. A filter is the user's
+    // declared scope of work, so Next/Previous — and the auto-advance after a
+    // decision — step through what is on screen rather than jumping out of it.
+    //
+    // Without this, accepting a file while filtered advanced to the first
+    // pending file overall, which the filter usually hides; the reveal then saw
+    // an active file with no row and cleared the filter to show it. Reported as
+    // "accept clears the filter". The filter-clearing branch is still right for
+    // a file the user opens deliberately — it just must not be reachable from a
+    // move the user did not choose.
+    const orderedPending = (): string[] => {
+      const all = orderedPendingPaths(sessionManager);
+      const filter = pendingProvider.getFilter();
+      return filter === null ? all : all.filter((fp) => matchesFilter(fp, filter));
+    };
 
     const openNextPending = async (): Promise<void> => {
       const next = orderedPending()[0];
       if (next) {
         await vscode.commands.executeCommand("claudegate.openDiff", next);
       } else {
-        vscode.window.showInformationMessage("Claude Gate: all caught up ✓");
+        // Say WHICH set is finished. "All caught up" under a filter, with other
+        // files still pending behind it, would be a lie.
+        const filter = pendingProvider.getFilter();
+        vscode.window.showInformationMessage(
+          filter === null
+            ? "Claude Gate: all caught up ✓"
+            : `Claude Gate: nothing left matching "${filter}" ✓ — clear the filter to see the rest.`
+        );
       }
     };
     // ── Commands ──────────────────────────────────────────────────────────

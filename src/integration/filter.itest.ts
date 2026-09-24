@@ -137,3 +137,71 @@ describe("Accept / Reject matching", () => {
       "a filter matching nothing must accept nothing — not everything");
   });
 });
+
+// Accepting a file while the panel is filtered used to clear the filter: the
+// auto-advance picked the first pending file OVERALL, the filter hid it, and the
+// reveal cleared the filter to show it. From the user's side the filter simply
+// vanished on every decision, which makes filtered review impossible.
+describe("a decision does not clear the filter", () => {
+  before(async () => {
+    await activateExtension();
+    await showPendingPanel();
+  });
+
+  afterEach(async () => {
+    await setFilter(null);
+    await closeAllEditors();
+  });
+
+  it("keeps the filter set after accepting a matching file", async () => {
+    const files = await waitFor("pending files", () => {
+      const a = sessionRoots().flatMap((r) => Object.keys(readSession(r)?.files ?? {})).sort();
+      return a.length >= 3 ? a : undefined;
+    });
+
+    // Filter to exactly one file, so the auto-advance has to leave the filtered
+    // set — the condition that used to clear it.
+    const only = path.basename(files[0]);
+    await setFilter(only);
+    const narrowed = await filterState();
+    assert.ok(narrowed.shown >= 1, "the filter matches at least the target file");
+    assert.ok(narrowed.shown < narrowed.total, "and hides the rest");
+
+    await openEditor(files[0]);
+    await waitFor("the row to be selected", async () =>
+      (await revealState()).selection.includes(files[0]));
+
+    await vscode.commands.executeCommand("claudegate.acceptCurrent");
+    await new Promise((r) => setTimeout(r, 1800));
+
+    const after = await filterState();
+    assert.strictEqual(after.filter, only,
+      `the filter must survive a decision — it was "${only}", now ${JSON.stringify(after.filter)}`);
+  });
+
+  it("advances within the filter rather than out of it", async () => {
+    const files = await waitFor("pending files", () => {
+      const a = sessionRoots().flatMap((r) => Object.keys(readSession(r)?.files ?? {})).sort();
+      return a.length >= 3 ? a : undefined;
+    });
+
+    // ".go" matches several files, so there is somewhere to advance TO.
+    await setFilter(".go");
+    const s = await filterState();
+    assert.ok(s.shown >= 2, "need at least two matching files to test advancing");
+
+    const goFiles = files.filter((f) => f.endsWith(".go"));
+    await openEditor(goFiles[0]);
+    await waitFor("selected", async () => (await revealState()).selection.includes(goFiles[0]));
+
+    await vscode.commands.executeCommand("claudegate.acceptCurrent");
+    await new Promise((r) => setTimeout(r, 1800));
+
+    assert.strictEqual((await filterState()).filter, ".go", "filter intact");
+    const active = vscode.window.activeTextEditor?.document.uri.fsPath;
+    if (active) {
+      assert.ok(active.endsWith(".go"),
+        `auto-advance landed on ${active}, which the filter does not match`);
+    }
+  });
+});
