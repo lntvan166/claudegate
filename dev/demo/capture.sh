@@ -183,7 +183,6 @@ cmd "Claude Gate: Focus on Settings View" 1.2
 xdotool key --clearmodifiers shift+Tab; sleep 0.6
 xdotool key --clearmodifiers space; sleep 1.0
 cmd "Claude Gate: Focus on Pending View" 1.5
-shot 00-panel
 
 # ── The GIF: the core loop, and nothing else ─────────────────────────────────
 # Claude's edits are waiting → open one as a real diff → accept it → reject the
@@ -253,7 +252,7 @@ ffmpeg -loglevel error -y -i "$PROFILE/demo.mp4" -i "$PROFILE/pal.png" \
   "$OUT/demo.gif"
 
 echo
-echo "steps   : $OUT/*.png"
+echo "stills  : $OUT/*.png"
 echo "gif     : $OUT/demo.gif  ($(du -h "$OUT/demo.gif" | cut -f1))"
 echo
 echo "Review the step PNGs before copying anything into media/."
