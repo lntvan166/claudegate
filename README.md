@@ -15,7 +15,7 @@ Stop flying blind when Claude modifies your codebase. Claude Gate captures every
 
 ![Claude Gate — reviewing parallel agent changes across four git worktrees](https://raw.githubusercontent.com/lntvan166/claudegate/main/media/demo.gif)
 
-Your agents edited 15 files across 4 git worktrees. Here they all are, in one panel, reviewable one keystroke at a time — grouped by worktree, attributed to the session that made each change.
+Your agents edited 12 files across 4 git worktrees. Here they all are, in one panel, reviewable one keystroke at a time — grouped by worktree, attributed to the session that made each change.
 
 ## Screenshots
 
