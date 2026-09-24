@@ -7,6 +7,30 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.15.1] — 2026-09-24
+
+### Fixed
+
+- **The editor no longer freezes for a moment after every accept or reject.** Deciding one file repainted the review tree, and that repaint re-ran the exclude-pattern check over every pending file — once for the root of the tree and again for each expanded folder, so the work grew with the product of the two. The check itself cost about 15 microseconds a call: roughly 150 anchored patterns tested against the absolute path, the workspace-relative path and every parent directory, rebuilding the same strings each time, with nothing remembered between calls. On a backlog of 254 files a single repaint measured around 600 milliseconds of frozen editor. Answers are now remembered per file and recomputed only when the patterns or the workspace change, which takes the same repaint to about 3 milliseconds. This is the "the editor feels slow with ClaudeGate installed" report, and it got worse the longer a backlog grew.
+- **Opening a window is roughly five times faster.** Two sweeps ran before the extension finished starting, and the editor counts both against its reported activation time: reading and parsing every archived session in the history folder (12.4 MB and 34–40 ms on a real machine, producing zero visible rows in a workspace with no archives), and reading every session file to drop ones whose project no longer exists (5–16 ms). Neither result is something you are waiting for, so both now run just after startup instead of during it. Measured end to end: 121 ms to 24 ms.
+- **The panel no longer flashes white on every decision.** Accepting a file told the editor that every decoration in the file explorer was stale, so it discarded all of them and asked again — and in that gap each row fell back to its default colour before the real one returned. On a busy workspace this read as the whole panel reloading itself each time you decided anything. Only the files that actually entered or left the pending set are refreshed now, so nothing else so much as flickers. A change that touches no pending file redraws nothing at all.
+- **A new file's diff no longer shows an invented first line.** The left-hand side of a created file used to contain the text `// New file — no original content`. It was syntax-highlighted as part of the file, and `//` is not a comment in YAML, Python or shell; worse, it appeared as a *removed* line, so a brand-new file looked like it had deleted something, and the first real line was marked as changed rather than added. The left-hand side is now simply empty, which is how git and the editor's own source control show an added file.
+- **"Review All Pending" no longer reports its file count twice.** The tab read `Pending (11) (11 files)`; the editor already appends its own count.
+
+### Changed
+
+- **"Review All Pending" is back in the Pending panel's toolbar**, between the view-mode toggle and Accept All. The toolbar reads left to right as narrow the view, change how it is drawn, decide, then discard — and opening the multi-file diff is a way of looking at the pending set rather than a decision about it, so it belongs with the view controls and away from the destructive actions. **Copy Feedback to AI** remains available from the Command Palette only.
+- **Files Claude created and files it edited still share the `!` badge.** A separate `+` was tried during this release and deliberately reverted: the editor merges every extension's badge into one slot, so wherever git also has something to say the row reads `+,M`, which is most rows once git is configured to see inside worktrees. The distinction is still carried by colour and by the hover tooltip.
+
+### Internal
+
+- Tests grow to 201 unit assertions, 86 hook tests and 26 integration tests against a real editor. The integration suite covers the filter, the scoped bulk actions, worktree decorations and the reveal behaviour; each new assertion was checked by reverting the fix it guards and confirming the suite fails.
+- Every figure quoted above was measured on a real 438-file backlog across 42 session files rather than estimated. Two theories were measured and discarded rather than acted on: session-file size (1 MB parses in 1.7 ms) and history records held in memory (0.31 MB, not the megabytes assumed).
+
+### Notes
+
+- **No need to re-run Setup Hook.** No hook changes in this release.
+
 ## [1.15.0] — 2026-09-23
 
 ### Added

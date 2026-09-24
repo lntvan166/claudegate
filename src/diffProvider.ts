@@ -65,7 +65,17 @@ export class ClaudeGateContentProvider
     const owner = this.resolveManager(uri.fsPath).getSession();
     const entry = owner ? fileEntryFor(owner.files, uri.fsPath) : undefined;
     if (!entry) return "";
-    return entry.originalContent ?? "// New file — no original content";
+    // A file Claude CREATED has no baseline, and the empty document is the right
+    // representation — it is what git, GitHub and VS Code's own SCM show for an
+    // added file, and it makes every line of the new content render as a pure
+    // addition.
+    //
+    // This used to return "// New file — no original content", which was wrong
+    // three ways: `//` is not a comment in YAML, Python or shell, so it rendered
+    // as syntax-highlighted content; the line showed as REMOVED, so a new file
+    // appeared to have deleted something; and line 1 of the real content then
+    // diffed as *changed* against it instead of added.
+    return entry.originalContent ?? "";
   }
 }
 

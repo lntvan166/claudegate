@@ -251,7 +251,9 @@ export function activate(context: vscode.ExtensionContext): void {
     const openPendingMultiDiff = async (paths: string[]): Promise<void> => {
       const resourceList = paths.map((fp) => [vscode.Uri.file(fp), originalUri(fp), vscode.Uri.file(fp)]);
       try {
-        await vscode.commands.executeCommand("vscode.changes", `Claude Gate: Pending (${paths.length})`, resourceList);
+        // No count in the title: VS Code appends its own "(N files)" to a
+        // multi-diff label, so including one produced "Pending (11) (11 files)".
+        await vscode.commands.executeCommand("vscode.changes", "Claude Gate: Pending", resourceList);
       } catch (err) {
         log.appendLine(`[WARN] reviewAllPending: vscode.changes failed: ${(err as Error).message}`);
         vscode.window.showWarningMessage(
