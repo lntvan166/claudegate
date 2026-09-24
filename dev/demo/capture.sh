@@ -3,7 +3,14 @@
 # virtual display, against the seeded demo workspace. Linux-only, dev-only.
 #
 #   npm run compile && npx @vscode/vsce package -o /tmp/claudegate.vsix
-#   dev/demo/capture.sh /tmp/claudegate.vsix      # → dev/demo/out/*.png, media/demo.gif
+#   dev/demo/capture.sh               # → dev/demo/out/*.png + demo.gif
+#   dev/demo/capture.sh --fixture-only # build the fixture and stop
+#
+# --fixture-only is for recording by hand in your own editor, which already has
+# your theme and extensions. It prints the command to launch against the
+# fixture. The HOME override in that command is the part that matters: without
+# it the panel shows YOUR real pending files and real workspace names, which is
+# exactly what must never reach a marketplace listing.
 #
 # Needs Xvfb, xdotool, ImageMagick (import) and ffmpeg. Reuses the VS Code that
 # the integration suite already downloaded into .vscode-test/.
@@ -21,6 +28,9 @@
 # few coordinates left are marked COORD and are the first suspects if a run comes
 # out looking wrong — check the numbered step PNGs in dev/demo/out/.
 set -euo pipefail
+
+FIXTURE_ONLY=0
+[ "${1:-}" = "--fixture-only" ] && FIXTURE_ONLY=1
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 OUT=$ROOT/dev/demo/out
@@ -117,6 +127,17 @@ cat > "$PROFILE/user/User/settings.json" <<EOF
 }
 EOF
 
+if [ "$FIXTURE_ONLY" = "1" ]; then
+  echo
+  echo "Fixture ready. Record it in your own editor with:"
+  echo
+  echo "  HOME=$HOME_DIR code $WS"
+  echo
+  echo "The HOME override is not optional — without it the panel shows your real"
+  echo "pending files and real workspace names."
+  exit 0
+fi
+
 # ── Display first ────────────────────────────────────────────────────────────
 # DISPLAY is already :99, so anything launched before Xvfb is up dies with a
 # trace trap rather than a legible error — including --install-extension, which
@@ -129,22 +150,35 @@ trap 'kill ${CODEPID:-} $XVFB 2>/dev/null || true' EXIT
 for _ in $(seq 40); do xdotool search --name . >/dev/null 2>&1 && break; sleep 0.25; done
 sleep 1
 
-# The extension is loaded from source rather than installed. `code
-# --install-extension` HANGS on this build in a headless profile: it starts an
-# agent host and never exits, so a run dies on a timeout with no error. The
-# integration suite already loads from source this way and is known to work.
+# ClaudeGate is installed by unpacking its VSIX into the profile's extension
+# directory, which is all an install is. Two dead ends led here:
 #
-# The cost is that the window title gains "[Extension Development Host]", so the
-# title bar is cropped off every capture below — a demo GIF has no use for a
-# title bar showing a temp path anyway.
+#   `code --install-extension` HANGS on this build in a headless profile — it
+#   starts an agent host and never exits, so a run dies on a timeout with no
+#   error.
+#
+#   `--extensionDevelopmentPath` loads from source and works, but in that mode
+#   VS Code does not apply themes: measured, the sidebar renders #060621 with it
+#   and Dracula's #21222C without, and no icon theme applies at all — not even
+#   the built-in one. That is why the demo looked unstyled for several rounds.
+#
+# Unpacking sidesteps both. It is exactly how the theme extensions below are
+# brought in, and it keeps the window title clean.
+VSIX_BUILD=$PROFILE/claudegate.vsix
+( cd "$ROOT" && npx --yes @vscode/vsce package -o "$VSIX_BUILD" >/dev/null 2>&1 )
+CG_VER=$(node -p "require('$ROOT/package.json').version")
+CG_DIR=$PROFILE/ext/lntvan166.claudegate-$CG_VER
+rm -rf "$CG_DIR"; mkdir -p "$CG_DIR"
+unzip -q -o "$VSIX_BUILD" 'extension/*' -d "$PROFILE/unpack"
+cp -r "$PROFILE/unpack/extension/." "$CG_DIR/"
+rm -rf "$PROFILE/unpack"
 
 # ── Launch ───────────────────────────────────────────────────────────────────
 
 echo "[4/6] launching editor"
 HOME=$HOME_DIR "$CODE/code" --no-sandbox --disable-gpu \
   --user-data-dir "$PROFILE/user" --extensions-dir "$PROFILE/ext" \
-  --extensionDevelopmentPath="$ROOT" --disable-workspace-trust "$WS" \
-  >"$PROFILE/code.log" 2>&1 &
+  --disable-workspace-trust "$WS" >"$PROFILE/code.log" 2>&1 &
 CODEPID=$!
 for _ in $(seq 60); do
   WIN=$(xdotool search --name "Visual Studio Code" 2>/dev/null | head -1) && [ -n "$WIN" ] && break
@@ -155,8 +189,8 @@ sleep 5
 xdotool windowmove "$WIN" 0 0 windowsize "$WIN" 1440 900
 sleep 2
 
-# CROP drops the 35px title bar, which carries "[Extension Development Host]"
-# and a temp path. Nothing below it is chrome the demo needs to hide.
+# CROP drops the 35px title bar, which carries a temp workspace path. Nothing
+# below it is chrome the demo needs to hide.
 CROP="1440x865+0+35"
 # Toasts stack up bottom-right and linger past the action that raised them, which
 # in a GIF just reads as clutter. Clear them before each still.
