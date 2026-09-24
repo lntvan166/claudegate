@@ -38,6 +38,11 @@ import { createThrottle, createCoalescer } from "./scheduling";
 // attached session + hook health check) is real filesystem work. Sub-interval
 // focus events are dropped entirely.
 const FOCUS_SWEEP_MIN_INTERVAL_MS = 15_000;
+// The same sweep, but paced for the Pending panel becoming visible rather than
+// for alt-tab. Opening the panel is a deliberate act and far rarer than focus,
+// so this can be short; it only has to stop a burst if a layout change toggles
+// visibility repeatedly.
+const PANEL_RECONCILE_MIN_INTERVAL_MS = 2_000;
 
 // How long the badge/context/multi-diff fan-out waits before running once. Same
 // burst problem as the tree panels: persist() fires a session change and the
@@ -565,12 +570,45 @@ export function activate(context: vscode.ExtensionContext): void {
       log.appendLine("[WARN] CLAUDEGATE_ITEST set — test-only commands registered.");
     }
 
+    // A file put back to its baseline — git checkout, git stash, an editor undo —
+    // leaves a settled no-op row behind. The panel deliberately does not disk-gate
+    // rows (the hook records an entry BEFORE the write lands, so a live-disk gate
+    // would hide a real edit and never re-show it), and no session-file write
+    // happened, so nothing schedules the grace reconcile. Until now the only
+    // trigger left was window focus, throttled to 15s — so reverting a file
+    // without leaving the window left a row that did nothing until you alt-tabbed
+    // away and back. Clicking it reported "no changes to review … removed from
+    // Pending", which is the self-heal working but only once you had already been
+    // misled into clicking.
+    //
+    // Opening the panel is exactly when such a row would be noticed, so reconcile
+    // then as well. Bounded work: it reads each pending file once, measured at a
+    // few milliseconds for a couple of hundred entries.
+    const allowPanelReconcile = createThrottle(PANEL_RECONCILE_MIN_INTERVAL_MS);
+    const reconcileVisible = (): void => {
+      if (!allowPanelReconcile()) return;
+      sessionManager.reconcileNow();
+      worktreeRegistry.reconcileAll();
+    };
+
     context.subscriptions.push(
       revealActivePending,
       vscode.window.onDidChangeActiveTextEditor(() => revealActivePending.schedule()),
       // Opening the panel later should snap to whatever file is already focused,
       // rather than waiting for the next tab switch.
-      pendingView.onDidChangeVisibility((e) => { if (e.visible) revealActivePending.schedule(); })
+      pendingView.onDidChangeVisibility((e) => {
+        if (!e.visible) return;
+        reconcileVisible();
+        revealActivePending.schedule();
+      }),
+      // An undo or a revert-on-save inside the editor is the other way a row
+      // goes stale without any session write. Cheap to check: only files we are
+      // actually tracking trigger a pass.
+      vscode.workspace.onDidSaveTextDocument((doc) => {
+        if (doc.uri.scheme !== "file") return;
+        if (!managerFor(doc.uri.fsPath).getSession()?.files[doc.uri.fsPath]) return;
+        reconcileVisible();
+      })
     );
 
     const acceptedView = vscode.window.createTreeView("claudegate.acceptedPanel", {

@@ -1,4 +1,6 @@
 import * as assert from "assert";
+import * as fs from "fs";
+import * as path from "path";
 import * as vscode from "vscode";
 import { activateExtension, closeAllEditors, readSession, sessionRoots, waitFor } from "./helpers";
 
@@ -67,6 +69,59 @@ describe("pending navigation reaches worktree files", () => {
       reached.length > 0,
       "Next Pending never reached a file owned by a worktree session. " +
         `Visited ${seen.size} of ${all.length}: ${[...seen].join(", ")}`,
+    );
+  });
+});
+
+// A row whose file has been put back to its baseline — git checkout, git stash,
+// an editor undo — is a no-op that nothing has pruned yet. The panel does not
+// disk-gate rows on purpose, and no session write happened, so until this the
+// only thing that pruned it was window focus, throttled to 15 seconds. Clicking
+// such a row reported "no changes to review … removed from Pending": the
+// self-heal working, but only after the user had been misled into clicking.
+describe("a file reverted to its baseline stops haunting the panel", () => {
+  const scopes = () =>
+    vscode.commands.executeCommand<{ pending: string[] }>("claudegate._test.scopes");
+
+  before(async () => {
+    await activateExtension();
+    await waitFor("pending files", async () => (await scopes()).pending.length > 0);
+  });
+
+  it("prunes the row when the panel is opened", async () => {
+    const pending = (await scopes()).pending;
+
+    // Find a tracked file and put its recorded baseline back on disk, which is
+    // exactly what a git checkout does.
+    let target: string | undefined;
+    let baseline: string | undefined;
+    for (const root of sessionRoots()) {
+      const files = readSession(root)?.files as Record<string, { originalContent: string | null }>;
+      for (const [fp, entry] of Object.entries(files ?? {})) {
+        if (typeof entry.originalContent === "string" && pending.includes(fp)) {
+          target = fp; baseline = entry.originalContent; break;
+        }
+      }
+      if (target) break;
+    }
+    assert.ok(target && baseline !== undefined, "need a tracked file with a baseline");
+
+    fs.writeFileSync(target!, baseline!);
+    assert.ok((await scopes()).pending.includes(target!), "still listed right after the revert");
+
+    // Hide and re-show the SIDEBAR. togglePanel moves the bottom panel, which
+    // leaves the view's visibility untouched, so onDidChangeVisibility never
+    // fires and the test proves nothing.
+    await vscode.commands.executeCommand("workbench.action.toggleSidebarVisibility");
+    await new Promise((r) => setTimeout(r, 600));
+    await vscode.commands.executeCommand("workbench.action.toggleSidebarVisibility");
+    await new Promise((r) => setTimeout(r, 400));
+    await vscode.commands.executeCommand("workbench.view.extension.claudegate");
+
+    await waitFor(
+      `${path.basename(target!)} to be pruned from pending`,
+      async () => !(await scopes()).pending.includes(target!),
+      25000,
     );
   });
 });
