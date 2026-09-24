@@ -18,7 +18,7 @@ import {
 import { WorktreeSessionRegistry } from "./worktreeSessionRegistry";
 import { HookInstaller } from "./hookInstaller";
 import { SettingsTreeProvider, SettingsItem } from "./settingsPanel";
-import { ClaudeGateContentProvider, SCHEME, openDiff, openReviewRecord, openHistoryRecord, originalUri } from "./diffProvider";
+import { ClaudeGateContentProvider, SCHEME, openDiff, openReviewRecord, openHistoryRecord, originalUri, setPendingScopeProvider } from "./diffProvider";
 import { HistoryTreeProvider, HistorySessionItem } from "./historyPanel";
 import { formatBytes } from "./historyModel";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
@@ -29,7 +29,7 @@ import { persistWorkspaceRoots } from "./workspaceRoots";
 import { isInWorkspace, isExcluded, isProtected, setExcludeMatcher, setProtectedMatcher } from "./workspaceScope";
 import { ExcludeMatcher, DEFAULT_EXCLUDES } from "./excludeMatcher";
 import { saveDirtyPending } from "./saveEdits";
-import { orderedPendingPaths } from "./pendingPaths";
+import { orderedPendingAcross } from "./pendingPaths";
 import { failSoftLog } from "./safeLog";
 import { createThrottle, createCoalescer } from "./scheduling";
 
@@ -642,7 +642,12 @@ export function activate(context: vscode.ExtensionContext): void {
     // a file the user opens deliberately — it just must not be reachable from a
     // move the user did not choose.
     const orderedPending = (): string[] => {
-      const all = orderedPendingPaths(sessionManager);
+      // Across every session the panel draws from, not just the primary. On a
+      // workspace with nested worktrees the primary-only list reached a small
+      // fraction of what was pending — measured on a real one, 27 of 224 — and
+      // the other 197 could not be stepped to at all.
+      const all = orderedPendingAcross(reviewScopes(sessionManager, worktreeRegistry))
+        .map((p) => p.filePath);
       const filter = pendingProvider.getFilter();
       return filter === null ? all : all.filter((fp) => matchesFilter(fp, filter));
     };
@@ -1349,6 +1354,9 @@ export function activate(context: vscode.ExtensionContext): void {
       }),
     );
 
+    // The diff title's "N of M pending" must agree with what Next/Previous do,
+    // and those now span every session the panel draws from.
+    setPendingScopeProvider(() => reviewScopes(sessionManager, worktreeRegistry));
     registerOpenDiff(context, managerFor);
     context.subscriptions.push(
       vscode.commands.registerCommand("claudegate.openReviewRecord", (id: string) =>

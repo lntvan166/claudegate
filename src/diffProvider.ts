@@ -7,9 +7,26 @@ import { fileEntryFor } from "./reviewModel";
 import { countChanges, formatChangeCount } from "./changeCount";
 import { findArchiveRecord, HistoryRecordRef } from "./historyModel";
 import { pendingProgress } from "./reviewNav";
-import { orderedPendingPaths } from "./pendingPaths";
+import { orderedPendingAcross, orderedPendingPaths } from "./pendingPaths";
 
 export const SCHEME = "claudegate";
+
+// Every session the panel draws from, supplied once at activation.
+//
+// The "N of M pending" counter in a diff title has to agree with what Next and
+// Previous actually do, and those step across all sessions. Counting within the
+// one session that owns the file would say "1 of 2" while alt+] walks a list of
+// 224 — a number that contradicts the navigation it describes is worse than no
+// number.
+//
+// A setter rather than another parameter because openDiff is called from three
+// places that have no reason to know about the worktree registry, and the answer
+// is the same for all of them.
+let pendingScopes: (() => SessionManager[]) | null = null;
+
+export function setPendingScopeProvider(fn: () => SessionManager[]): void {
+  pendingScopes = fn;
+}
 
 // ─── Virtual document provider (serves original content for left side of diff) ─
 
@@ -184,7 +201,10 @@ export async function openDiff(
     suffix = "";
   }
 
-  const prog = pendingProgress(orderedPendingPaths(sessionManager), filePath);
+  const ordered = pendingScopes
+    ? orderedPendingAcross(pendingScopes()).map((p) => p.filePath)
+    : orderedPendingPaths(sessionManager);   // before activation wires it
+  const prog = pendingProgress(ordered, filePath);
   const progSuffix = prog ? `  ·  ${prog.index} of ${prog.total} pending` : "";
   const title =
     (entry.originalContent === null

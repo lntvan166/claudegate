@@ -495,9 +495,22 @@ field as "accepted clear not clear file in worktree".
   `onChange` as well as the primary's, so a decision taken inside a worktree
   clears the badge.
 
+- **Pending navigation is the same question again.** `orderedPendingPaths` takes
+  one `SessionManager`, and `Next`/`Previous Pending File`, the auto-advance
+  after a decision, and the `N of M pending` counter in a diff title all read it
+  with the primary session. On a workspace with nested worktrees that reached a
+  fraction of what was pending — measured on a real one, 27 of 224 files, the
+  other 197 unreachable by keyboard at all, with "all caught up" reported while
+  they sat in the panel. They now read `orderedPendingAcross(scopes)`, which
+  sorts the union as **one list** so stepping crosses worktree boundaries the way
+  the panel presents them. `diffProvider` gets the scope set through
+  `setPendingScopeProvider()`, wired once at activation, so the counter cannot
+  disagree with the navigation it describes.
+
 When adding an action to these panels, ask which of the two shapes it is. There
 is no third shape, and "the primary session" is never the answer. That includes
-anything keyed by file path rather than by panel row — decorations count.
+anything keyed by file path rather than by panel row — decorations count, and so
+does anything that walks a list of pending files.
 
 ---
 
