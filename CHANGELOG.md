@@ -7,6 +7,24 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.15.2] — 2026-10-06
+
+### Fixed
+
+- **Shell commands no longer fill the review with files that don't exist.** When Claude edits through the shell, the hook reads the command to work out which files it touches. It was reading far too much into it. In two days on one real workspace, 215 of the 256 paths it recorded had no file behind them: English words (`on`, `sandbox,`, `whether`), git revisions and ranges (`HEAD~1:services/grpc.go`, `base..HEAD`), scp remotes (`host:/tmp/x`), format strings (`%s/go.mod`), and Go identifiers from heredoc code (`ASvc.GetThing`, `filepath.SkipDir`, `strings.Builder`). Each one was cleaned up again within seconds, but only after two extra rewrites of the session file, which on that workspace was 2 MB. That was most of the churn behind the "Session file is large" warning. Four causes, all fixed: a `\"` inside a double-quoted sed script ended the quote early, so the rest of the script turned into one-word "files"; the sed or perl script itself was treated as a target; any `.Word` counted as a file extension; and a Python or Go heredoc could misalign quote matching for the rest of the command. Now a path the hook only *guesses* at must exist on disk, or have an extension people actually write (`.go`, `.md`, `.yaml`, …) or a name like `Makefile`. A path a command writes to explicitly (`> f`, `sed -i … f`, `tee f`) is still taken as given. Replayed against 25,553 real shell commands: guessed paths with nothing on disk fell from 5,414 to 3,775.
+- **Shell edits that came after a heredoc are captured again.** The last cause above also hid real edits. In `python3 - <<'EOF' … EOF` followed by `sed -i … f.sh`, the body's quoting could swallow the `sed` line, so `f.sh` was never baselined. Each heredoc body is now parsed separately from the shell around it. Paths that are mentioned in a body are still picked up, but the body can no longer break the commands after it. In the same replay, captures that point at a real file rose from 3,942 to 4,125. Commands sent to a remote shell (`ssh host 'bash -s' <<EOF`) are no longer captured as local files.
+- **Accepting or rejecting a file no longer clears the Pending filter.** After a decision, the next file opened was the first pending file overall, not the first one matching the filter. Because the filter hid that file, the panel then cleared the filter to show it, so every decision put you back on the full list and filtered review didn't work. Next, Previous and the auto-advance now step through only the files the filter matches. Accepting the last matching file says "nothing left matching …" rather than "all caught up".
+- **Next/Previous Pending File reach files inside worktrees.** Keyboard navigation, the auto-advance after a decision and the "N of M pending" counter in the diff title only knew about the main session. On a real workspace with nested worktrees, 197 of 224 pending files could not be reached by keyboard at all, and "all caught up" appeared while they were still listed in the panel. Navigation now walks every pending file as one list, in the order the panel shows them.
+- **A file you put back to its original content leaves the Pending panel sooner.** After `git checkout`, `git stash` or an editor undo, the row stayed until the window next regained focus. Clicking it in the meantime only reported "no changes to review". The check now also runs when the Pending panel is opened, and when you save a file that is pending.
+
+### Internal
+
+- 206 unit assertions, 100 hook tests and 30 integration tests against a real editor. The new hook tests are built from the real commands that produced bogus captures. Each new integration test was checked by removing the fix it covers and confirming the test fails.
+
+### Notes
+
+- **No need to re-run Setup Hook.** The new `hook.py` is copied over automatically when the extension starts or the window regains focus, and running Claude sessions use it from their next command.
+
 ## [1.15.1] — 2026-09-24
 
 ### Fixed

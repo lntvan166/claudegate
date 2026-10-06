@@ -353,6 +353,132 @@ class SpeculativeHarvestTest(unittest.TestCase):
         self.assertNotIn("origin/main", got)
 
 
+class ShapeNoiseTest(unittest.TestCase):
+    """Each case is a real command (trimmed) from a workspace whose hook.log
+    captured, in two days, 215 unique paths with nothing behind them. The
+    extension pruned every one again, but each cost two rewrites of a 2 MB
+    session file. The bogus path each used to produce is in the comment."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def got(self, cmd):
+        return paths(cmd, self.tmp)
+
+    def test_escaped_quote_does_not_end_a_double_quoted_word(self):
+        # captured: on, sandbox,, every, author,, whether, it, can, go, to, prod
+        cmd = ("sed -i \"s/'d': \\\"One feature's commits on sandbox, every author\\\"/"
+               "'d': \\\"and whether it can go to prod\\\"/\" board/mcp.py")
+        self.assertEqual(["board/mcp.py"], self.got(cmd))
+
+    def test_sed_script_is_not_a_target(self):
+        # captured: " None/d", " 0o022"
+        self.assertEqual(["tests/test_app.py"],
+                         self.got("sed -i '/    srv_board = None/d' tests/test_app.py"))
+        self.assertEqual(["chezmoi.toml"],
+                         self.got("sed -i '1i umask = 0o022' chezmoi.toml"))
+        self.assertEqual(["cfg/app.yaml"], self.got("sed -i s/a/b/ cfg/app.yaml"))
+
+    def test_sed_with_explicit_expressions_keeps_every_file(self):
+        self.assertEqual(["a.go", "b.go"],
+                         self.got("sed -i -e 's/a/b/' -e 's/c/d/' a.go b.go"))
+        self.assertEqual(["x.txt"], self.got("sed -ne 's/a/b/p' -i x.txt"))
+
+    def test_perl_e_script_is_not_a_target(self):
+        self.assertEqual(["lib/x.pm"],
+                         self.got("perl -pi -e 's/a = b/c/' lib/x.pm"))
+
+    def test_rev_path_and_host_path_are_not_files(self):
+        # captured: HEAD~1:services/grpc.go, build.dev:/tmp/rb-copy.db, prod:k.txt
+        got = self.got("git show HEAD~1:services/grpc.go > /tmp/old.go; "
+                       "scp build.dev:/tmp/rb-copy.db x.db; "
+                       "git show prod:k.txt > out.txt")
+        self.assertNotIn("HEAD~1:services/grpc.go", got)
+        self.assertNotIn("build.dev:/tmp/rb-copy.db", got)
+        self.assertNotIn("prod:k.txt", got)
+        self.assertIn("/tmp/old.go", got)
+        self.assertIn("out.txt", got)
+
+    def test_git_range_is_not_a_file(self):
+        # captured: base..HEAD, origin/main..HEAD
+        got = self.got("git log base..HEAD origin/main..HEAD > log.txt")
+        self.assertEqual(["log.txt"], got)
+
+    def test_heredoc_string_literals_that_are_not_filenames(self):
+        # captured: ASvc.GetThing, handler.GetThing, filepath.SkipDir,
+        # strings.Builder, %s/go.mod, "handler.GetThing → repo.Load", .go, .git
+        cmd = ("cat >> main_test.go <<'EOF'\n"
+               'rpc := RPC{Name: "ASvc.GetThing", Path: []string{"handler.GetThing", "repo.Load"}}\n'
+               'want := "handler.GetThing → repo.Load"\n'
+               'mod := fmt.Sprintf("%s/go.mod", r)\n'
+               'if strings.HasSuffix(p, ".go") || d.Name() == ".git" { return filepath.SkipDir }\n'
+               'var b strings.Builder\n'
+               "EOF")
+        self.assertEqual(["main_test.go"], self.got(cmd))
+
+    def test_dotted_names_need_a_known_extension_unless_on_disk(self):
+        # captured: build.dev, board.app, acme.order.ops, v.icon, ta.style.opacity
+        cmd = ("python3 - <<'PY'\n"
+               "open('out.json', 'w').write(x)\n"
+               "host = 'build.dev'; mod = 'board.app'; svc = 'acme.order.ops'\n"
+               "el = 'ta.style.opacity'\n"
+               "PY")
+        self.assertEqual(["out.json"], self.got(cmd))
+
+    def test_real_new_files_from_heredocs_are_still_captured(self):
+        cmd = ("python3 - <<'PY'\n"
+               "p = 'manager/biz/rule.go'\n"
+               "q = 'docs/Dockerfile'\n"
+               "open(p, 'w').write(s)\n"
+               "open('features/x/commits.yaml', 'w').write(t)\n"
+               "PY")
+        got = self.got(cmd)
+        self.assertIn("manager/biz/rule.go", got)
+        self.assertIn("features/x/commits.yaml", got)
+
+    def test_extensionless_or_unusual_file_on_disk_is_still_captured(self):
+        os.makedirs(os.path.join(self.tmp, "ci"))
+        for rel in ("ci/devi", "ci/build.Groovy", ".envrc"):
+            with open(os.path.join(self.tmp, rel), "w") as f:
+                f.write("x")
+        got = self.got("python3 - <<'PY'\n"
+                       "for p in ['ci/devi', 'ci/build.Groovy', '.envrc']:\n"
+                       "    open(p, 'w').write(s)\n"
+                       "PY")
+        self.assertEqual(["ci/devi", "ci/build.Groovy", ".envrc"], got)
+
+    def test_heredoc_quoting_cannot_swallow_the_command_after_it(self):
+        # The body's `\"` and trailing `\\` used to misalign quote pairing so
+        # far that the sed target after the heredoc was never seen.
+        cmd = ("python3 - <<'PYEOF'\n"
+               "p='ci/devi.sh'\n"
+               'a="""  post "$(jq --arg r "$repo" \\\\\n'
+               "      '{repo: $r}')\\\"\"\"\"\n"
+               "open(p,'w').write(s)\n"
+               "PYEOF\n"
+               "sed -i 's/; \\[\\[ \\$rc == 0 \\]\\] || echo \"\\$out\"//' ci/test-release.sh")
+        got = self.got(cmd)
+        self.assertIn("ci/devi.sh", got)
+        self.assertIn("ci/test-release.sh", got)
+
+    def test_existing_file_with_a_space_is_still_captured(self):
+        with open(os.path.join(self.tmp, "Team Report.json"), "w") as f:
+            f.write("{}")
+        got = self.got("python3 - <<'PY'\nopen('Team Report.json', 'w').write(s)\nPY")
+        self.assertEqual(["Team Report.json"], got)
+
+    def test_mixed_case_extension_is_not_a_known_file(self):
+        got = self.got("python3 - <<'PY'\nopen('a.json','w'); x = 'frame.Ts'\nPY")
+        self.assertEqual(["a.json"], got)
+
+    def test_explicit_targets_keep_their_freedom(self):
+        # Redirection and in-place tool targets are write targets by definition.
+        self.assertEqual(["Makefile"], self.got("cat > Makefile <<'EOF'\nall:\nEOF"))
+        self.assertEqual(["notes.weird"], self.got("echo x > notes.weird"))
+        self.assertEqual(["my notes.md"], self.got('echo x > "my notes.md"'))
+
+
 class CdAwareResolutionTest(unittest.TestCase):
     """A relative target resolves against the directory the command actually runs
     in, not the session cwd.

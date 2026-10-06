@@ -280,8 +280,40 @@ _WRAPPERS = frozenset({
 
 _SEP_CHARS   = ";\n&|"
 _REDIR_CHARS = "<>"
-_BAD_CHARS   = frozenset("$`*?!<>|;\"'()[]{}\n\t\\")
+_BAD_CHARS   = frozenset("$`*?!<>|;\"'()[]{}\n\t\\%")
+# `C:/x` is the one colon a path may carry; `HEAD~1:f.go`, `prod:k.txt` and
+# `host:/tmp/x` are git revisions and scp remotes, never local files.
+_DRIVE_RE    = re.compile(r"^[A-Za-z]:[\\/]")
+# `..` that is not a whole path segment: a git range (`base..HEAD`).
+_RANGE_RE    = re.compile(r"[^/]\.\.|\.\.[^/]")
 _EXT_RE      = re.compile(r"\.[A-Za-z][A-Za-z0-9_+-]{0,9}$")
+# Extensions a speculative, not-yet-existing candidate may carry. Deliberately
+# broad across languages and config formats — a missing entry here only costs a
+# capture when the file is also new — and deliberately free of the scratch
+# suffixes (`.tmp`, `.bak`, `.orig`) that name a file about to be renamed.
+_KNOWN_EXTS = frozenset("""
+    go mod sum work proto py pyi ipynb js jsx mjs cjs ts tsx mts cts vue svelte astro
+    json jsonc json5 yaml yml toml ini cfg conf env properties xml xsd plist
+    md mdx markdown txt rst adoc org csv tsv sql graphql gql prisma
+    sh bash zsh fish ps1 psm1 bat cmd
+    html htm css scss sass less styl
+    java kt kts scala groovy gradle clj cljs edn ex exs erl hrl elm hs ml mli fs fsx
+    rb rake gemspec php pl pm r rmd jl lua dart swift m mm c h cc cpp cxx hpp hh hxx
+    cs csproj sln vb rs zig nim v sol
+    tf tfvars hcl nix cmake mk make dockerfile containerfile
+    tmpl tpl j2 jinja jinja2 hbs mustache ejs erb
+    feature snap lock log patch diff svg ics service timer socket desktop
+    """.split())
+_KNOWN_DOTFILES = frozenset("""
+    env envrc gitignore gitattributes gitmodules dockerignore editorconfig
+    npmrc nvmrc yarnrc prettierrc prettierignore eslintrc eslintignore babelrc
+    bashrc zshrc profile vimrc tmux.conf golangci
+    """.split())
+_KNOWN_BARE_NAMES = frozenset({
+    "Makefile", "GNUmakefile", "Dockerfile", "Containerfile", "Jenkinsfile",
+    "Procfile", "Gemfile", "Rakefile", "Vagrantfile", "Brewfile", "Justfile",
+    "justfile", "LICENSE", "README", "CODEOWNERS", "OWNERS",
+})
 # `s/old/new/g`, `y|a|b|` — a sed script, not a path.
 _SED_EXPR_RE = re.compile(r"^[0-9,]*[sy]([^\w\s])")
 
@@ -318,8 +350,14 @@ def _lex(text: str) -> list:
             c = text[i]
             if c in " \t\r" or c in _SEP_CHARS or c in _REDIR_CHARS:
                 break
-            if c in "'\"":
-                j = text.find(c, i + 1)
+            if c == "\\":
+                # An escaped character is literal. Line continuation drops both.
+                if i + 1 < n and text[i + 1] != "\n":
+                    buf.append(text[i + 1])
+                i += 2
+                continue
+            if c == "'":
+                j = text.find("'", i + 1)
                 if j == -1:  # unbalanced quote: take the rest and stop
                     buf.append(text[i + 1:])
                     i = n
@@ -327,10 +365,35 @@ def _lex(text: str) -> list:
                 buf.append(text[i + 1:j])
                 i = j + 1
                 continue
+            if c == '"':
+                i = _lex_double_quoted(text, i + 1, buf)
+                continue
             buf.append(c)
             i += 1
         tokens.append(("word", "".join(buf), start))
     return tokens
+
+
+def _lex_double_quoted(text: str, i: int, buf: list) -> int:
+    """Append the body of a double-quoted string starting at `i` (just past the
+    opening quote) to `buf`; return the index past the closing quote.
+
+    `\\"` does not end the string. Treating it as the end is what turned
+    `sed -i "s/\\"a b c\\"/\\"d e\\"/" f.py` into the "words" `a`, `b`, `c`,
+    `d`, `e` — each captured as a file — while the real target `f.py` was lost
+    in the misaligned tail."""
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == '"':
+            return i + 1
+        if c == "\\" and i + 1 < n and text[i + 1] in '"\\$`':
+            buf.append(text[i + 1])
+            i += 2
+            continue
+        buf.append(c)
+        i += 1
+    return n  # unbalanced quote: took the rest
 
 
 def _segments(tokens: list) -> list:
@@ -376,6 +439,12 @@ def _plausible(tok: str) -> bool:
     """Could this token name a file we may safely baseline?"""
     if not tok or len(tok) > MAX_CANDIDATE_LEN:
         return False
+    if tok != tok.strip():                         # ` None/d` — a fragment of a script
+        return False
+    if ":" in tok and not _DRIVE_RE.match(tok):    # rev:path, host:path, `key:`
+        return False
+    if _RANGE_RE.search(tok):                      # base..HEAD, a..b
+        return False
     if tok in (".", "..", "-"):
         return False
     if tok.startswith("-") or tok.startswith("~"):
@@ -418,24 +487,45 @@ def _names_a_file(tok: str, cwd: str | None) -> bool:
         origin/main, origin/release-1.4   ← git refspecs
         github.com/acme/schema-lib        ← a Go module path
 
-    Every one shares a shape: slashes, but no extension on the final segment and
-    nothing on disk. So a speculative candidate is kept when EITHER
-      * its basename carries a file extension (`manager/biz/rule.go`) — this is
-        what keeps not-yet-created files capturable, which is the whole point of
-        recording `originalContent: null`; or
-      * it already exists on disk, which makes an extensionless real file
-        (`scripts/build`) a legitimate baseline.
+    So a speculative candidate is kept when EITHER
+      * it already exists on disk, which makes any real file a legitimate
+        baseline, extensionless (`scripts/build`) or oddly named; or
+      * its basename is a kind of file people write (`manager/biz/rule.go`,
+        `Dockerfile`; see _known_file_name) — this is what keeps not-yet-created
+        files capturable, the whole point of recording `originalContent: null`.
     """
-    if _EXT_RE.search(os.path.basename(tok)):
-        return True
     # An absolute path is checkable on its own; only a relative one needs to know
     # which directory it hangs off.
-    if not os.path.isabs(tok) and not cwd:
+    if os.path.isabs(tok) or cwd:
+        try:
+            if os.path.isfile(tok if os.path.isabs(tok) else os.path.join(cwd, tok)):
+                return True
+        except (OSError, ValueError):
+            pass
+    if any(c.isspace() for c in tok):  # prose: `handler.GetThing → repo.Load`
         return False
-    try:
-        return os.path.isfile(tok if os.path.isabs(tok) else os.path.join(cwd, tok))
-    except (OSError, ValueError):
+    return _known_file_name(os.path.basename(tok))
+
+
+def _known_file_name(base: str) -> bool:
+    """Is this basename recognisably a file, without looking at the disk?
+
+    "Has an extension" was the old test, and in a heredoc full of code it is no
+    test at all: `ASvc.GetThing`, `filepath.SkipDir`, `strings.Builder`,
+    `acme.order.ops` and `build.dev` all have one. A not-yet-existing file is only
+    worth baselining if it is a kind of file people actually write, so the
+    extension must be a known one. A file that exists already passed above,
+    whatever its name."""
+    m = _EXT_RE.search(base)
+    if not m:
+        return base in _KNOWN_BARE_NAMES
+    ext = m.group(0)[1:]
+    if not (ext.islower() or ext.isupper()):  # `frame.Ts`, `ASvc.GetThing`
         return False
+    ext = ext.lower()
+    if m.start() == 0:  # a dotfile: `.envrc` is a name, `.go` is a suffix
+        return ext in _KNOWN_DOTFILES
+    return ext in _KNOWN_EXTS
 
 
 def _strip_quotes(tok: str) -> str:
@@ -536,8 +626,44 @@ def _tool_targets(words: list):
     if patterns is not None:
         for a in args:
             if a.startswith("-") and any(p.match(a) for p in patterns):
+                if name in _SCRIPT_TOOLS:
+                    return _script_tool_files(name, args)
                 return [x for x in args if not x.startswith("-")]
     return None
+
+
+# sed and perl take a script, not just files: `sed -i 's/a/b/' f`. Passing the
+# script on as a target is what captured ` None/d` out of
+# `sed -i '/    srv_board = None/d' tests/test_app.py`.
+_SCRIPT_TOOLS = {
+    # flags whose NEXT argument is a script or script file
+    "sed":  re.compile(r"^(?:-[a-zA-Z]*[ef]|--expression|--file)$"),
+    "perl": re.compile(r"^-[a-zA-Z]*e$"),
+}
+
+
+def _script_tool_files(name: str, args: list) -> list:
+    """The file operands of a sed/perl invocation. With an explicit `-e`/`-f`
+    the scripts ride on those flags; without one, the first operand is the
+    script (sed only — perl without `-e` takes a script FILE, not a target)."""
+    takes_script = _SCRIPT_TOOLS[name]
+    files: list = []
+    explicit = False
+    skip = False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if a.startswith("-"):
+            if takes_script.match(a):
+                explicit = skip = True
+            elif a.startswith(("--expression=", "--file=")):
+                explicit = True
+            continue
+        files.append(a)
+    if not explicit and files:
+        files = files[1:]
+    return files
 
 
 # `<<EOF`, `<<-'EOF'`, `<<"EOF"` — the delimiter that ends the body.
@@ -582,6 +708,21 @@ def _heredoc_spans(text: str) -> list:
             spans.append((body, end))
         pos = found.end() if found else len(text)
     return spans
+
+
+def _blank_spans(text: str, spans: list) -> str:
+    """`text` with every span's characters replaced by spaces, newlines kept,
+    so offsets into the result are offsets into `text`."""
+    if not spans:
+        return text
+    parts: list = []
+    pos = 0
+    for start, end in spans:
+        parts.append(text[pos:start])
+        parts.append(re.sub(r"[^\n]", " ", text[start:end]))
+        pos = end
+    parts.append(text[pos:])
+    return "".join(parts)
 
 
 # `$W`, `${W}` — only the plain forms. Anything fancier (`${W:-x}`, `$(cmd)`)
@@ -725,9 +866,19 @@ def _scan_command(command: str, cwd: str | None = None):
     ordered: list = []
     seen: set = set()
 
-    tokens = _lex(text)
+    # The shell and each heredoc body are lexed SEPARATELY. A body is Python, Go
+    # or prose: lexed in line with the shell, its apostrophes, `\"` and
+    # trailing backslashes misalign quote pairing for everything after it, and
+    # the real `sed -i … f.sh` that follows the heredoc is swallowed into a
+    # "quoted word". Lexed apart, a body's quoting can only confuse itself. Its
+    # words are still harvested below (Tier 2c), just never read as commands.
+    heredocs = _heredoc_spans(text)
+    tokens = _lex(_blank_spans(text, heredocs))
+    body_words = [(value, start + pos)
+                  for start, end in heredocs
+                  for kind, value, pos in _lex(text[start:end]) if kind == "word"]
     segments = _segments(tokens)
-    seg_starts, seg_cwds = _segment_cwds(segments, cwd, _heredoc_spans(text))
+    seg_starts, seg_cwds = _segment_cwds(segments, cwd, heredocs)
 
     def cwd_at(offset: int):
         """The working directory in force at this point in the command text."""
@@ -781,6 +932,8 @@ def _scan_command(command: str, cwd: str | None = None):
         for kind, value, pos in tokens:
             if kind == "word":
                 add(value, True, cwd_at(pos))
+        for value, pos in body_words:
+            add(value, True, cwd_at(pos))
         for literal, pos in _quoted_literals(text):
             add(literal, True, cwd_at(pos))
 
