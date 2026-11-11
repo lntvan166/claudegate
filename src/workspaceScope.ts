@@ -31,6 +31,12 @@ export function setExcludeMatcher(m: ExcludeMatcher): void {
   _excludeMatcher = m;
 }
 
+/** True once activation has wired the exclude matcher. Before that, isExcluded()
+ *  answers false for everything, which must not be read as "nothing excluded". */
+export function hasExcludeMatcher(): boolean {
+  return _excludeMatcher !== null;
+}
+
 /** True if filePath matches an active claudegate.exclude glob. */
 export function isExcluded(filePath: string): boolean {
   return _excludeMatcher?.isExcluded(filePath) ?? false;

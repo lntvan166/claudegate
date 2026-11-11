@@ -261,6 +261,9 @@ def new_session() -> dict:
         # hook-created session already matches the schema (no migration re-write).
         "accepted": [],
         "rejected": {},
+        # This hook never captures an excluded file, so a session it creates has
+        # no hidden backlog for the extension's one-time sweep to clear.
+        "excludeCleanupDone": True,
     }
 
 

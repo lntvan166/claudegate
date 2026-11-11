@@ -96,6 +96,9 @@ Per-workspace session file at `~/.claudegate/sessions/<md5(workspacePath)>.json`
 - `rejected` is a map of `path → ReviewRecord`, storing only the latest rejected change per file.
 - Reapplicable: `reapplyRejected(path)` copies the `rejected[path]` entry back to `files` as pending with its frozen `before` baseline.
 
+**`excludeCleanupDone` (one-time latch):**
+- Set once `SessionManager.cleanupExcludedOnce()` has removed every pending entry matching `claudegate.exclude` — the backlog pre-1.16.0 hooks captured and the panel only hid. It runs on the first load of a session without the flag and never again, so an entry hidden by a pattern added *later* stays in the session and returns if the pattern is removed (the promise "Exclude This Folder" makes). `mergeFreshCaptures` ORs it across writers; `hook.py` preserves it on rewrite and sets it on sessions it creates, since it never captures excluded files.
+
 **Session lifecycle:**
 - `status: active` — session has pending files.
 - `status: reviewed` — set automatically when `files` is empty.

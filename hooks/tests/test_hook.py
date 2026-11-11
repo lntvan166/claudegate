@@ -161,6 +161,22 @@ class HookBaselineTest(unittest.TestCase):
         session = self.read_session()
         self.assertEqual(session["accepted"], [])
         self.assertEqual(session["rejected"], {})
+        # Nothing excluded is ever captured by this hook, so there is no hidden
+        # backlog for the extension's one-time sweep.
+        self.assertIs(session["excludeCleanupDone"], True)
+
+    def test_existing_session_fields_survive_a_capture(self):
+        # The extension's latch must not be dropped when the hook rewrites the file.
+        self.write_full_session()
+        with open(self.session_file) as f:
+            session = json.load(f)
+        session["excludeCleanupDone"] = True
+        with open(self.session_file, "w") as f:
+            json.dump(session, f)
+        with open(self.file, "w") as f:
+            f.write("v0")
+        self.run_hook()
+        self.assertIs(self.read_session()["excludeCleanupDone"], True)
 
     def test_nonexistent_file_records_null(self):
         # Hook fires before Claude creates the file → it does not exist yet.

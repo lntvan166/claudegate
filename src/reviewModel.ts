@@ -27,6 +27,10 @@ export interface Session {
   files: Record<string, FileEntry>;
   accepted: ReviewRecord[];
   rejected: Record<string, ReviewRecord>;
+  /** Set once the one-time sweep of excluded pending entries has run for this
+   *  session (see SessionManager.cleanupExcludedOnce). Absent on sessions
+   *  written before v1.16.1 and on fresh ones the hook creates. */
+  excludeCleanupDone?: boolean;
 }
 
 export function makeRecordId(decidedAt: string, path: string): string {
@@ -188,6 +192,8 @@ export function mergeFreshCaptures(
   guards?: MergeGuards,
 ): Session {
   const prunedThisCycle = guards?.prunedFiles;
+  // A one-way latch: once any writer has run the excluded-entry sweep, keep it.
+  if (disk.excludeCleanupDone) mine.excludeCleanupDone = true;
   // Union the decision log first, so the files{} reconcile below sees the other
   // window's decisions too. accepted[] is append-only → union by id, then re-cap.
   const seenAccepted = new Set(mine.accepted.map((r) => r.id));
@@ -329,6 +335,7 @@ export function migrateSession(raw: any): { session: Session; changed: boolean }
     accepted: validAccepted ? raw.accepted : [],
     rejected: validRejected ? raw.rejected : {},
   };
+  if (raw?.excludeCleanupDone === true) session.excludeCleanupDone = true;
   const files = raw?.files ?? {};
   for (const [path, e] of Object.entries<any>(files)) {
     const status = e?.reviewStatus;

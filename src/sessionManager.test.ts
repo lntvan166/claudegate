@@ -334,7 +334,9 @@ function readSession(sp: string): any {
 
 // Pending scope: out-of-workspace entries are pruned on load and never counted;
 // excluded files stay in files{} but are not counted; only in-workspace,
-// non-excluded files count toward the Pending panel.
+// non-excluded files count toward the Pending panel. (The session has already
+// had its one-time excluded sweep — an entry hidden by a pattern added since
+// must stay, which is what "Exclude This Folder" promises.)
 {
   const { ws, sp } = newEnv();
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), "cg-out-"));
@@ -344,7 +346,7 @@ function readSession(sp: string): any {
   for (const f of [inFp, outFp, lockFp]) fs.writeFileSync(f, "x2");
   fs.mkdirSync(path.dirname(sp), { recursive: true });
   fs.writeFileSync(sp, JSON.stringify({
-    sessionId: "t", status: "active", accepted: [], rejected: {},
+    sessionId: "t", status: "active", accepted: [], rejected: {}, excludeCleanupDone: true,
     files: {
       [inFp]: { originalContent: "x1", reviewStatus: "pending" },
       [outFp]: { originalContent: "x1", reviewStatus: "pending" },
@@ -364,6 +366,54 @@ function readSession(sp: string): any {
   setExcludeMatcher(new ExcludeMatcher());       // reset shared matcher
   sm.stopWatching();
   console.log("ok - pending scope: out-of-workspace pruned, excluded uncounted");
+}
+
+// One-time sweep: a session written before v1.16.1 (no excludeCleanupDone)
+// loses its excluded pending entries on first load, keeps everything else, and
+// latches the flag on disk so a pattern added afterwards is never swept.
+{
+  const { ws, sp } = newEnv();
+  const keepFp = path.join(ws, "main.go");
+  const sddFp = path.join(ws, ".superpowers", "sdd", "feat", "task-1-report.md");
+  const sumFp = path.join(ws, "svc", "go.sum");
+  const laterFp = path.join(ws, "gen", "out.txt");
+  for (const f of [keepFp, sddFp, sumFp, laterFp]) {
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, "x2");
+  }
+  fs.mkdirSync(path.dirname(sp), { recursive: true });
+  fs.writeFileSync(sp, JSON.stringify({
+    sessionId: "t", status: "active", accepted: [], rejected: {},
+    files: Object.fromEntries([keepFp, sddFp, sumFp, laterFp].map((f) =>
+      [f, { originalContent: "x1", reviewStatus: "pending" }])),
+  }));
+  const matcher = new ExcludeMatcher();
+  matcher.reload({ "**/go.sum": true, ".superpowers/sdd": true }, ws);
+  setExcludeMatcher(matcher);
+  stubWorkspace.workspaceFolders = [{ uri: { fsPath: ws } }];
+
+  const sm = new SessionManager(fakeLog, ws); sm.startWatching();
+  let files = sm.getSession()!.files;
+  assert.ok(files[keepFp] && files[laterFp], "non-excluded entries kept");
+  assert.equal(files[sddFp], undefined, "excluded folder entry swept");
+  assert.equal(files[sumFp], undefined, "excluded default-pattern entry swept");
+  const onDisk = readSession(sp);
+  assert.equal(onDisk.excludeCleanupDone, true, "latch persisted");
+  assert.deepEqual(Object.keys(onDisk.files).sort(), [keepFp, laterFp].sort(), "sweep persisted");
+  assert.equal(fs.readFileSync(sddFp, "utf-8"), "x2", "file on disk untouched");
+  sm.stopWatching();
+
+  // A pattern added after the sweep only hides — a fresh load does not sweep again.
+  matcher.reload({ "**/go.sum": true, ".superpowers/sdd": true, "gen": true }, ws);
+  const sm2 = new SessionManager(fakeLog, ws); sm2.startWatching();
+  files = sm2.getSession()!.files;
+  assert.ok(files[laterFp], "entry hidden by a later pattern stays in the session");
+  assert.equal(sm2.getPendingCount(), 1, "...but is not counted");
+  sm2.stopWatching();
+
+  stubWorkspace.workspaceFolders = undefined;
+  setExcludeMatcher(new ExcludeMatcher());
+  console.log("ok - excluded backlog is swept once per session, then only hidden");
 }
 
 // REGRESSION (nonstop-rewrite loop): a settled no-op pending entry (baseline ==

@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as crypto from "crypto";
-import { isInWorkspace, isExcluded } from "./workspaceScope";
+import { isInWorkspace, isExcluded, hasExcludeMatcher } from "./workspaceScope";
 import {
   Session, FileEntry, ReviewRecord, hasRealChange, shouldPruneNoOp, acceptEntry,
   rejectEntry, migrateSession, mergeFreshCaptures, MergeGuards, capAcceptedBytes,
@@ -563,6 +563,7 @@ export class SessionManager {
         `${this.session.accepted.length} accepted, ${Object.keys(this.session.rejected).length} rejected`
       );
       this.pruneOutOfWorkspaceEntries();
+      this.cleanupExcludedOnce();
       if (changed) this.persist();
       if (oversized) this.healOversized();
     } catch (err) {
@@ -657,6 +658,40 @@ export class SessionManager {
     // Same anti-resurrection guard as reconcilePending: the merge must not re-add
     // an entry we just pruned from the stale on-disk copy (would loop persist).
     if (pruned.size > 0) this.persist({ prunedFiles: pruned });
+  }
+
+  // One-time sweep of pending entries that match claudegate.exclude.
+  //
+  // Before v1.16.0 the hook captured excluded files and the panel merely hid
+  // them, so sessions carry a backlog nobody can see — 154 of 263 entries on one
+  // real workspace. 1.16.0 stopped new ones; this clears the old ones, once per
+  // session, latched by `excludeCleanupDone` in the session file itself (so every
+  // window, and every worktree session, agrees it has run).
+  //
+  // Deliberately ONCE, not on every load. "Exclude This Folder" promises that
+  // the entries it hides stay in the session and come back if the pattern is
+  // removed; a standing sweep would break that promise for every pattern added
+  // later. What this removes is only what was already invisible at upgrade.
+  // Nothing on disk is touched — the files keep Claude's changes.
+  private cleanupExcludedOnce(): void {
+    if (!this.session || this.session.excludeCleanupDone || !hasExcludeMatcher()) return;
+    const pruned = new Map<string, string | undefined>();
+    for (const [filePath, entry] of Object.entries(this.session.files)) {
+      if (isExcluded(filePath)) {
+        pruned.set(filePath, entry.capturedAt);
+        delete this.session.files[filePath];
+      }
+    }
+    this.session.excludeCleanupDone = true;
+    if (pruned.size > 0) {
+      this.log.appendLine(
+        `[INFO] Removed ${pruned.size} hidden pending entr${pruned.size === 1 ? "y" : "ies"} matching ` +
+        `claudegate.exclude (one-time cleanup; files on disk are unchanged).`
+      );
+    }
+    // Written even when nothing matched, so the latch sticks and a pattern added
+    // later is never swept.
+    this.persist({ prunedFiles: pruned });
   }
 
   // Force an immediate no-op / temp-file reconcile pass. Used when disk may have
