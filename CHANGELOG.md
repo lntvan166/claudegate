@@ -7,6 +7,24 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.16.1] — 2026-11-11
+
+### Fixed
+
+- **Hidden pending entries for excluded files are cleared once.** 1.16.0 stopped capturing excluded files, but entries captured before that stayed in the session. They were hidden from the panel, but still read and rewritten on every change. On one real workspace that was 154 of 263 pending entries. The first time a session is opened with this version, pending entries that match `claudegate.exclude` are removed and the session is marked as done, so this happens once and never again. Your files on disk are not touched. A pattern you add later still only hides what it matches, as "Exclude This Folder" promises, and removing the pattern brings those entries back.
+- **Shell commands no longer record comparison operators as files.** To find the file a command writes with `>`, the hook searched the whole command text, including heredoc bodies and quoted strings. So `age > time.Minute` in a Go heredoc, or `created_at > to_timestamp(…)` inside `psql -c "…"`, was read as a write to a file called `time.Minute` or `to_timestamp(…)`. These targets are trusted without any further checks, so each one became a pending entry. The hook now takes redirections only from the shell itself, and ignores any `>` inside quotes or a heredoc.
+- **Writes inside `sh -c '…'` are captured.** `nohup sh -c './job > out.log'`, `systemd-run … bash -c "…"` and similar commands put their redirection inside one quoted argument, where the hook could not see it. That script is now read as a command of its own. Only the files it explicitly writes are taken, not the program it runs. A shell run through `ssh`, `docker` or `kubectl` is skipped, because that file is on another machine. A redirection inside a subshell, as in `(… > app.pid)`, no longer gets the closing `)` attached to the file name.
+- **Edits made with `sd` are captured.** `sd FIND REPLACE file` changes the file in place with no flag, so the hook never treated it as a write. It was captured only when something else in the same command happened to look like one. Replayed against 29,666 real shell commands, the three shell fixes together raised the paths that point to a real file from 9,582 to 9,765, and cut the paths with nothing on disk from 5,707 to 5,421.
+- **Leftover temp files no longer pile up next to the sessions.** If a session write was interrupted, it left an empty `*.tmp` file in `~/.claudegate/sessions/` that nothing removed. On one machine six of them had sat there for three months. They are now removed when the extension starts, once they are more than an hour old.
+
+### Internal
+
+- 213 unit assertions, 123 hook tests and 30 integration tests against a real editor. The new tests for the redirection and `sd` fixes were confirmed to fail against the previous hook.
+
+### Notes
+
+- **No need to re-run Setup Hook.** The new `hook.py` is copied over automatically when the extension starts or the window regains focus.
+
 ## [1.16.0] — 2026-11-11
 
 ### Changed
