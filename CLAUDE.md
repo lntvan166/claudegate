@@ -135,6 +135,7 @@ Per-workspace session file at `~/.claudegate/sessions/<md5(workspacePath)>.json`
   - **`_apply_cd` gives up past `PATH_MAX`.** A chain of relative `cd`s grows the path each step and `normpath` over it is quadratic — 120 ms for one 64 KiB command, on a hook that runs synchronously before every Bash call.
 
   Without this, `cd <subdir> && <write>` — the normal shape of a write in a repo of submodules — recorded a path with no file behind it. That entry read as a no-op, the settle-window reconcile pruned it, and the edit never reached the pending panel: `hook.log` said `captured` while the panel stayed empty. One workspace had lost 47 captures this way. Verified by replaying 9,091 real `Bash` commands through the old and new scanners: 266 newly resolve to a file that exists, and nothing that used to resolve correctly stopped doing so.
+- **`claudegate.exclude` is honoured by the hook, not only by the panel.** The extension writes each window's active globs to `~/.claudegate/excludes.json` (`{ "<root>": [globs] }`, merged across windows like `workspace-roots.json`; `src/excludeSync.ts`), and `capture_file` skips a match with `skip-excluded` before reading it. Before, exclude was display-only: a workspace excluding `.superpowers/sdd` carried 154 invisible pending entries out of 263, each still costing a session write and reload. The matcher in `hook.py` is a port of `src/excludeMatcher.ts`; `hooks/tests/exclude_cases.json` runs against both, so add a case there whenever either changes. Entries captured before a pattern existed stay in the session, hidden, as before.
 - If the file is **already pending**, the hook leaves it untouched (preserves the frozen baseline).
 - Otherwise (no entry yet, or — for legacy/pre-migration sessions — a non-pending entry) the hook creates a fresh pending entry with the current on-disk `originalContent`. The hook only ever writes `files`; the extension owns `accepted`/`rejected`, and accept/reject remove the entry from `files`, so on a current-model session a re-edit simply finds no entry and creates a new pending one.
 
@@ -644,6 +645,11 @@ Consequences:
 - `watchSettingsForTrustInvalidation()` is retained for the older versions, but
   its message is a heads-up, **not** an outage report: do not reintroduce
   "your sessions have stopped tracking, restart them".
+- That watcher compares **only claudegate's own hook entries**, not the whole
+  `hooks` block, and clears itself once our registration is correct again. It
+  used to compare the whole block, so a terminal mod adding its own
+  `SessionStart`/`SessionEnd` hooks raised a `⚠ Claude Gate` chip that only a
+  window reload could dismiss — while capture kept working the whole time.
 
 When diagnosing "capture stopped", check `~/.claudegate/hook.log` first — daily
 entry counts show immediately whether the hook stopped firing or whether the

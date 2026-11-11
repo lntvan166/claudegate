@@ -119,45 +119,72 @@ export function computeSettingsPatch(
 }
 
 /**
- * The `hooks` block of a settings.json blob, normalized to a stable string for
- * comparison. Only this block controls hook loading; everything else in
- * settings.json (model, theme, enabledPlugins, permissions, …) is irrelevant
- * to trust invalidation. Falls back to the raw text when the JSON can't be
- * parsed, so a genuine change we can't inspect is still treated as a change.
+ * The claudegate hook entries of a settings.json blob — every hook group, under
+ * any event, that references claudegate — normalized to a stable string for
+ * comparison. Only our own registration matters to the trust signal: another
+ * tool adding, editing or removing *its* hooks (a SessionStart hook from a
+ * terminal mod, a plugin's PostToolUse) does not touch the PreToolUse entry that
+ * drives capture. Comparing the whole `hooks` block instead raised a persistent
+ * "hook config changed" warning every time a foreign tool registered a hook.
+ * Falls back to the raw text when the JSON can't be parsed, so a genuine change
+ * we can't inspect is still treated as a change.
  */
-function hooksConfigOf(raw: string): string {
+function ourHookEntriesOf(raw: string): string {
   try {
     const parsed = JSON.parse(raw) as { hooks?: unknown };
-    return JSON.stringify(parsed?.hooks ?? null);
+    const hooks = parsed?.hooks;
+    if (!hooks || typeof hooks !== "object" || Array.isArray(hooks)) return "null";
+    const ours: Record<string, unknown[]> = {};
+    for (const event of Object.keys(hooks).sort()) {
+      const groups = (hooks as Record<string, unknown>)[event];
+      if (!Array.isArray(groups)) continue;
+      const mine = groups.filter((g) => JSON.stringify(g).includes("claudegate"));
+      if (mine.length > 0) ours[event] = mine;
+    }
+    return JSON.stringify(ours);
   } catch {
     return raw;
   }
 }
 
+/** True when `raw` already carries the exact registration `computeSettingsPatch`
+ *  would write for `hookCommand` (right command AND right matcher). */
+export function isRegistrationCorrect(raw: string, hookCommand: string): boolean {
+  if (!raw.includes("claudegate")) return false;
+  const { changed, parseError } = computeSettingsPatch(raw, hookCommand);
+  return !changed && !parseError;
+}
+
 /**
  * How a detected settings.json change relates to the claudegate hook:
  * - `none`         — byte-identical, nothing happened.
- * - `benign`       — the hooks block is unchanged; Claude Code rewrote an
- *                    unrelated field (model, theme, enabledPlugins, session
- *                    state). The loaded PreToolUse hook is untouched, so
- *                    capture keeps working — do not warn, do not clear.
- * - `invalidated`  — the hooks block changed while claudegate is still
- *                    registered. Current Claude Code (measured on 2.1.227)
- *                    watches the settings files and re-reads hook config on
- *                    change, so running sessions keep capturing; older versions
- *                    snapshotted it at session start and needed a restart. Kept
- *                    as a low-alarm heads-up for those, not a stop-the-world
- *                    warning. (The name is historical.)
- * - `unregistered` — the hooks block changed and the claudegate entry is gone.
- *                    That's an uninstall (handled by the not-registered health
- *                    state), not an invalidation — don't warn.
+ * - `benign`       — our hook entries are unchanged (Claude Code rewrote an
+ *                    unrelated field, or another tool changed *its* hooks), or
+ *                    they changed but still match the correct registration.
+ *                    Capture keeps working — do not warn.
+ * - `invalidated`  — our entries changed and are no longer the registration we
+ *                    would write. Current Claude Code (measured on 2.1.227)
+ *                    re-reads hook config on change, so this is a heads-up for
+ *                    a hand-edited or broken entry, not an outage. (The name is
+ *                    historical.)
+ * - `unregistered` — the claudegate entry is gone. That's an uninstall (handled
+ *                    by the not-registered health state), not an invalidation.
+ *
+ * `hookCommand` enables the correctness check; without it any change to our
+ * entries counts as `invalidated`.
  */
 export type SettingsChangeKind = "none" | "benign" | "invalidated" | "unregistered";
 
-export function classifySettingsChange(prevRaw: string, currentRaw: string): SettingsChangeKind {
+export function classifySettingsChange(
+  prevRaw: string,
+  currentRaw: string,
+  hookCommand?: string
+): SettingsChangeKind {
   if (currentRaw === prevRaw) return "none";
-  if (hooksConfigOf(prevRaw) === hooksConfigOf(currentRaw)) return "benign";
-  return currentRaw.includes("claudegate") ? "invalidated" : "unregistered";
+  if (!currentRaw.includes("claudegate")) return "unregistered";
+  if (ourHookEntriesOf(prevRaw) === ourHookEntriesOf(currentRaw)) return "benign";
+  if (hookCommand !== undefined && isRegistrationCorrect(currentRaw, hookCommand)) return "benign";
+  return "invalidated";
 }
 
 /**
@@ -173,8 +200,12 @@ export function classifySettingsChange(prevRaw: string, currentRaw: string): Set
  * masquerade as a hook invalidation — that produced a warning that "kept
  * showing without any update".
  */
-export function shouldWarnTrustInvalidation(prevRaw: string, currentRaw: string): boolean {
-  return classifySettingsChange(prevRaw, currentRaw) === "invalidated";
+export function shouldWarnTrustInvalidation(
+  prevRaw: string,
+  currentRaw: string,
+  hookCommand?: string
+): boolean {
+  return classifySettingsChange(prevRaw, currentRaw, hookCommand) === "invalidated";
 }
 
 /** How many timestamped settings.json backups we keep before pruning the oldest. */
@@ -824,14 +855,20 @@ export class HookInstaller {
       // clear an active trust-invalidation (which would drop the persistent
       // status-bar warning while running sessions are still untrusted).
       if (current === this.lastKnownSettingsRaw) return;
-      const kind = classifySettingsChange(this.lastKnownSettingsRaw ?? "", current);
+      const kind = classifySettingsChange(this.lastKnownSettingsRaw ?? "", current, this.hookWrapperDest);
       this.lastKnownSettingsRaw = current;
 
       if (kind === "benign") {
-        // Claude Code rewrote an unrelated field (model/theme/plugins/session
-        // state); the hooks block is untouched and capture keeps working.
-        // Leave trust state exactly as-is — don't warn, and don't clear a
-        // genuine invalidation that a real hook change set earlier.
+        // Our registration is untouched (an unrelated field, or another tool's
+        // hooks) or was edited back to exactly what we would write. Don't warn —
+        // and if an earlier change had raised the warning, the registration is
+        // correct again, so clear it. A warning that only Setup Hook or a window
+        // reload could dismiss outlived the problem it described.
+        if (this.trustInvalidated && isRegistrationCorrect(current, this.hookWrapperDest)) {
+          this.trustInvalidated = false;
+          this.trustWarningShown = false;
+          this.fireHealth();
+        }
         return;
       }
 

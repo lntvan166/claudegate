@@ -5,6 +5,8 @@ import * as path from "path";
 import {
   computeSettingsPatch,
   shouldWarnTrustInvalidation,
+  classifySettingsChange,
+  isRegistrationCorrect,
   hookHealthFrom,
   buildVerifyReport,
   backupsToPrune,
@@ -326,6 +328,38 @@ const registered = computeSettingsPatch("", CMD).content; // contains "claudegat
     "non-hooks change → no warn"
   );
   console.log("ok - no warning when only non-hooks settings change");
+}
+
+// 9. Another tool registers ITS OWN hooks (a terminal mod adding SessionStart /
+//    SessionEnd) while our PreToolUse entry is untouched → must NOT warn. This
+//    is the field report: a persistent "hook config changed" chip that only a
+//    window reload could clear, while capture kept working throughout.
+{
+  const withHooks = JSON.parse(registered);
+  const foreign = { hooks: [{ type: "command", command: "node mod.mjs hook", timeout: 10 }] };
+  withHooks.hooks.SessionStart = [foreign];
+  withHooks.hooks.SessionEnd = [foreign];
+  withHooks.hooks.PreToolUse.push({ matcher: "^Bash$", hooks: [{ type: "command", command: "other-tool" }] });
+  const added = JSON.stringify(withHooks, null, 2);
+  assert.equal(shouldWarnTrustInvalidation(registered, added), false, "foreign hooks added → no warn");
+  assert.equal(shouldWarnTrustInvalidation(registered, added, CMD), false, "foreign hooks added (with cmd) → no warn");
+  // ...and removing them again is just as foreign.
+  assert.equal(shouldWarnTrustInvalidation(added, registered, CMD), false, "foreign hooks removed → no warn");
+  console.log("ok - no warning when another tool changes its own hooks");
+}
+
+// 10. With the hook command known, a change to OUR entry warns only when it
+//     leaves the registration wrong, and an edit that restores it is benign.
+{
+  const mutated = registered.replace("Write|Edit|MultiEdit", "Write|Edit");
+  assert.equal(classifySettingsChange(registered, mutated, CMD), "invalidated", "narrowed matcher → invalidated");
+  assert.equal(classifySettingsChange(mutated, registered, CMD), "benign", "restored registration → benign");
+  assert.equal(isRegistrationCorrect(registered, CMD), true);
+  assert.equal(isRegistrationCorrect(mutated, CMD), false);
+  // Reformatting our own entry (same content, different whitespace) is not a change.
+  const reformatted = JSON.stringify(JSON.parse(registered));
+  assert.equal(classifySettingsChange(registered, reformatted, CMD), "benign", "reformat → benign");
+  console.log("ok - our-entry changes warn only while the registration is wrong");
 }
 
 // ── hookHealthFrom precedence ────────────────────────────────────────────────
