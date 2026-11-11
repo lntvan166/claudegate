@@ -1,0 +1,29 @@
+{
+  "_comment": "Run against BOTH src/excludeMatcher.ts (excludeSync.test.ts) and hooks/hook.py (test_exclude.py). If the two matchers disagree, a file is hidden but still captured, or captured but never shown.",
+  "root": "/ws/proj",
+  "cases": [
+    { "globs": [".superpowers/sdd"], "path": "/ws/proj/.superpowers/sdd/2026-09-03-x/task-1-report.md", "excluded": true },
+    { "globs": [".superpowers/sdd"], "path": "/ws/proj/sub/.superpowers/sdd/a.md", "excluded": false },
+    { "globs": ["**/.superpowers/sdd"], "path": "/ws/proj/sub/.superpowers/sdd/a.md", "excluded": true },
+    { "globs": ["**/.superpowers/sdd"], "path": "/ws/proj/.superpowers/plans/a.md", "excluded": false },
+    { "globs": ["**/go.sum"], "path": "/ws/proj/svc/go.sum", "excluded": true },
+    { "globs": ["**/go.sum"], "path": "/ws/proj/go.sum", "excluded": true },
+    { "globs": ["**/go.sum"], "path": "/ws/proj/svc/go.mod", "excluded": false },
+    { "globs": ["**/*.min.js"], "path": "/ws/proj/web/app.min.js", "excluded": true },
+    { "globs": ["**/*.min.js"], "path": "/ws/proj/web/app.js", "excluded": false },
+    { "globs": ["*.log"], "path": "/ws/proj/run.log", "excluded": true },
+    { "globs": ["*.log"], "path": "/ws/proj/out/run.log", "excluded": false },
+    { "globs": ["out/?.txt"], "path": "/ws/proj/out/a.txt", "excluded": true },
+    { "globs": ["out/?.txt"], "path": "/ws/proj/out/ab.txt", "excluded": false },
+    { "globs": ["**/node_modules/**"], "path": "/ws/proj/web/node_modules/x/index.js", "excluded": true },
+    { "globs": ["loadtest/out"], "path": "/ws/proj/loadtest/out/k5/metrics.txt", "excluded": true },
+    { "globs": ["/ws/proj/tmp/**"], "path": "/ws/proj/tmp/a/b.txt", "excluded": true },
+    { "globs": ["a+b(c)/x.txt"], "path": "/ws/proj/a+b(c)/x.txt", "excluded": true },
+    { "globs": ["a+b(c)/x.txt"], "path": "/ws/proj/aab(c)/x.txt", "excluded": false },
+    { "globs": ["**/dist"], "path": "/elsewhere/dist/x.js", "excluded": false },
+    { "globs": ["**/dist/**"], "path": "/elsewhere/dist/x.js", "excluded": true },
+    { "globs": [".superpowers/sdd"], "path": "/elsewhere/.superpowers/sdd/a.md", "excluded": false },
+    { "globs": [], "path": "/ws/proj/anything.txt", "excluded": false },
+    { "globs": ["**/go.sum", "**/.superpowers/sdd"], "path": "/ws/proj/.superpowers/sdd/a.md", "excluded": true }
+  ]
+}

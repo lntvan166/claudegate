@@ -28,6 +28,7 @@ import { fileEntryFor } from "./reviewModel";
 import { persistWorkspaceRoots } from "./workspaceRoots";
 import { isInWorkspace, isExcluded, isProtected, setExcludeMatcher, setProtectedMatcher } from "./workspaceScope";
 import { ExcludeMatcher, DEFAULT_EXCLUDES } from "./excludeMatcher";
+import { activeGlobs, persistExcludes } from "./excludeSync";
 import { saveDirtyPending } from "./saveEdits";
 import { orderedPendingAcross } from "./pendingPaths";
 import { failSoftLog } from "./safeLog";
@@ -201,11 +202,15 @@ export function activate(context: vscode.ExtensionContext): void {
 
     const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     const excludeMatcher = new ExcludeMatcher();
-    const loadExclude = () =>
-      excludeMatcher.reload(
-        vscode.workspace.getConfiguration("claudegate").get<Record<string, boolean>>("exclude"),
-        workspacePath
-      );
+    const loadExclude = () => {
+      const excludeMap = vscode.workspace.getConfiguration("claudegate").get<Record<string, boolean>>("exclude");
+      excludeMatcher.reload(excludeMap, workspacePath);
+      // Hand the same set to hook.py so an excluded file is never captured, not
+      // merely hidden (src/excludeSync.ts). Keyed by the root the matcher uses.
+      if (workspacePath) {
+        persistExcludes(path.join(os.homedir(), ".claudegate"), workspacePath, activeGlobs(excludeMap));
+      }
+    };
     loadExclude();
     setExcludeMatcher(excludeMatcher);
     const protectedMatcher = new ExcludeMatcher();

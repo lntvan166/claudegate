@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 CLAUDEGATE_DIR = os.path.expanduser("~/.claudegate")
 SESSIONS_DIR   = os.path.join(CLAUDEGATE_DIR, "sessions")
 WORKSPACE_ROOTS_FILE = os.path.join(CLAUDEGATE_DIR, "workspace-roots.json")
+EXCLUDES_FILE = os.path.join(CLAUDEGATE_DIR, "excludes.json")
 
 HOOKLOG_SENTINEL = os.path.join(CLAUDEGATE_DIR, "hooklog.enabled")
 HOOKLOG_FILE     = os.path.join(CLAUDEGATE_DIR, "hook.log")
@@ -110,6 +111,90 @@ def workspace_session_file(workspace_root: str) -> str:
     normalized = os.path.normcase(os.path.abspath(workspace_root))
     workspace_hash = hashlib.md5(normalized.encode()).hexdigest()
     return os.path.join(SESSIONS_DIR, f"{workspace_hash}.json")
+
+
+# ── claudegate.exclude ───────────────────────────────────────────────────────
+# The extension writes each window's active `claudegate.exclude` globs to
+# excludes.json, keyed by workspace root (src/excludeSync.ts). An excluded file
+# is skipped BEFORE it is read, so it never lands in the session at all. Before,
+# exclude was display-only: the entry was captured in full and merely hidden.
+#
+# The matching below is a port of src/excludeMatcher.ts and must stay in step
+# with it — hooks/tests/exclude_cases.json is run against both.
+
+def glob_to_regex(glob: str) -> str:
+    """Port of globToRegExp: `**` crosses separators (and eats a following `/`),
+    `*` and `?` stay inside one segment. Returns an unanchored pattern string."""
+    g = glob.replace("\\", "/")
+    out = []
+    i = 0
+    while i < len(g):
+        c = g[i]
+        if c == "*":
+            if i + 1 < len(g) and g[i + 1] == "*":
+                out.append(".*")
+                i += 1
+                if i + 1 < len(g) and g[i + 1] == "/":
+                    i += 1
+            else:
+                out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        elif c in "\\^$.|+()[]{}":
+            out.append("\\" + c)
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def is_excluded(file_path: str, root: str, globs: list) -> bool:
+    """Port of ExcludeMatcher.isExcluded: test the absolute path, the
+    root-relative path and each ancestor directory of it, so a glob naming a
+    folder (`.superpowers/sdd`, `**/dist`) excludes everything inside."""
+    patterns = []
+    for glob in globs:
+        if not isinstance(glob, str):
+            continue
+        try:
+            patterns.append(re.compile(glob_to_regex(glob)))
+        except re.error:
+            continue  # an invalid glob excludes nothing, as in the extension
+    if not patterns:
+        return False
+    abs_path = file_path.replace("\\", "/")
+    root_s = root.replace("\\", "/").rstrip("/")
+    candidates = [abs_path]
+    if root_s and abs_path.startswith(root_s + "/"):
+        rel = abs_path[len(root_s) + 1:]
+        parts = [p for p in rel.split("/") if p]
+        candidates.append(rel)
+        candidates.extend("/".join(parts[:i]) for i in range(1, len(parts)))
+    return any(p.fullmatch(c) for p in patterns for c in candidates)
+
+
+_excludes_cache = None
+
+
+def excludes_for_root(workspace_root: str) -> list:
+    """The globs registered for `workspace_root` (already normcased/abspath'd by
+    workspace_root_for_file). Read once per hook run — a Bash command can carry
+    many candidates. Any problem with the file means no excludes (fail open:
+    capture, and let the extension hide the row as it always has)."""
+    global _excludes_cache
+    if _excludes_cache is None:
+        _excludes_cache = {}
+        try:
+            with open(EXCLUDES_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                for root, globs in data.items():
+                    if isinstance(root, str) and isinstance(globs, list):
+                        key = os.path.normcase(os.path.abspath(root))
+                        _excludes_cache[key] = [g for g in globs if isinstance(g, str)]
+        except (OSError, ValueError):
+            pass
+    return _excludes_cache.get(workspace_root, [])
 
 
 def worktree_root_for_file(file_path: str, best_root: str) -> str | None:
@@ -973,6 +1058,11 @@ def capture_file(file_path: str, cwd: str, session_id, captured_at: str) -> None
     workspace_root = workspace_root_for_file(file_path, cwd)
     if workspace_root is None:
         log_event("skip-no-root", file_path)
+        return
+    # Matched against the window's root, not a nested worktree's: the extension's
+    # ExcludeMatcher is anchored at the primary workspace folder.
+    if is_excluded(file_path, workspace_root, excludes_for_root(workspace_root)):
+        log_event("skip-excluded", file_path)
         return
     # A nested git worktree owns its own session deterministically, regardless of
     # which windows are open (fail-open: falls back to workspace_root on any error).
