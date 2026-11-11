@@ -479,6 +479,90 @@ class ShapeNoiseTest(unittest.TestCase):
         self.assertEqual(["my notes.md"], self.got('echo x > "my notes.md"'))
 
 
+class RedirectionSourceTest(unittest.TestCase):
+    """A redirection target skips every guard, so it must come from a real
+    shell `>` — never from one inside a heredoc body or a quoted string. Each
+    case below is a real command that captured its comparison operand as a file
+    while scanning the raw text."""
+
+    def test_comparison_in_heredoc_code_is_not_a_target(self):
+        cmd = ("python3 - <<'EOF'\np='a.go'\ns=open(p).read() + \"\"\"\n"
+               "\tif age > time.Minute {\n\t\treturn\n\t}\n\"\"\"\nopen(p,'w').write(s)\nEOF")
+        self.assertNotIn("time.Minute", paths(cmd))
+        self.assertIn("a.go", paths(cmd))
+
+    def test_comparison_in_quoted_sql_is_not_a_target(self):
+        cmd = 'psql db -c "select count(*) filter (where d.created_at > to_timestamp(0))" > out.txt'
+        self.assertEqual(paths(cmd), ["out.txt"])
+
+    def test_comparison_in_sd_argument_is_not_a_target(self):
+        cmd = "sd -F 'const more = lines.length > LINES;' 'x' main.js"
+        self.assertEqual(paths(cmd), ["main.js"])
+
+    def test_real_redirections_still_found(self):
+        self.assertEqual(paths("echo x > a.txt"), ["a.txt"])
+        self.assertEqual(paths("echo x >> a.txt 2>&1"), ["a.txt"])
+        self.assertEqual(paths("make 2> err.log"), ["err.log"])
+        self.assertEqual(paths("cmd &> all.log"), ["all.log"])
+        self.assertEqual(paths("echo x >a.txt"), ["a.txt"])
+        self.assertEqual(paths('echo x > "my file.txt"'), ["my file.txt"])
+        self.assertEqual(paths("cat > notes.md <<'EOF'\nbody > not_a_file\nEOF"), ["notes.md"])
+
+    def test_fd_duplication_is_not_a_target(self):
+        self.assertEqual(paths("go test ./... 2>&1 | tail"), [])
+        self.assertEqual(paths("echo oops >&2"), [])
+
+    def test_subshell_closing_paren_is_not_part_of_the_name(self):
+        cmd = "(./server > app.log 2>&1 & echo $! > app.pid); sleep 1"
+        self.assertEqual(sorted(paths(cmd)), ["app.log", "app.pid"])
+
+
+class ShellDashCTest(unittest.TestCase):
+    """A script passed to a local `sh -c` writes locally; one passed to a remote
+    runner does not."""
+
+    def test_redirect_inside_sh_c_is_captured(self):
+        cmd = "setsid nohup sh -c './run_all.sh 2>&1 | grep -v warn >> results/run.log' >/dev/null 2>&1 &"
+        self.assertEqual(paths(cmd), ["results/run.log"])
+
+    def test_wrapped_shell_with_options_in_front(self):
+        cmd = "systemd-run --user --unit=x -p Nice=10 sh -c './job.sh > outputs/pipeline.log 2>&1'"
+        self.assertEqual(paths(cmd), ["outputs/pipeline.log"])
+
+    def test_program_run_by_sh_c_is_not_captured(self):
+        self.assertNotIn("./run_all.sh", paths("sh -c './run_all.sh > out.log'"))
+
+    def test_remote_shells_are_not_local_writes(self):
+        self.assertEqual(paths("ssh host bash -c 'echo x > /etc/motd'"), [])
+        self.assertEqual(paths("docker exec c sh -c 'echo x > /app/f.txt'"), [])
+
+    def test_sh_c_inside_sh_c_is_bounded(self):
+        cmd = "sh -c \"sh -c 'sh -c \\\"echo > deep.txt\\\"'\""
+        paths(cmd)  # must terminate; depth is capped
+
+
+class SdTest(unittest.TestCase):
+    """`sd FIND REPLACE FILES...` edits in place with no flag."""
+
+    def test_files_after_find_and_replace(self):
+        self.assertEqual(paths("sd 'a' 'b' x.md y.md"), ["x.md", "y.md"])
+
+    def test_find_and_replace_are_not_explicit_targets(self):
+        # Only FILES are explicit. A path-shaped FIND/REPLACE can still be picked
+        # up by the speculative pass, like any word in a writing command — but
+        # it is checked against the file-name guards there, not taken as given.
+        self.assertEqual(hook._sd_targets(["old.go", "new.go", "main.md"]), ["main.md"])
+        self.assertEqual(paths("sd 'a b' 'c d' main.md"), ["main.md"])
+
+    def test_options_and_their_values_are_skipped(self):
+        self.assertEqual(paths("sd -F -f i -n 2 'a' 'b' f.txt"), ["f.txt"])
+        self.assertEqual(paths("sd -- '-x' '-y' f.txt"), ["f.txt"])
+
+    def test_preview_and_stdin_do_not_write(self):
+        self.assertFalse(hook.command_may_write("sd -p 'a' 'b' f.txt"))
+        self.assertFalse(hook.command_may_write("cat f.txt | sd 'a' 'b'"))
+
+
 class CdAwareResolutionTest(unittest.TestCase):
     """A relative target resolves against the directory the command actually runs
     in, not the session cwd.

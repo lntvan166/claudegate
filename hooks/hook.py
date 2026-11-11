@@ -331,13 +331,6 @@ MAX_COMMAND_CHARS = 64 * 1024   # cap the scanned command text
 MAX_CANDIDATES    = 25          # cap the paths one command may produce
 MAX_CANDIDATE_LEN = 400
 
-# Redirection into a real filename: `> f`, `>> f`, `2> f`, `&> f`. The (?!&)
-# lookahead rejects fd duplication (`2>&1`, `>&2`), which creates no file.
-_REDIRECT_RE = re.compile(
-    r"""(?:^|[\s;&|(])\d*>{1,2}\s*(?!&)"""
-    r"""((?:'[^']*'|"[^"]*"|[^\s;&|<>()'"])+)"""
-)
-
 # In-language writes: `open(p, 'w')` / `'a'` / `'w+'` / `'wb'`, plus the
 # pathlib/file-object write calls that usually accompany them.
 _OPEN_WRITE_RE = re.compile(r"""open\s*\([^()]*?,\s*(['"])[^'"]*[wa+][^'"]*\1""")
@@ -488,7 +481,7 @@ def _segments(tokens: list) -> list:
     """Split lexed tokens into command segments, as [(words, offset)] where
     offset is where the segment starts in the original text. The word following
     a redirection operator is dropped — `patch < fix.diff` reads that file, and
-    `> out` targets are harvested separately by _REDIRECT_RE."""
+    `> out` targets are harvested separately by _redirect_targets."""
     segs: list = []
     cur: list = []
     cur_start = 0
@@ -704,6 +697,8 @@ def _tool_targets(words: list):
 
     if name == "git":
         return _git_targets(args)
+    if name == "sd":
+        return _sd_targets(args)
     if name == "ruff":
         if args and args[0] == "format":
             return [a for a in args[1:] if not a.startswith("-")]
@@ -718,6 +713,35 @@ def _tool_targets(words: list):
                     return _script_tool_files(name, args)
                 return [x for x in args if not x.startswith("-")]
     return None
+
+
+# `sd [OPTIONS] FIND REPLACE [FILES...]` edits FILES in place — unlike sed it
+# needs no flag to do so — and with no FILES it filters stdin. `-p`/`--preview`
+# prints the result instead of writing. Without this entry an `sd` edit counted
+# as a write only when something else in the command happened to look like one.
+_SD_VALUE_FLAGS = frozenset({"-f", "--flags", "-n", "--max-replacements"})
+
+
+def _sd_targets(args: list):
+    operands: list = []
+    skip = False
+    options_done = False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if not options_done and a == "--":
+            options_done = True
+            continue
+        if not options_done and a.startswith("-") and a != "-":
+            if a in ("-p", "--preview"):
+                return None
+            if a in _SD_VALUE_FLAGS:
+                skip = True
+            continue
+        operands.append(a)
+    files = operands[2:]
+    return files if files else None
 
 
 # sed and perl take a script, not just files: `sed -i 's/a/b/' f`. Passing the
@@ -938,7 +962,46 @@ def _segment_cwds(segments: list, cwd: str | None, heredocs: list):
     return starts, cwds
 
 
-def _scan_command(command: str, cwd: str | None = None):
+def _redirect_targets(tokens: list, text: str):
+    """Yield (target, offset) for each output redirection in `tokens`: a `redir`
+    token containing `>` immediately followed by a word (`> f`, `>> f`, `2> f`,
+    `&> f`). `>&2` / `>&-` are fd duplications — the next token is a separator,
+    so they yield nothing. Input-only operators (`<`, `<<EOF`, `<<<`) are skipped."""
+    for i, (kind, _value, pos) in enumerate(tokens):
+        if kind != "redir":
+            continue
+        end = pos
+        while end < len(text) and text[end] in _REDIR_CHARS:
+            end += 1
+        if ">" not in text[pos:end]:
+            continue
+        if i + 1 < len(tokens) and tokens[i + 1][0] == "word":
+            # `(cmd > out.log 2>&1 & echo $! > app.pid)` — the lexer does not
+            # split on parentheses, so the subshell's closing `)` arrives glued
+            # to the last target. No real filename ends in `)`.
+            target = tokens[i + 1][1].rstrip(")")
+            if target:
+                yield target, pos
+
+
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
+_REMOTE_RUNNERS = frozenset({"ssh", "docker", "podman", "kubectl", "lxc", "vagrant"})
+
+
+def _shell_c_script(words: list):
+    """The script of a `<shell> -c SCRIPT` in this segment, wherever the shell
+    sits behind wrappers (`nohup`, `setsid`, `systemd-run --unit=x …`), or None.
+    None as well when a remote runner precedes it."""
+    for i, w in enumerate(words):
+        base = os.path.basename(w)
+        if base in _REMOTE_RUNNERS:
+            return None
+        if base in _SHELLS and i + 2 < len(words) and re.match(r"^-[a-z]*c[a-z]*$", words[i + 1]):
+            return words[i + 2]
+    return None
+
+
+def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
     """Return (may_write, candidates). Never raises for ordinary input.
 
     Each candidate is returned as `(path, cwd)`: a relative path means nothing
@@ -993,11 +1056,18 @@ def _scan_command(command: str, cwd: str | None = None):
 
     # Tier 2a — explicit redirection targets (write targets by definition, so
     # they need no path shape: `cat > f <<EOF` names `f`).
-    for m in _REDIRECT_RE.finditer(text):
-        target = _strip_quotes(m.group(1))
-        if target and not _is_device(target):
+    #
+    # Read off the SHELL tokens, never the raw text. A regex over the raw text
+    # also matched every `>` inside a heredoc body or a quoted string — Go's
+    # `d > 30 * time.Minute`, SQL's `created_at > to_timestamp(…)` in `psql -c
+    # "…"`, a JS `lines.length > LINES` inside an `sd` argument — and, being
+    # "explicit", each of those skipped every guard and became a pending entry.
+    # The lexer already knows a quoted `>` is text, and the heredoc bodies are
+    # blanked out of `tokens`.
+    for target, pos in _redirect_targets(tokens, text):
+        if not _is_device(target):
             may_write = True
-            add(target, False, cwd_at(m.start()))
+            add(target, False, cwd_at(pos))
 
     # Tier 1/2b — known in-place writer tools and their arguments.
     for (segment, start), seg_cwd in zip(segments, seg_cwds):
@@ -1008,6 +1078,25 @@ def _scan_command(command: str, cwd: str | None = None):
         for t in targets:
             add(t, False, seg_cwd)
 
+    # Tier 2a′ — a script handed to a local shell: `nohup sh -c 'run > out.log'`,
+    # `systemd-run … bash -c "…"`. The script is one quoted word, so its
+    # redirections are invisible to the token pass above; scan it as a command
+    # of its own, in the same directory. Not when the shell runs elsewhere
+    # (`ssh host bash -c …`, `docker exec c sh -c …`) — that file is not ours.
+    if _depth < 2:
+        for (segment, _start), seg_cwd in zip(segments, seg_cwds):
+            script = _shell_c_script(segment)
+            if script is None:
+                continue
+            inner_writes, inner = _scan_command(script, seg_cwd, _depth + 1)
+            if inner_writes:
+                may_write = True
+            for tok, tok_cwd in inner:
+                key = (tok, tok_cwd)
+                if key not in seen and len(ordered) < MAX_CANDIDATES:
+                    seen.add(key)
+                    ordered.append(key)
+
     # Tier 1 — in-language writes (python heredocs and -c one-liners).
     if _OPEN_WRITE_RE.search(text) or _WRITE_CALL_RE.search(text):
         may_write = True
@@ -1016,7 +1105,10 @@ def _scan_command(command: str, cwd: str | None = None):
     # the reported failure, where the path is bound to a variable first:
     #   p='manager/biz/monitor_filter.go'   ← harvested here
     #   open(p,'w').write(s)                ← fires Tier 1
-    if may_write:
+    # Not inside a `sh -c` script (depth > 0): there the words are mostly the
+    # program being run (`sh -c './run_all.sh > out.log'`), and only the
+    # explicit targets above are worth taking.
+    if may_write and _depth == 0:
         for kind, value, pos in tokens:
             if kind == "word":
                 add(value, True, cwd_at(pos))
