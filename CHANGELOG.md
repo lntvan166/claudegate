@@ -7,6 +7,24 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.16.0] — 2026-11-11
+
+### Changed
+
+- **Excluded files are no longer captured at all.** `claudegate.exclude` used to hide files, not skip them. The hook still captured an excluded file with its full original content, and the extension only left the row out of the panel, the counts and the badges. On one real workspace that excluded a folder of generated task reports, 154 of 263 pending entries were invisible rows. Each one still cost a session-file write and a reload whenever it was captured. The extension now passes the active patterns to the hook, which skips a matching file before reading it. The hook's matcher is a port of the extension's own, and one shared set of cases runs against both, so a file cannot be skipped by one and shown by the other. One thing to know: a change made while a pattern is active is not recorded, so removing the pattern later does not bring it back. Entries captured before a pattern existed stay in the session, hidden, as before.
+
+### Fixed
+
+- **The `⚠ Claude Gate` status-bar warning no longer appears when another tool adds its own hooks.** ClaudeGate watches `~/.claude/settings.json` and warned whenever anything in its `hooks` block changed. So a terminal tool registering its own `SessionStart` or `SessionEnd` hook raised a "hook config changed" warning, even though ClaudeGate's hook was untouched and capture kept working. The warning then stayed until you ran Setup Hook or reloaded the window. It now looks only at ClaudeGate's own hook entry. It warns only if that entry has been left wrong, and it clears itself as soon as the entry is correct again.
+
+### Internal
+
+- 211 unit assertions, 107 hook tests and 30 integration tests against a real editor.
+
+### Notes
+
+- **No need to re-run Setup Hook.** The new `hook.py` is copied over automatically when the extension starts or the window regains focus, and the list of excluded patterns is written at the same time.
+
 ## [1.15.2] — 2026-10-06
 
 ### Fixed
