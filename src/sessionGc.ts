@@ -81,3 +81,48 @@ export function gcOrphanedSessions(
   }
   return deleted;
 }
+
+/** How old a `*.tmp` beside the session files must be before it is debris. A
+ *  real write lives for milliseconds; an hour leaves a wide margin for a slow
+ *  disk or a hook paused under a debugger. */
+export const STALE_TMP_MS = 60 * 60 * 1000;
+
+// `<hash>.json.<pid>.<suffix>.tmp` (hook.py) and `<hash>.json.<hex>.tmp`
+// (SessionManager.atomicWrite): the temp half of a write-then-rename.
+const SESSION_TMP_RE = /\.json\.[^/\\]+\.tmp$/;
+
+/**
+ * Delete temp files left behind by a session write that never reached its
+ * rename — the writer was killed between the two steps. Nothing else removes
+ * them, so they accumulated for months as zero-byte files next to the sessions.
+ * Only files older than `maxAgeMs` go, so a write in flight is never touched.
+ * Fail-soft like gcOrphanedSessions. Returns the filenames deleted.
+ */
+export function gcStaleTempFiles(
+  sessionsDir: string,
+  opts: { now?: number; maxAgeMs?: number; log?: (msg: string) => void } = {}
+): string[] {
+  const now = opts.now ?? Date.now();
+  const maxAge = opts.maxAgeMs ?? STALE_TMP_MS;
+  let names: string[];
+  try {
+    names = fs.readdirSync(sessionsDir).filter((f) => SESSION_TMP_RE.test(f));
+  } catch {
+    return [];
+  }
+  const deleted: string[] = [];
+  for (const name of names) {
+    const full = path.join(sessionsDir, name);
+    try {
+      if (now - fs.statSync(full).mtimeMs < maxAge) continue;
+      fs.unlinkSync(full);
+      deleted.push(name);
+    } catch {
+      // vanished (its rename landed) or not ours to remove — leave it
+    }
+  }
+  if (deleted.length > 0) {
+    opts.log?.(`[INFO] GC removed ${deleted.length} stale session temp file(s).`);
+  }
+  return deleted;
+}

@@ -2,7 +2,7 @@ import * as assert from "assert";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { isOrphanedSession, referencedPaths, gcOrphanedSessions } from "./sessionGc";
+import { isOrphanedSession, referencedPaths, gcOrphanedSessions, gcStaleTempFiles, STALE_TMP_MS } from "./sessionGc";
 
 // A session file is GC-safe to delete only when EVERY file it references lives
 // in a directory that is gone from disk: none of its pending baselines can be
@@ -108,4 +108,33 @@ import { isOrphanedSession, referencedPaths, gcOrphanedSessions } from "./sessio
   // Missing directory is a no-op, not a throw.
   assert.deepEqual(gcOrphanedSessions(path.join(tmp, "does-not-exist")), [], "missing dir → no-op");
   console.log("ok - gcOrphanedSessions removes orphans and leaves everything else");
+}
+
+// ── gcStaleTempFiles ─────────────────────────────────────────────────────────
+// A write killed between writeFile and rename leaves `<hash>.json.<…>.tmp`
+// behind. Old ones go; a fresh one (a write in flight) and anything that is not
+// a session temp file stay.
+{
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cg-gc-tmp-"));
+  const now = Date.now();
+  const old = (now - STALE_TMP_MS - 60_000) / 1000;
+  const files = {
+    hookStale: "abc.json.3413844.ff85a2.tmp",      // hook.py shape
+    extStale: "abc.json.0a1b2c3d4e5f.tmp",         // SessionManager.atomicWrite shape
+    inFlight: "abc.json.999.000001.tmp",           // fresh: must survive
+    session: "abc.json",                           // not a temp file
+    other: "notes.tmp",                            // not a session temp file
+  };
+  for (const name of Object.values(files)) fs.writeFileSync(path.join(tmp, name), "");
+  for (const name of [files.hookStale, files.extStale, files.session, files.other]) {
+    fs.utimesSync(path.join(tmp, name), old, old);
+  }
+  const deleted = gcStaleTempFiles(tmp, { now }).sort();
+  assert.deepEqual(deleted, [files.extStale, files.hookStale].sort(), "only stale session temps removed");
+  for (const name of [files.inFlight, files.session, files.other]) {
+    assert.ok(fs.existsSync(path.join(tmp, name)), `${name} kept`);
+  }
+  assert.deepEqual(gcStaleTempFiles(path.join(tmp, "nope")), [], "missing dir → no-op");
+  fs.rmSync(tmp, { recursive: true, force: true });
+  console.log("ok - gcStaleTempFiles removes abandoned session temp files only");
 }

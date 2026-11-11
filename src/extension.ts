@@ -56,7 +56,7 @@ const SESSION_FANOUT_COALESCE_MS = 60;
 // arrives. Generous, because the event round-trips through the renderer.
 const REVEAL_GUARD_MS = 2000;
 import { stepPending, resolveCurrent } from "./reviewNav";
-import { gcOrphanedSessions } from "./sessionGc";
+import { gcOrphanedSessions, gcStaleTempFiles } from "./sessionGc";
 import { filterLabel, matchesFilter } from "./panelFilter";
 import { extensionGlob, folderGlob, describeGlob } from "./excludeSuggest";
 import { globToRegExp } from "./excludeMatcher";
@@ -194,6 +194,9 @@ export function activate(context: vscode.ExtensionContext): void {
         if (removed.length > 0) {
           log.appendLine(`[INFO] GC removed ${removed.length} orphaned session file(s).`);
         }
+        gcStaleTempFiles(path.join(os.homedir(), ".claudegate", "sessions"), {
+          log: (m) => log.appendLine(m),
+        });
       } catch (err) {
         log.appendLine(`[WARN] session GC failed: ${(err as Error).message}`);
       }
