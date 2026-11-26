@@ -1239,7 +1239,47 @@ class ImplicitOperationTest(unittest.TestCase):
                 full = hook.scan_full(cmd, "/nonexistent-dir")
                 self.assertEqual([], full["candidates"])
                 self.assertEqual([("skip-implicit", label)], full["notes"])
-        for cmd in ["git stash list", "git stash show -p", "npm run build"]:
+        for cmd in ["git stash list", "git stash show -p", "npm run test"]:
+            with self.subTest(cmd=cmd):
+                self.assertEqual([], hook.scan_full(cmd, "/w")["notes"])
+
+    def test_implicit_ops_inside_subshells_substitutions_and_wrappers(self):
+        # N1: `(git`, `$(git`, `` `git `` arrive glued; xargs/watch carry options.
+        tmp = os.path.realpath(tempfile.mkdtemp())
+        try:
+            for rel in ("src/app.ts", "internal/gen/models.go", "dir/x"):
+                os.makedirs(os.path.dirname(os.path.join(tmp, rel)), exist_ok=True)
+                open(os.path.join(tmp, rel), "w").close()
+            cases = [
+                ("(cd dir && git pull); sed -i s/a/b/ src/app.ts; git diff internal/gen/models.go",
+                 "git pull", ["src/app.ts"]),
+                ("(make gen) > /tmp/o; cat internal/gen/models.go", "make gen", []),
+                ("OUT=$(git pull 2>&1); echo \"$OUT\" > /tmp/o; cat src/app.ts", "git pull", ["/tmp/o"]),
+                ("echo `git stash pop` > /tmp/o; cat src/app.ts", "git stash", []),
+                ("echo $(git stash pop) > /tmp/o; cat src/app.ts", "git stash", []),
+                ("( git stash pop ) && python3 - <<E\nopen('src/app.ts','w')\nE", "git stash", []),
+                ("xargs -n1 git pull > /tmp/o; cat src/app.ts", "git pull", []),
+                ("xargs -n 1 git pull > /tmp/o; cat src/app.ts", "git pull", []),
+                ("watch git pull > /tmp/o; cat src/app.ts", "git pull", []),
+                ("watch -n 5 make gen > /tmp/o; cat src/app.ts", "make gen", []),
+                ("(git pull)", "git pull", []),
+            ]
+            for cmd, label, want in cases:
+                with self.subTest(cmd=cmd.splitlines()[0]):
+                    full = hook.scan_full(cmd, tmp)
+                    self.assertIn(("skip-implicit", label), full["notes"])
+                    self.assertEqual(want, [p for p, _ in full["candidates"]])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_more_extractors_and_builds(self):
+        for cmd, label in [("bsdtar -xf a.tar", "bsdtar -xf"), ("7z x a.7z", "7z x"),
+                           ("7za x a.7z", "7za x"), ("gunzip a.gz", "gunzip a.gz"),
+                           ("gzip -d a.gz", "gzip -d"), ("npm run build", "npm run build"),
+                           ("pnpm run build:web", "pnpm run build:web"), ("yarn build", "yarn run build")]:
+            with self.subTest(cmd=cmd):
+                self.assertEqual([("skip-implicit", label)], hook.scan_full(cmd, "/w")["notes"])
+        for cmd in ["gzip a.txt", "7z a out.7z src", "bsdtar -cf a.tar src"]:
             with self.subTest(cmd=cmd):
                 self.assertEqual([], hook.scan_full(cmd, "/w")["notes"])
 
@@ -1804,6 +1844,16 @@ class ShellCaptureEndToEndTest(unittest.TestCase):
         self.assertEqual(30, len(files))
         self.assertTrue(all("/t0/" in f for f in files))
         self.assertEqual(1, self.log().count("skip-too-many"))
+
+    def test_several_overflowing_dirs_are_one_line(self):
+        for d in range(3):
+            for i in range(hook.RM_WALK_CAP + 1):
+                self.seed("o%d/f%d.txt" % (d, i), "x")
+        self.run_bash("rm -rf o0 o1 o2")
+        lines = [l for l in self.log().splitlines() if "skip-too-many" in l]
+        self.assertEqual(1, len(lines), lines)
+        self.assertTrue(lines[0].endswith("%s..%s (3 dirs)" % (os.path.join(self.root, "o0"),
+                                                              os.path.join(self.root, "o2"))), lines[0])
 
     def test_walk_outside_every_root_or_excluded_is_skipped(self):
         outside = os.path.join(self.home, "outside")

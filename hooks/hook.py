@@ -739,10 +739,29 @@ def _tool_targets(words: list):
     return None
 
 
+# Wrappers whose own options (and option values) come before the command they
+# run: `xargs -n1 git pull`, `watch -n 5 make gen`.
+_OPTION_WRAPPERS = {
+    "xargs": frozenset({"-n", "-I", "-P", "-L", "-s", "-d", "-E", "-a", "--max-args",
+                        "--max-procs", "--delimiter", "--arg-file"}),
+    "watch": frozenset({"-n", "--interval", "-d", "--differences", "-q", "--equexit"}),
+}
+
+
 def _strip_prefix(words: list) -> list:
-    """`words` without leading wrappers (`sudo`, `env`, …) and `VAR=value`."""
+    """`words` without leading wrappers (`sudo`, `env`, `xargs -n1`, `watch
+    -n 5`, …) and `VAR=value`."""
     while words:
         head = words[0]
+        takes_value = _OPTION_WRAPPERS.get(head)
+        if takes_value is not None:
+            words = words[1:]
+            while words and words[0].startswith("-"):
+                flag = words[0]
+                words = words[1:]
+                if flag in takes_value and words:
+                    words = words[1:]          # `-n 1`; `-n1` carries its own
+            continue
         if head in _WRAPPERS:
             words = words[1:]
             continue
@@ -776,10 +795,47 @@ def _whole_tree(a: str) -> bool:
     return a in _WHOLE_TREE or a.endswith("/")
 
 
+def _unwrap_subshell(words: list) -> list:
+    """`(git pull)`, `$(git pull`, `` `git stash pop` `` → the words of the
+    command inside. The lexer does not split on `(` or a backtick, so the
+    opener arrives glued to the first word and `)` to the last."""
+    if not words:
+        return words
+    first = _cmd_word(words[0])
+    words = ([first] if first else []) + list(words[1:])
+    if words:
+        last = words[-1].rstrip(")`")
+        words = words[:-1] + ([last] if last else [])
+    return words
+
+
 def _implicit_op(words: list, cwd: str | None = None):
     """A short label (`git pull`, `make gen`, `tar -xzf`) when this segment is a
     never-capture operation, else None. `cwd` lets `git checkout X` be told
-    apart: X that is not an existing path is a branch."""
+    apart: X that is not an existing path is a branch.
+
+    A subshell or a substitution counts the same: `(cd d && git pull)`,
+    `OUT=$(git pull)`, `` echo `git stash pop` ``."""
+    label = _implicit_op_plain(_unwrap_subshell(words), cwd)
+    if label:
+        return label
+    # A command substitution anywhere in the segment runs its own command.
+    for k, w in enumerate(words):
+        cut = -1
+        for opener in ("$(", "`"):
+            at = w.find(opener)
+            if at != -1 and (cut == -1 or at < cut):
+                cut = at
+        if cut == -1:
+            continue
+        inner = [w[cut:]] + list(words[k + 1:])
+        label = _implicit_op_plain(_unwrap_subshell(inner), cwd)
+        if label:
+            return label
+    return None
+
+
+def _implicit_op_plain(words: list, cwd: str | None = None):
     words = _strip_prefix(words)
     while words and _base(words[0]) in _CODEGEN_RUNNERS:
         words = words[1:]
@@ -823,9 +879,17 @@ def _implicit_op(words: list, cwd: str | None = None):
     if name in ("npm", "pnpm", "yarn", "bun"):
         script = args[1] if args[:1] == ["run"] and len(args) > 1 else (
             args[0] if args and name in ("yarn", "pnpm") else "")
-        return (name + " run " + script) if script.startswith("gen") else None
-    if name in _CODEGEN or name in _CODEGEN_EXTRA or name == "unzip":
+        # A build or a generator rewrites files it does not name.
+        hit = script.startswith("gen") or script == "build" or script.startswith("build:")
+        return (name + " run " + script) if hit else None
+    if name in _CODEGEN or name in _CODEGEN_EXTRA or name in ("unzip", "gunzip"):
         return (name + " " + args[0]) if args else name
+    if name == "gzip" and any(a in ("-d", "--decompress") or re.match(r"^-[a-zA-Z]*d", a) for a in args):
+        return "gzip -d"
+    if name in ("7z", "7za", "7zr") and args[:1] in (["x"], ["e"]):
+        return name + " " + args[0]
+    if name == "bsdtar" and any(re.match(r"^-[a-zA-Z]*x", a) or a.startswith("x") for a in args[:2]):
+        return "bsdtar " + args[0]
     if name == "tar" and args:
         first = args[0]
         extracts = (("x" in first and not first.startswith("-"))
@@ -2764,8 +2828,9 @@ def main() -> None:
             prepared.append(got)
     # `rm -r DIR`: each regular file in it, within what is left of the
     # command's MAX_FILES_PER_COMMAND. A directory that does not fit
-    # contributes nothing; the first such logs one `skip-too-many`.
-    too_many_logged = False
+    # contributes nothing; all such are logged on one `skip-too-many` line —
+    # `<dir> >N` for one, `<first>..<last> (N dirs)` for several.
+    too_many: list = []
     entries = [_WALK_ENTRY_CAP]           # shared by every walk of this command
     for directory in full["dirs"]:
         room = min(RM_WALK_CAP, MAX_FILES_PER_COMMAND - len(prepared))
@@ -2776,9 +2841,10 @@ def main() -> None:
             log_event("error")
             continue
         if reason is not None:
-            if reason[0] != "skip-too-many" or not too_many_logged:
+            if reason[0] == "skip-too-many":
+                too_many.append(reason[1])
+            else:
                 log_event(*reason)
-            too_many_logged = too_many_logged or reason[0] == "skip-too-many"
             continue
         for f in files:
             try:
@@ -2788,6 +2854,12 @@ def main() -> None:
                 continue
             if got is not None:
                 prepared.append(got)
+    if len(too_many) == 1:
+        log_event("skip-too-many", too_many[0])
+    elif too_many:
+        first = too_many[0].rsplit(" >", 1)[0]
+        last = too_many[-1].rsplit(" >", 1)[0]
+        log_event("skip-too-many", "%s..%s (%d dirs)" % (first, last, len(too_many)))
     try:
         _commit(prepared, session_id, captured_at)
     except Exception:
