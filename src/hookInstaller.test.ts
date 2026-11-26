@@ -405,6 +405,32 @@ const AUDIT_ENTRY = { matcher: POST_TOOL_MATCHER, hooks: [{ type: "command", com
   console.log("ok - a non-command claudegate mention gets our entry appended");
 }
 
+// J. A null (or other non-object) entry inside one of our groups' `hooks`
+//    list is foreign: left untouched, never thrown on. Our command beside it
+//    is still repaired, and the result verifies.
+{
+  for (const [event, oldCmd, newCmd, matcher] of [
+    ["PostToolUse", "/h/.claudegate/audit.sh", AUDIT, POST_TOOL_MATCHER],
+    ["PreToolUse", "/h/.claudegate/hook.sh", CMD, PRE_TOOL_MATCHER],
+  ] as const) {
+    const raw = JSON.stringify({ hooks: { [event]: [{ matcher: "x", hooks: [null, 7, { type: "command", command: oldCmd }] }] } });
+    let r: ReturnType<typeof computeSettingsPatch> | undefined;
+    assert.doesNotThrow(() => { r = computeSettingsPatch(raw, CMD, AUDIT); }, `${event}: null entry does not throw`);
+    assert.equal(r!.parseError, undefined, `${event}: not refused (option A)`);
+    assert.equal(r!.changed, true);
+    const group = JSON.parse(r!.content).hooks[event][0];
+    assert.deepEqual(group, { matcher, hooks: [null, 7, { type: "command", command: newCmd }] },
+      `${event}: null and non-object entries kept in place, our command repaired`);
+    assert.equal(verifySettingsContent(r!.content, raw, CMD, AUDIT), null, `${event}: result verifies`);
+    assert.equal(computeSettingsPatch(r!.content, CMD, AUDIT).changed, false, `${event}: fixed point`);
+    assert.doesNotThrow(() => isRegistrationCorrect(raw, CMD, AUDIT));
+    assert.doesNotThrow(() => isRegistrationCorrect(raw, CMD));
+    assert.doesNotThrow(() => classifySettingsChange(r!.content, raw, CMD));
+    assert.doesNotThrow(() => classifySettingsChange(raw, r!.content, CMD, AUDIT));
+  }
+  console.log("ok - a null entry inside our group is left alone, not thrown on");
+}
+
 function USER_CONFIG_FOR_AUDIT(): string {
   return JSON.stringify(
     { model: "m", hooks: { PreToolUse: [{ matcher: "^Bash$", hooks: [{ type: "command", command: "/other/tool.sh" }] }] } },

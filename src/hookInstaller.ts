@@ -160,7 +160,7 @@ function ensureHookEntry(
     (h) =>
       h.matcher === matcher &&
       Array.isArray(h.hooks) &&
-      h.hooks.some((x) => x.command === command)
+      h.hooks.some((x) => x?.command === command)
   );
   if (correct) {
     // Already registered with the exact command AND matcher → no semantic
@@ -183,7 +183,7 @@ function ensureHookEntry(
       if (!Array.isArray(h.hooks)) continue;
       let mine = false;
       for (const x of h.hooks) {
-        if (typeof x.command === "string" && owns.command(x.command)) {
+        if (typeof x?.command === "string" && owns.command(x.command)) {
           x.command = command;
           mine = true;
         }
