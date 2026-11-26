@@ -104,6 +104,26 @@ class HookLogTest(unittest.TestCase):
         sf = os.listdir(os.path.join(self.cg, "sessions"))
         self.assertEqual(len(sf), 1, "capture still happened despite unwritable log")
 
+    def run_bash(self, command):
+        payload = json.dumps({
+            "tool_name": "Bash", "cwd": self.root,
+            "tool_input": {"command": command}, "session_id": "s",
+        })
+        subprocess.run([sys.executable, HOOK], input=payload, text=True,
+                       env=dict(os.environ, HOME=self.home), check=True)
+
+    def log_lines(self, event):
+        with open(self.logfile, encoding="utf-8") as f:
+            return [l for l in f.read().splitlines() if (" " + event) in l]
+
+    def test_skip_implicit_logged_once_and_nothing_captured(self):
+        self.enable_log()
+        self.run_bash("git pull --rebase && make gen && tar -xzf a.tgz")
+        lines = self.log_lines("skip-implicit")
+        self.assertEqual(1, len(lines), lines)
+        self.assertTrue(lines[0].endswith("skip-implicit git pull"), lines[0])
+        self.assertEqual([], os.listdir(os.path.join(self.cg, "sessions")))
+
 
 if __name__ == "__main__":
     unittest.main()

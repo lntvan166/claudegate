@@ -673,14 +673,12 @@ def _git_targets(args: list):
         if "--" in rest:
             after = rest[rest.index("--") + 1:]
             return [a for a in after if not a.startswith("-")]
-        # `git checkout .` / a branch name names no file — Tier 3, out of scope.
-        return [a for a in rest if not a.startswith("-") and _pathspec_shaped(a)]
-    if sub == "stash":
-        return [] if rest and rest[0] in ("pop", "apply") else None
-    if sub == "reset":
-        if "--hard" not in rest:
-            return None
-        return [a for a in rest if not a.startswith("-") and _pathspec_shaped(a)]
+        # `git checkout .` / a branch name names no file. A branch switch
+        # brings in other people's changes: never a capture (_implicit_op).
+        named = [a for a in rest if not a.startswith("-") and _pathspec_shaped(a)]
+        return named or None
+    # `stash pop/apply` and `reset --hard` rewrite the tree without naming a
+    # file: history operations, logged by _implicit_op and never captured.
     return None
 
 
@@ -721,6 +719,63 @@ def _tool_targets(words: list):
                 if name in _SCRIPT_TOOLS:
                     return _script_tool_files(name, args)
                 return [x for x in args if not x.startswith("-")]
+    return None
+
+
+def _strip_prefix(words: list) -> list:
+    """`words` without leading wrappers (`sudo`, `env`, …) and `VAR=value`."""
+    while words:
+        head = words[0]
+        if head in _WRAPPERS:
+            words = words[1:]
+            continue
+        name, _, _ = head.partition("=")
+        if "=" in head and not head.startswith("-") and name.isidentifier():
+            words = words[1:]
+            continue
+        break
+    return words
+
+
+# Commands that bring in OTHER people's changes, or rewrite many files without
+# naming them. The maintainer's rule: a capture means "Claude changed this file
+# and the user should review it", so these never create a pending entry. They
+# are logged as `skip-implicit <cmd> <sub>` so the gap stays visible.
+_IMPLICIT_GIT = frozenset({"pull", "merge", "rebase", "cherry-pick", "revert", "switch"})
+_CODEGEN = frozenset({"protoc", "sqlc", "swag", "buf", "make", "gmake"})
+
+
+def _implicit_op(words: list):
+    """A short label (`git pull`, `make gen`, `tar -xzf`) when this segment is a
+    never-capture operation, else None."""
+    words = _strip_prefix(words)
+    if not words:
+        return None
+    name = os.path.basename(words[0])
+    args = words[1:]
+    if name == "git":
+        idx = 0
+        while idx < len(args) and args[idx].startswith("-"):
+            idx += 2 if args[idx] in ("-C", "-c") else 1
+        if idx >= len(args):
+            return None
+        sub, rest = args[idx], args[idx + 1:]
+        hit = (sub in _IMPLICIT_GIT
+               or (sub == "stash" and rest[:1] in (["pop"], ["apply"]))
+               or (sub == "reset" and "--hard" in rest)
+               or (sub == "checkout" and "--" not in rest
+                   and not any(not a.startswith("-") and _pathspec_shaped(a) for a in rest)))
+        return "git " + sub if hit else None
+    if name == "go":
+        return "go generate" if args[:1] == ["generate"] else None
+    if name in _CODEGEN or name == "unzip":
+        return (name + " " + args[0]) if args else name
+    if name == "tar" and args:
+        first = args[0]
+        extracts = (("x" in first and not first.startswith("-"))
+                    or any(re.match(r"^-[a-zA-Z]*x", a) or a in ("--extract", "--get")
+                           for a in args))
+        return ("tar " + first) if extracts else None
     return None
 
 
@@ -1521,13 +1576,17 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
     we could not follow leaves a trace instead of vanishing.
     """
     if not command or not isinstance(command, str):
-        return False, [], []
+        return False, [], [], _new_extra()
     text = command[:MAX_COMMAND_CHARS]
 
     may_write = False
     ordered: list = []
     seen: set = set()
     unresolved: list = []
+    # `notes`: (event, detail) lines for the caller to log, even when nothing
+    # is captured. `dirs`: directories whose files a recursive delete removes,
+    # walked by the caller.
+    extra = _new_extra()
 
     # The shell and each heredoc body are lexed SEPARATELY. A body is Python, Go
     # or prose: lexed in line with the shell, its apostrophes, `\"` and
@@ -1622,6 +1681,14 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
             i = at(pos)
             add(target, False, cwd_at(pos), seg_envs[i] if i >= 0 else None)
 
+    # Never-capture operations: `git pull`, `make gen`, `tar -xzf`. Logged once
+    # per command, never a candidate. Anything else in the command still counts.
+    for segment, _start in segments:
+        label = _implicit_op(segment)
+        if label:
+            _note(extra, "skip-implicit", label, once=True)
+            break
+
     # Tier 1/2b — known in-place writer tools and their arguments.
     for (segment, start), seg_cwd, seg_env in zip(segments, seg_cwds, seg_envs):
         targets = _tool_targets(segment)
@@ -1641,7 +1708,9 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
             script = _shell_c_script(segment)
             if script is None:
                 continue
-            inner_writes, inner, inner_unresolved = _scan_command(script, seg_cwd, _depth + 1)
+            inner_writes, inner, inner_unresolved, inner_extra = _scan_command(
+                script, seg_cwd, _depth + 1)
+            _merge_extra(extra, inner_extra)
             if inner_writes:
                 may_write = True
             for tok in inner_unresolved:
@@ -1661,8 +1730,9 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
         for (op, start, end), r in zip(found, runs):
             if r != "shell":
                 continue
-            inner_writes, inner, inner_unresolved = _scan_command(
+            inner_writes, inner, inner_unresolved, inner_extra = _scan_command(
                 text[start:end], cwd_at(op), _depth + 1)
+            _merge_extra(extra, inner_extra)
             if inner_writes:
                 may_write = True
             for tok in inner_unresolved:
@@ -1694,7 +1764,27 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
         for literal, pos in _quoted_literals(code_text):
             add(literal, True, cwd_at(pos))
 
-    return may_write, ordered, unresolved
+    return may_write, ordered, unresolved, extra
+
+
+def _new_extra() -> dict:
+    return {"notes": [], "dirs": []}
+
+
+def _note(extra: dict, event: str, detail: str, once: bool = False) -> None:
+    """Queue a log line. `once`: at most one line of this event per command."""
+    if once and any(e == event for e, _ in extra["notes"]):
+        return
+    if len(extra["notes"]) < MAX_CANDIDATES:
+        extra["notes"].append((event, detail))
+
+
+def _merge_extra(into: dict, other: dict) -> None:
+    for event, detail in other["notes"]:
+        _note(into, event, detail, once=(event == "skip-implicit"))
+    for d in other["dirs"]:
+        if d not in into["dirs"]:
+            into["dirs"].append(d)
 
 
 def command_may_write(command: str) -> bool:
@@ -1724,8 +1814,19 @@ def scan_targets(command: str, cwd: str | None = None):
     """`(paths_from_command(command, cwd), unresolved)` — the second item lists
     the explicit targets dropped because a variable in them cannot be expanded
     (see _scan_command). Both are empty for a command that cannot write."""
-    may_write, candidates, unresolved = _scan_command(command, cwd)
-    return (candidates, unresolved) if may_write else ([], [])
+    full = scan_full(command, cwd)
+    return full["candidates"], full["unresolved"]
+
+
+def scan_full(command: str, cwd: str | None = None) -> dict:
+    """Everything main() needs from one command: `candidates`, `unresolved`
+    and `dirs` (all empty for a command that cannot write), and `notes` —
+    (event, detail) log lines, kept even then (`skip-implicit git pull`)."""
+    may_write, candidates, unresolved, extra = _scan_command(command, cwd)
+    if not may_write:
+        return {"candidates": [], "unresolved": [], "dirs": [], "notes": extra["notes"]}
+    return {"candidates": candidates, "unresolved": unresolved,
+            "dirs": extra["dirs"], "notes": extra["notes"]}
 
 
 def capture_file(file_path: str, cwd: str, session_id, captured_at: str) -> None:
@@ -1818,10 +1919,13 @@ def main() -> None:
     if not isinstance(command, str) or not command:
         sys.exit(0)
     try:
-        candidates, unresolved = scan_targets(command, cwd)
+        full = scan_full(command, cwd)
     except Exception:
         log_event("error")
         sys.exit(0)
+    candidates, unresolved = full["candidates"], full["unresolved"]
+    for event, detail in full["notes"]:
+        log_event(event, detail[:MAX_CANDIDATE_LEN].replace("\\", "\\\\").replace("\n", "\\n"))
     # An explicit target whose variable we cannot expand (`cat > $T/x`) is
     # not captured — guessing would record a path with no file behind it — but
     # it is logged, one line per token, so the gap shows up in hook.log.

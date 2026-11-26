@@ -81,8 +81,6 @@ class WriteDetectionTest(unittest.TestCase):
         "git apply fix.patch",
         "git checkout -- pkg/a.go",
         "git restore pkg/a.go",
-        "git stash pop",
-        "git reset --hard",
         "dd if=a.img of=b.img",
         "truncate -s 0 log.txt",
         "touch new.go",
@@ -113,6 +111,10 @@ class WriteDetectionTest(unittest.TestCase):
         "echo boom >&2",
         "make generate",
         "npm run compile",
+        # History operations bring in other people's changes: never a write.
+        "git stash pop",
+        "git reset --hard",
+        "git checkout main",
         "python3 -c \"print(open('a.go').read())\"",
     ]
 
@@ -1132,6 +1134,51 @@ class EnvironmentFallbackTest(unittest.TestCase):
         self.assertEqual([], [p for p in got if p.startswith(self.root)])
 
 
+class ImplicitOperationTest(unittest.TestCase):
+    """Commands that bring in other people's changes, or rewrite files without
+    naming them, never capture; they are noted once as `skip-implicit`."""
+
+    NEVER = [
+        ("git pull", "git pull"), ("git merge origin/main", "git merge"),
+        ("git rebase main", "git rebase"), ("git cherry-pick abc123", "git cherry-pick"),
+        ("git revert HEAD", "git revert"), ("git stash pop", "git stash"),
+        ("git stash apply", "git stash"), ("git reset --hard origin/main", "git reset"),
+        ("git checkout feature/x", "git checkout"), ("git switch main", "git switch"),
+        ("git -C svc-lib pull --rebase", "git pull"), ("go generate ./...", "go generate"),
+        ("make gen", "make gen"), ("make", "make"), ("protoc --go_out=. a.proto", "protoc --go_out=."),
+        ("sqlc generate", "sqlc generate"), ("swag init", "swag init"),
+        ("buf generate", "buf generate"), ("unzip x.zip -d out", "unzip x.zip"),
+        ("tar -xzf a.tgz", "tar -xzf"), ("tar xf a.tar", "tar xf"),
+        ("tar --extract -f a.tar", "tar --extract"),
+    ]
+
+    def test_never_capture_commands_yield_nothing_and_one_note(self):
+        for cmd, label in self.NEVER:
+            with self.subTest(cmd=cmd):
+                full = hook.scan_full(cmd, "/w")
+                self.assertEqual([], full["candidates"])
+                self.assertEqual([("skip-implicit", label)], full["notes"])
+
+    def test_one_note_per_command(self):
+        full = hook.scan_full("git pull && make gen && git merge x", "/w")
+        self.assertEqual([("skip-implicit", "git pull")], full["notes"])
+
+    def test_mixed_command_still_captures_its_explicit_target(self):
+        full = hook.scan_full("cd sub && git pull && sed -i 's/a/b/' f.go", "/w")
+        self.assertEqual([("f.go", "/w/sub")], full["candidates"])
+        self.assertEqual([("skip-implicit", "git pull")], full["notes"])
+
+    def test_explicit_pathspec_forms_still_capture(self):
+        self.assertEqual(["pkg/a.go"], paths("git checkout -- pkg/a.go"))
+        self.assertEqual(["pkg/a.go"], paths("git checkout origin/main -- pkg/a.go"))
+        self.assertEqual(["pkg/a.go"], paths("git restore pkg/a.go"))
+        self.assertEqual(["fix.patch"], paths("git apply fix.patch"))
+        self.assertEqual([], hook.scan_full("git apply fix.patch", "/w")["notes"])
+
+    def test_tar_create_is_not_an_extract(self):
+        self.assertEqual([], hook.scan_full("tar -czf a.tgz src", "/w")["notes"])
+
+
 class ShellCaptureEndToEndTest(unittest.TestCase):
     """A real `Bash` payload on stdin, isolated HOME, registered workspace."""
 
@@ -1293,6 +1340,14 @@ class ShellCaptureEndToEndTest(unittest.TestCase):
         self.assertEqual(1, len(lines), lines)
         self.assertIn("$D/a\\nb", lines[0])
         self.assertLess(len(lines[0]), 600)
+
+    def test_never_capture_command_logs_skip_implicit_once(self):
+        self.seed("f.go", "x\n")
+        self.run_bash("git pull && git merge origin/main")
+        lines = [l for l in self.log().splitlines() if "skip-implicit" in l]
+        self.assertEqual(1, len(lines), lines)
+        self.assertTrue(lines[0].endswith("skip-implicit git pull"), lines[0])
+        self.assertNotIn("captured", self.log())
 
     def test_empty_bash_payload_fails_open(self):
         payload = json.dumps({
