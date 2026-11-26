@@ -1,5 +1,5 @@
 {
-  "_comment": "Run against BOTH src/excludeMatcher.ts (excludeSync.test.ts) and hooks/hook.py (test_exclude.py). If the two matchers disagree, a file is hidden but still captured, or captured but never shown.",
+  "_comment": "Run against BOTH src/excludeMatcher.ts (excludeSync.test.ts) and hooks/hook.py (test_exclude.py) and its copy in hooks/audit.py (test_audit.py). If the two matchers disagree, a file is hidden but still captured, or captured but never shown.",
   "root": "/ws/proj",
   "cases": [
     { "globs": [".superpowers/sdd"], "path": "/ws/proj/.superpowers/sdd/2026-09-03-x/task-1-report.md", "excluded": true },

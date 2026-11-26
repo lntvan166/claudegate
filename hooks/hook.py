@@ -2741,11 +2741,10 @@ def _commit_one(session_file: str, items: list, session_id, captured_at: str) ->
                     "capturedAt": captured_at,
                 }
                 changed.append(path)
-                covered.append(path)
             else:
-                covered.append(path)
                 # An existing pending entry keeps its frozen baseline (no-op).
                 log_event("skip-already-pending", path)
+            covered.append(path)
         if changed:
             if session.get("status") == "reviewed":
                 session["status"] = "active"
@@ -2760,6 +2759,7 @@ def _commit_one(session_file: str, items: list, session_id, captured_at: str) ->
 AUDIT_INFLIGHT_DIR = os.path.join(CLAUDEGATE_DIR, "audit", "inflight")
 AUDIT_STALE_MS = 3600000
 AUDIT_MAX_REMOVALS = 50
+AUDIT_MAX_EXAMINED = 200   # entries the stale sweep looks at per run
 
 
 def _audit_inflight(hook_input: dict, started_ms: int, cwd: str, session_id,
@@ -2770,17 +2770,18 @@ def _audit_inflight(hook_input: dict, started_ms: int, cwd: str, session_id,
     try:
         try:
             now = time.time()
-            removed = 0
-            for name in os.listdir(AUDIT_INFLIGHT_DIR):
-                if removed >= AUDIT_MAX_REMOVALS:
-                    break
-                fp = os.path.join(AUDIT_INFLIGHT_DIR, name)
-                try:
-                    if (now - os.stat(fp).st_mtime) * 1000 > AUDIT_STALE_MS:
-                        os.remove(fp)
-                        removed += 1
-                except OSError:
-                    pass
+            removed = examined = 0
+            with os.scandir(AUDIT_INFLIGHT_DIR) as it:
+                for entry in it:
+                    if removed >= AUDIT_MAX_REMOVALS or examined >= AUDIT_MAX_EXAMINED:
+                        break
+                    examined += 1
+                    try:
+                        if (now - entry.stat(follow_symlinks=False).st_mtime) * 1000 > AUDIT_STALE_MS:
+                            os.remove(entry.path)
+                            removed += 1
+                    except OSError:
+                        pass
         except OSError:
             pass
         tool_use_id = hook_input.get("tool_use_id")
@@ -2791,7 +2792,8 @@ def _audit_inflight(hook_input: dict, started_ms: int, cwd: str, session_id,
         os.makedirs(AUDIT_INFLIGHT_DIR, exist_ok=True)
         record = {"startedAt": started_ms, "cwd": cwd,
                   "sessionId": session_id if isinstance(session_id, str) else None,
-                  "captured": captured, "implicit": implicit, "background": background}
+                  "captured": list(dict.fromkeys(captured)),
+                  "implicit": implicit, "background": background}
         final = os.path.join(AUDIT_INFLIGHT_DIR, tool_use_id + ".json")
         tmp = "%s.%d.tmp" % (final, os.getpid())
         try:

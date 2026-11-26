@@ -102,6 +102,51 @@ class AuditInflightTest(unittest.TestCase):
         left = [n for n in os.listdir(self.inflight) if n.startswith("o")]
         self.assertEqual(len(left), 10)
 
+    def _files_under_audit(self):
+        top = os.path.join(self.cg, "audit")
+        out = []
+        for d, _, files in os.walk(top):
+            out.extend(os.path.join(d, f) for f in files)
+        return out
+
+    def test_traversal_id_writes_nothing(self):
+        r = self.run_hook(self.bash("sed -i s/a/b/ f.go", tool_use_id="../evil"))
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        self.assertEqual(self._files_under_audit(), [])
+        self.assertFalse(os.path.exists(os.path.join(self.cg, "audit", "evil.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.cg, "evil.json")))
+
+    def test_overlong_id_writes_nothing(self):
+        r = self.run_hook(self.bash("sed -i s/a/b/ f.go", tool_use_id="a" * 129))
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        self.assertEqual(self._files_under_audit(), [])
+
+    def test_captured_deduplicated(self):
+        self.run_hook(self.bash("sed -i s/a/b/ f.go && sed -i s/b/c/ f.go", tool_use_id="t1"))
+        self.assertEqual(self.record("t1")["captured"], [os.path.join(self.root, "f.go")])
+
+    def test_sweep_examines_at_most_200(self):
+        # In process, with the removal cap lifted, so the examined cap is the
+        # one that stops the sweep: of 260 stale records exactly 200 go.
+        sys.path.insert(0, os.path.dirname(HOOK))
+        try:
+            import hook
+        finally:
+            sys.path.pop(0)
+        os.makedirs(self.inflight)
+        t = time.time() - 7200
+        for i in range(260):
+            p = os.path.join(self.inflight, "o%d.json" % i)
+            open(p, "w").write("{}")
+            os.utime(p, (t, t))
+        saved = hook.AUDIT_INFLIGHT_DIR, hook.AUDIT_MAX_REMOVALS
+        hook.AUDIT_INFLIGHT_DIR, hook.AUDIT_MAX_REMOVALS = self.inflight, 10000
+        try:
+            hook._audit_inflight({"tool_name": "Bash"}, 0, self.root, "s", [], False, False)
+        finally:
+            hook.AUDIT_INFLIGHT_DIR, hook.AUDIT_MAX_REMOVALS = saved
+        self.assertEqual(len(os.listdir(self.inflight)), 60)
+
     def test_inflight_failure_is_silent(self):
         os.makedirs(os.path.join(self.cg, "audit"))
         open(os.path.join(self.inflight), "w").write("not a dir")
