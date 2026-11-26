@@ -1131,6 +1131,16 @@ class EnvironmentFallbackTest(unittest.TestCase):
                     self.assertEqual([], self.got("cd $%s && sed -i 's/a/b/' f.go" % var))
                     self.assertEqual([], self.got("echo x > $%s/a.go" % var))
 
+    def test_no_fallback_after_loading_unseen_variables(self):
+        for prefix in ["source .env && ", ". ./.env; ", "set -a; ", "eval \"$(direnv export bash)\"; ",
+                       "export $(cat .env | xargs); ", "printf -v PROJ_V %s x; "]:
+            with self.subTest(prefix=prefix):
+                self.assertEqual([], [p for p in self.got(prefix + "cd $PROJ_V && sed -i 's/a/b/' f.go")
+                                      if p.startswith(self.root)])
+        # Before the load, the fallback still applies.
+        self.assertIn(os.path.join(self.root, "f.go"),
+                      self.got("cd $PROJ_V && sed -i 's/a/b/' f.go; source .env"))
+
     def test_speculative_words_never_use_the_environment(self):
         got = self.got("python3 - <<'PY'\nopen('$PROJ_V/a.json', 'w')\nPY")
         self.assertEqual([], [p for p in got if p.startswith(self.root)])
@@ -1278,6 +1288,10 @@ class DeletionTest(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual([("src/x.go", self.tmp)], self.full(cmd)["candidates"])
         self.assertEqual(["a.go", "b.go"], paths("rm a.go b.go", self.tmp))
+
+    def test_dash_named_file_after_double_dash(self):
+        open(os.path.join(self.tmp, "-x"), "w").close()
+        self.assertEqual([("./-x", self.tmp)], self.full("rm -- -x")["candidates"])
 
     def test_missing_file_is_not_a_new_file(self):
         self.assertEqual([], self.full("rm -f gone.go")["candidates"])
@@ -1430,6 +1444,21 @@ class NamedWriteTest(unittest.TestCase):
         self.assertEqual([], self.names("ln -s d d-link"))
         self.assertEqual([], self.names("ln -s ../%s/d d-link2" % os.path.basename(self.tmp)))
 
+    def test_curl_output_dir(self):
+        self.assertEqual(["dl/a.json"], self.names("curl --output-dir dl -O https://x/a.json"))
+        self.assertEqual(["dl/b.json"], self.names("curl --output-dir=dl -o b.json https://x"))
+        self.assertEqual(["/abs/b.json"], self.names("curl --output-dir dl -o /abs/b.json https://x"))
+
+    def test_copying_a_symlink_does_not_capture_the_destination(self):
+        os.symlink("exists.txt", os.path.join(self.tmp, "flink"))
+        for cmd in ["cp -a flink dest.txt", "cp -P flink dest.txt", "cp -R flink dest.txt", "mv flink dest.txt"]:
+            with self.subTest(cmd=cmd):
+                full = self.full(cmd)
+                self.assertNotIn("dest.txt", [p for p, _ in full["candidates"]])
+                self.assertIn(("skip-link-replace", "dest.txt"), full["notes"])
+        # A plain cp follows the link and writes a regular file: captured.
+        self.assertIn("dest.txt", self.names("cp flink dest.txt"))
+
     def test_named_writes_do_not_switch_on_speculation(self):
         self.assertEqual(["out.json"], self.names("curl -o out.json https://x && echo see notes.md"))
 
@@ -1496,6 +1525,26 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(["Cargo.toml", "Cargo.lock"],
                          self.names("cargo add serde --manifest-path Cargo.toml"))
 
+    def test_walks_up_to_the_nearest_manifest_within_the_root(self):
+        from unittest import mock
+        os.makedirs(os.path.join(self.tmp, "web", "src", "deep"))
+        roots = os.path.join(self.tmp, "roots.json")
+        with open(roots, "w") as f:
+            json.dump([self.tmp], f)
+        with mock.patch.object(hook, "WORKSPACE_ROOTS_FILE", roots):
+            self.assertEqual([os.path.join("web", "package.json")],
+                             self.names("cd web/src/deep && npm install"))
+        # Outside every root nothing is walked: only the directory itself.
+        with mock.patch.object(hook, "WORKSPACE_ROOTS_FILE", os.path.join(self.tmp, "none.json")):
+            self.assertEqual([], self.names("cd web/src/deep && npm install"))
+
+    def test_flag_values_and_workspaces(self):
+        self.assertEqual(["package.json", "package-lock.json"], self.names("npm --loglevel warn install"))
+        self.assertEqual([os.path.join("web", "package.json"), "package-lock.json"],
+                         self.names("npm i -D -w web left-pad"))
+        self.assertEqual([os.path.join("web", "package.json"), "package-lock.json"],
+                         self.names("npm install --workspace=web x"))
+
     def test_manifest_commands_do_not_switch_on_speculation(self):
         self.assertEqual(["go.mod", "go.sum"], self.names("go mod tidy && echo package.json"))
 
@@ -1527,6 +1576,11 @@ class NodeWriteTest(unittest.TestCase):
         # Written as file content, not run: still data.
         self.assertEqual(["a.ts"], paths(
             "cat > a.ts <<'EOF'\nfs.writeFileSync('x.json', s)\nEOF\ngit add a.ts"))
+
+    def test_only_the_script_node_runs_counts(self):
+        self.assertFalse(hook.command_may_write("node scripts/build.js && grep -n \"writeFile(\" src/app.ts"))
+        self.assertEqual([], paths("node -e \"console.log('writeFile(')\" src/app.ts"))
+        self.assertEqual(["o.json"], paths("node -e \"writeFileSync('o.json', x)\""))
 
     def test_reading_is_not_writing(self):
         self.assertEqual([], paths("node -e \"console.log(fs.readFileSync('a.json'))\""))

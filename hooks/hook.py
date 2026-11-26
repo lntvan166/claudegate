@@ -346,9 +346,10 @@ _WRITE_CALL_RE = re.compile(r"\.write(?:_text|_bytes|lines)?\s*\(")
 # The same for JavaScript runtimes: `fs.writeFileSync(p, s)`, `fs.promises.writeFile`,
 # `createWriteStream`, `Bun.write`, `Deno.writeTextFile`. Counted only when the
 # command runs node/tsx/deno/bun (_NODE_RUNTIME_RE), so a `grep writeFile(` or a
-# python body that mentions one is not a write.
+# python body that mentions one is not a write. A call right after a JS quote
+# (`console.log('writeFile(')`) is text, not a call.
 _NODE_WRITE_RE = re.compile(
-    r"\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|"
+    r"(?<![\w'`])(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|"
     r"Bun\.write|Deno\.writeTextFile(?:Sync)?|Deno\.writeFile(?:Sync)?)\s*\(")
 _NODE_RUNTIME_RE = re.compile(r"^(?:node|nodejs|tsx|ts-node|deno|bun)(?:[0-9]+(?:\.[0-9]+)*)?$")
 
@@ -904,7 +905,9 @@ def _deletion(words: list):
             if _RM_RECURSIVE_RE.match(a) or a == "--recursive":
                 recursive = True
             continue
-        operands.append(a)
+        # `rm -- -x` removes a file named `-x`; `./-x` is the same file in a
+        # form the path checks accept.
+        operands.append("./" + a if a.startswith("-") else a)
     return recursive, operands
 
 
@@ -984,13 +987,20 @@ def _curl_targets(args: list):
     outs: list = []
     urls: list = []
     remote = header_name = False
+    out_dir = None
     i = 0
     while i < len(args):
         a = args[i]
         nxt = args[i + 1] if i + 1 < len(args) else None
         if a.startswith("--"):
             name, eq, val = a.partition("=")
-            if name == "--output":
+            if name == "--output-dir":
+                if eq:
+                    out_dir = val
+                elif nxt is not None:
+                    out_dir = nxt
+                    i += 1
+            elif name == "--output":
                 if eq:
                     outs.append(val)
                 elif nxt is not None:
@@ -1042,6 +1052,10 @@ def _curl_targets(args: list):
                     notes.append(("skip-unknown-name", u))
     if not outs and not notes:
         return None
+    if out_dir:
+        # `--output-dir D` places both `-o F` and `-O` names under D.
+        outs = [o if os.path.isabs(o) or o in ("-", "/dev/null") else os.path.join(out_dir, o)
+                for o in outs]
     return outs, notes
 
 
@@ -1153,13 +1167,21 @@ def _manifest_files(words: list):
     if name != "go" and name not in _MANIFEST_COMMANDS:
         return None
     project = None
+    workspace = None
     operands: list = []
     args = words[1:]
     i = 0
     while i < len(args):
         a = args[i]
         flag, eq, val = a.partition("=")
-        if flag in _PROJECT_DIR_FLAGS or flag == "--manifest-path":
+        if name == "npm" and flag in ("-w", "--workspace"):
+            value = val if eq else (args[i + 1] if i + 1 < len(args) else None)
+            if not eq:
+                i += 1
+            workspace = value
+        elif flag in _PKG_VALUE_FLAGS and not eq:
+            i += 1                          # `npm --loglevel warn install`
+        elif flag in _PROJECT_DIR_FLAGS or flag == "--manifest-path":
             value = val if eq else (args[i + 1] if i + 1 < len(args) else None)
             if not eq:
                 i += 1
@@ -1176,8 +1198,96 @@ def _manifest_files(words: list):
         return None
     subs, files = _MANIFEST_COMMANDS[name]
     if (operands[:1] and operands[0] in subs) or (name == "yarn" and not operands):
+        if workspace:
+            # `npm -w X install y`: X's manifest and the root lockfile.
+            return project, (os.path.join(workspace, "package.json"),) + files[1:]
         return project, files
     return None
+
+
+# Options of package tools that take a value, so the value is not read as the
+# subcommand: `npm --loglevel warn install`, `pnpm --filter web add x`.
+_PKG_VALUE_FLAGS = frozenset({"--loglevel", "--registry", "--cache", "--userconfig",
+                              "--filter", "-F", "--config", "--modules-folder",
+                              "--python", "-p", "--package", "--color"})
+
+
+def _project_root(start: str, anchor: str) -> str:
+    """The nearest directory at or above `start` holding `anchor` (`go.mod`,
+    `package.json`, …), never above the registered root that contains
+    `start`. `start` itself when none does — the files are then checked
+    there, and absent ones are left alone."""
+    root = workspace_root_for_file(start, start)
+    d = start
+    while True:
+        if os.path.isfile(os.path.join(d, anchor)):
+            return d
+        if root is None:
+            return start
+        nd = os.path.normcase(d)
+        if nd == root or not nd.startswith(root + os.sep):
+            return start
+        parent = os.path.dirname(d)
+        if parent == d:
+            return start
+        d = parent
+
+
+def _link_copy_dest(words: list, cwd: str | None):
+    """The destination of a `mv`, or of a `cp` that keeps links (`-a`, `-P`,
+    `-d`, `-R`), when a source is a symlink — else None. That destination
+    becomes a link: capturing it would make Reject write the old content
+    through the link into its target."""
+    words = _strip_prefix(words)
+    if not words or _base(words[0]) not in ("cp", "mv"):
+        return None
+    name = _base(words[0])
+    flags = [a for a in words[1:] if a.startswith("-")]
+    operands = [a for a in words[1:] if not a.startswith("-")]
+    if len(operands) < 2:
+        return None
+    if name == "cp" and not any(re.match(r"^-[a-zA-Z]*[aPdR]", f) or f in ("--archive", "--no-dereference")
+                                for f in flags):
+        return None
+    for src in operands[:-1]:
+        path = src if os.path.isabs(src) else (os.path.join(cwd, src) if cwd else None)
+        if path and os.path.islink(path):
+            return operands[-1]
+    return None
+
+
+def _node_script_writes(tokens: list, shell_text: str, text: str, heredocs: list, runs: list) -> bool:
+    """Does a JavaScript runtime here run a write call? Only the script it
+    actually runs counts: the argument of `-e`/`--eval`/`-p`, or a heredoc body
+    fed to it. `node scripts/build.js && grep -n "writeFile(" src/app.ts`
+    does not."""
+    pipelines, where = _pipelines(tokens, shell_text)
+    for pipeline in pipelines:
+        for seg in pipeline:
+            names = [_cmd_word(w) for w, _ in seg]
+            for k, w in enumerate(names):
+                if not _NODE_RUNTIME_RE.match(_base(w)):
+                    continue
+                rest = names[k + 1:]
+                for j, a in enumerate(rest[:-1]):
+                    if a in ("-e", "--eval", "-p", "--print", "eval") and _NODE_WRITE_RE.search(rest[j + 1]):
+                        return True
+                    if a.startswith("--eval=") and _NODE_WRITE_RE.search(a):
+                        return True
+                break
+    if not heredocs:
+        return False
+    offsets = [pos for _k, _v, pos in tokens]
+    for (op, start, end), r in zip(heredocs, runs):
+        if not r or not _NODE_WRITE_RE.search(text[start:end]):
+            continue
+        i = bisect.bisect_right(offsets, op) - 1
+        if i < 0:
+            continue
+        p, s0 = where[i]
+        if any(_NODE_RUNTIME_RE.match(_base(_cmd_word(w))) for seg in pipelines[p][s0:] for w, _ in seg):
+            return True
+    return False
 
 
 def _touches_git_dir(path: str) -> bool:
@@ -1766,7 +1876,8 @@ def _expand_vars(value: str, env, guard=None) -> str | None:
         nonlocal missing, used_env
         name = m.group(1) or m.group(2)
         got = env.get(name)
-        if got is None and guard is not None and not _assigned_before(env, name):
+        if got is None and guard is not None and not getattr(env, "no_env", False) \
+                and not _assigned_before(env, name):
             got = _env_fallback(name)
             used_env = used_env or got is not None
         if got is None:
@@ -1844,11 +1955,15 @@ class _EnvAt:
     per-variable history. A dict snapshot per segment was quadratic: 20,000
     `A<n>=x;` assignments in one command copied a growing dict 20,000 times."""
 
-    __slots__ = ("hist", "i")
+    __slots__ = ("hist", "i", "no_env")
 
-    def __init__(self, hist: dict, i: int):
+    def __init__(self, hist: dict, i: int, no_env: bool = False):
         self.hist = hist
         self.i = i
+        # True once the command has loaded variables we cannot see (`source
+        # .env`, `eval "$(direnv export bash)"`): the hook's own environment no
+        # longer says what they hold.
+        self.no_env = no_env
 
     def get(self, name: str, default=None):
         h = self.hist.get(name)
@@ -1856,6 +1971,22 @@ class _EnvAt:
             return default
         k = bisect.bisect_left(h[0], self.i) - 1
         return h[1][k] if k >= 0 else default
+
+
+def _loads_unseen_env(words: list) -> bool:
+    """Does this segment load variables from somewhere we cannot read?
+    `source .env`, `. ./.env`, `eval "$(…)"`, `set -a`, `export $(cat .env)`,
+    `direnv …`."""
+    if not words:
+        return False
+    head = _cmd_word(words[0])
+    if head in ("source", ".", "eval"):
+        return True
+    if head == "set" and any(re.match(r"^-[a-zA-Z]*a", w) for w in words[1:]):
+        return True
+    if head == "export" and any("$(" in w or "`" in w for w in words[1:]):
+        return True
+    return any(_base(_cmd_word(w)) == "direnv" for w in words)
 
 
 # Builtins whose operands are assignments that persist (`export F=a.go`).
@@ -1885,6 +2016,15 @@ def _segment_assignments(words: list) -> list:
         return [(w, None) for w in words[1:] if not w.startswith("-") and w.isidentifier()]
     if head == "for" and len(words) > 1 and words[1].isidentifier():
         return [(words[1], None)]
+    if head in ("printf", "mapfile", "readarray", "getopts"):
+        # `printf -v NAME …`, `mapfile NAME`, `getopts spec NAME` assign NAME.
+        if head == "printf":
+            names = [words[k + 1] for k in range(len(words) - 1) if words[k] == "-v"]
+        elif head == "getopts":
+            names = words[2:3]
+        else:
+            names = [w for w in words[1:] if not w.startswith("-")][-1:]
+        return [(n, None) for n in names if n.isidentifier()]
     if "read" in words[:2] and head in ("read", "while", "until"):
         k = words.index("read")
         return [(w, None) for w in words[k + 1:] if not w.startswith("-") and w.isidentifier()]
@@ -1908,14 +2048,16 @@ def _segment_cwds(segments: list, cwd: str | None, heredocs: list):
     hd_starts = [a for a, _ in heredocs]
     hist: dict = {}          # name -> ([segment index], [value or None])
     eff = cwd
+    tainted = False
     for j, (words, start) in enumerate(segments):
         starts.append(start)
         cwds.append(eff)
-        envs.append(_EnvAt(hist, j))
+        envs.append(_EnvAt(hist, j, tainted))
         i = bisect.bisect_right(hd_starts, start) - 1
         if i >= 0 and start < heredocs[i][1]:
             continue                      # heredoc body — prose, not a command
-        here = _EnvAt(hist, j + 1)        # sees this segment's own earlier assignments
+        tainted = tainted or _loads_unseen_env(words)
+        here = _EnvAt(hist, j + 1, tainted)  # sees this segment's own earlier assignments
         for name, value in _segment_assignments(words):
             expanded = _expand_vars(value, here) if value is not None else None
             h = hist.setdefault(name, ([], []))
@@ -2249,6 +2391,9 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
             if not seg_cwd:
                 continue
             project = os.path.join(seg_cwd, project or "")
+        # `cd src/sub && npm install` still rewrites the package's manifest.
+        anchor = os.path.basename(files[0])
+        project = _project_root(os.path.normpath(project), anchor)
         for f in files:
             path = os.path.normpath(os.path.join(project, f))
             if os.path.isfile(path):
@@ -2262,7 +2407,12 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
         if targets is None:
             continue
         may_write = True
+        dest = _link_copy_dest(segment, seg_cwd)
         for t in targets:
+            if dest is not None and t == dest:
+                _note(extra, "skip-link-replace", t)
+                seen.add((_normalize_token(t), seg_cwd))   # nor by the speculative pass
+                continue
             add(t, False, seg_cwd, seg_env)
 
     # Tier 2a′ — a script handed to a local shell: `nohup sh -c 'run > out.log'`,
@@ -2320,9 +2470,7 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
     # a body that is data: a test file written by `cat` that calls `.write(`.
     if _OPEN_WRITE_RE.search(code_text) or _WRITE_CALL_RE.search(code_text):
         may_write = True
-    elif _NODE_WRITE_RE.search(code_text) and any(
-            kind == "word" and _NODE_RUNTIME_RE.match(_base(_cmd_word(value)))
-            for kind, value, _pos in tokens):
+    elif _NODE_WRITE_RE.search(code_text) and _node_script_writes(tokens, shell_text, text, found, runs):
         may_write = True
 
     # Tier 2c — every path-shaped literal in the command. This is what catches
