@@ -124,6 +124,12 @@ class HookLogTest(unittest.TestCase):
         self.assertTrue(lines[0].endswith("skip-implicit git pull"), lines[0])
         self.assertEqual([], os.listdir(os.path.join(self.cg, "sessions")))
 
+    def test_skip_glob_logged_per_operand(self):
+        self.enable_log()
+        self.run_bash("rm -f *.log build/*.o")
+        self.assertEqual(2, len(self.log_lines("skip-glob")))
+        self.assertEqual([], os.listdir(os.path.join(self.cg, "sessions")))
+
 
 if __name__ == "__main__":
     unittest.main()

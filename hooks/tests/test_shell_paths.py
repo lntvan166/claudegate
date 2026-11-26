@@ -1179,6 +1179,104 @@ class ImplicitOperationTest(unittest.TestCase):
         self.assertEqual([], hook.scan_full("tar -czf a.tgz src", "/w")["notes"])
 
 
+class DeletionTest(unittest.TestCase):
+    """`rm` / `git rm` operands are targets: the file is snapshotted before it
+    goes, and Reject writes it back."""
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        for rel in ("a.go", "b.go", "src/x.go", "d/one.txt", "d/sub/two.txt", ".git/config"):
+            path = os.path.join(self.tmp, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(rel)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def full(self, cmd):
+        return hook.scan_full(cmd, self.tmp)
+
+    def test_rm_and_git_rm_operands_are_targets(self):
+        for cmd in ["rm src/x.go", "rm -f src/x.go", "rm -- src/x.go",
+                    "git rm src/x.go", "git rm -q src/x.go", "rm src/x.go # gone"]:
+            with self.subTest(cmd=cmd):
+                self.assertEqual([("src/x.go", self.tmp)], self.full(cmd)["candidates"])
+        self.assertEqual(["a.go", "b.go"], paths("rm a.go b.go", self.tmp))
+
+    def test_missing_file_is_not_a_new_file(self):
+        self.assertEqual([], self.full("rm -f gone.go")["candidates"])
+
+    def test_git_rm_cached_removes_nothing(self):
+        self.assertEqual([], self.full("git rm --cached src/x.go")["candidates"])
+
+    def test_globs_are_logged_not_expanded(self):
+        full = self.full("rm *.go src/?.go")
+        self.assertEqual([], full["candidates"])
+        self.assertEqual([("skip-glob", "*.go"), ("skip-glob", "src/?.go")], full["notes"])
+
+    def test_git_dir_is_never_touched(self):
+        self.assertEqual([], self.full("rm -rf .git/config")["candidates"])
+        self.assertEqual([], self.full("rm -rf .git")["dirs"])
+        files, overflow = hook._walk_files(self.tmp)
+        self.assertFalse(overflow)
+        self.assertFalse([f for f in files if "/.git/" in f])
+
+    def test_recursive_rm_hands_the_directory_to_the_walk(self):
+        full = self.full("rm -rf d")
+        self.assertEqual([os.path.join(self.tmp, "d")], full["dirs"])
+        self.assertEqual([], full["candidates"])
+        files, overflow = hook._walk_files(os.path.join(self.tmp, "d"))
+        self.assertFalse(overflow)
+        self.assertEqual([os.path.join(self.tmp, "d/one.txt"),
+                          os.path.join(self.tmp, "d/sub/two.txt")], files)
+        # Without -r, rm cannot remove a directory: nothing to capture.
+        self.assertEqual([], self.full("rm d")["dirs"])
+
+    def test_walk_never_follows_a_symlink(self):
+        outside = os.path.join(self.tmp, "outside")
+        os.makedirs(outside)
+        with open(os.path.join(outside, "secret.txt"), "w") as f:
+            f.write("x")
+        os.symlink(outside, os.path.join(self.tmp, "d", "link"))
+        os.symlink(os.path.join(outside, "secret.txt"), os.path.join(self.tmp, "d", "file-link"))
+        files, _ = hook._walk_files(os.path.join(self.tmp, "d"))
+        self.assertFalse([f for f in files if "link" in f or "secret" in f], files)
+        # A symlink operand: rm removes the link, not a file we could restore.
+        self.assertEqual([], self.full("rm d/file-link")["candidates"])
+        self.assertEqual([], self.full("rm -rf d/link")["dirs"])
+
+    def test_walk_stops_at_the_cap(self):
+        big = os.path.join(self.tmp, "big")
+        os.makedirs(big)
+        for i in range(hook.RM_WALK_CAP + 1):
+            open(os.path.join(big, "f%d.txt" % i), "w").close()
+        _files, overflow = hook._walk_files(big)
+        self.assertTrue(overflow)
+        os.remove(os.path.join(big, "f0.txt"))
+        files, overflow = hook._walk_files(big)
+        self.assertFalse(overflow)
+        self.assertEqual(hook.RM_WALK_CAP, len(files))
+
+    def test_walk_of_a_large_tree_stays_off_the_hot_path(self):
+        import time
+        big = os.path.join(self.tmp, "huge")
+        for i in range(40):
+            sub = os.path.join(big, "p%d" % i)
+            os.makedirs(sub)
+            for j in range(100):
+                open(os.path.join(sub, "f%d.go" % j), "w").close()
+        start = time.perf_counter()
+        _files, overflow = hook._walk_files(big)
+        elapsed = time.perf_counter() - start
+        self.assertTrue(overflow)
+        self.assertLess(elapsed, 0.05, "walk did not stop at the cap: %.3fs" % elapsed)
+
+    def test_deletion_alone_does_not_switch_on_speculation(self):
+        # `docs/notes.md` exists but is only mentioned: rm names a.go alone.
+        self.assertEqual(["a.go"], paths("rm a.go && echo see docs/notes.md b.go", self.tmp))
+
+
 class ShellCaptureEndToEndTest(unittest.TestCase):
     """A real `Bash` payload on stdin, isolated HOME, registered workspace."""
 
@@ -1340,6 +1438,31 @@ class ShellCaptureEndToEndTest(unittest.TestCase):
         self.assertEqual(1, len(lines), lines)
         self.assertIn("$D/a\\nb", lines[0])
         self.assertLess(len(lines[0]), 600)
+
+    def test_rm_captures_the_file_before_it_goes(self):
+        target = self.seed("old.go", "package old\n")
+        self.run_bash("rm old.go")
+        entry = self.session()["files"][target]
+        self.assertEqual("package old\n", entry["originalContent"])
+        self.assertFalse(entry["newFile"])
+
+    def test_recursive_rm_captures_each_file_and_honours_excludes(self):
+        a = self.seed("gen/a.go", "a\n")
+        b = self.seed("gen/sub/b.go", "b\n")
+        with open(os.path.join(self.cg, "excludes.json"), "w") as f:
+            json.dump({self.root: ["gen/sub"]}, f)
+        self.run_bash("rm -rf gen")
+        files = self.session()["files"]
+        self.assertIn(a, files)
+        self.assertNotIn(b, files)
+
+    def test_recursive_rm_past_the_cap_captures_nothing(self):
+        for i in range(hook.RM_WALK_CAP + 1):
+            self.seed("many/f%d.txt" % i, "x")
+        self.run_bash("rm -rf many")
+        self.assertIn("skip-too-many %s >%d" % (os.path.join(self.root, "many"), hook.RM_WALK_CAP),
+                      self.log())
+        self.assertFalse(os.path.exists(self.session_file))
 
     def test_never_capture_command_logs_skip_implicit_once(self):
         self.seed("f.go", "x\n")

@@ -779,6 +779,93 @@ def _implicit_op(words: list):
     return None
 
 
+_RM_RECURSIVE_RE = re.compile(r"^-[a-zA-Z]*[rR]")
+# Characters the shell would expand. There is no glob expansion here, so an
+# operand carrying one names no file we can snapshot: it is logged instead.
+_GLOB_CHARS = frozenset("*?[{")
+# Files one recursive delete may capture. Past it the directory is logged as
+# `skip-too-many` and nothing in it is captured: a review panel of 400 deleted
+# build outputs helps nobody, and the walk must stay off the hot path.
+RM_WALK_CAP = 50
+# Directory entries a walk may look at before giving up, whatever it finds.
+_WALK_ENTRY_CAP = 2000
+
+
+def _deletion(words: list):
+    """`(recursive, operands)` for `rm` / `git rm`, else None. `git rm
+    --cached` only unstages — nothing leaves the disk — so it is None too."""
+    words = _strip_prefix(words)
+    if not words:
+        return None
+    name = os.path.basename(words[0])
+    args = words[1:]
+    if name == "git":
+        idx = 0
+        while idx < len(args) and args[idx].startswith("-"):
+            idx += 2 if args[idx] in ("-C", "-c") else 1
+        if idx >= len(args) or args[idx] != "rm":
+            return None
+        args = args[idx + 1:]
+        if "--cached" in args:
+            return None
+    elif name != "rm":
+        return None
+    recursive = False
+    operands: list = []
+    options_done = False
+    for a in args:
+        if not options_done and a == "--":
+            options_done = True
+            continue
+        if a.startswith("#"):
+            break                         # a shell comment: `rm a.go # old`
+        if not options_done and a.startswith("-") and a != "-":
+            if _RM_RECURSIVE_RE.match(a) or a == "--recursive":
+                recursive = True
+            continue
+        operands.append(a)
+    return recursive, operands
+
+
+def _walk_files(top: str):
+    """`(files, overflow)` — the regular files under `top`, never following a
+    symlink and never entering `.git`. `overflow` is True, and the walk stops
+    at once, when there are more than RM_WALK_CAP files or the walk has looked
+    at _WALK_ENTRY_CAP entries."""
+    files: list = []
+    stack = [top]
+    looked = 0
+    while stack:
+        d = stack.pop()
+        try:
+            it = os.scandir(d)
+        except OSError:
+            continue
+        with it:
+            for e in it:
+                looked += 1
+                if looked > _WALK_ENTRY_CAP:
+                    return files, True
+                if e.name == ".git":
+                    continue
+                try:
+                    if e.is_symlink():
+                        continue
+                    if e.is_dir(follow_symlinks=False):
+                        stack.append(e.path)
+                    elif e.is_file(follow_symlinks=False):
+                        files.append(e.path)
+                        if len(files) > RM_WALK_CAP:
+                            return files, True
+                except OSError:
+                    continue
+    return sorted(files), False
+
+
+def _touches_git_dir(path: str) -> bool:
+    return ".git" in path.replace("\\", "/").split("/")
+
+
 # `sd [OPTIONS] FIND REPLACE [FILES...]` edits FILES in place — unlike sed it
 # needs no flag to do so — and with no FILES it filters stdin. `-p`/`--preview`
 # prints the result instead of writing. Without this entry an `sd` edit counted
@@ -1634,6 +1721,16 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
         i = at(offset)
         return seg_cwds[i] if i >= 0 else cwd
 
+    def explicit(tok: str, env) -> str | None:
+        """An explicit target with its variables expanded, or None (recorded
+        as unresolved) when they cannot be."""
+        if "$" not in tok:
+            return tok
+        expanded = _expand_vars(tok, env if env is not None else {}, _target_guard)
+        if expanded is None and tok not in unresolved and len(unresolved) < MAX_CANDIDATES:
+            unresolved.append(tok)
+        return expanded
+
     def add(tok: str, require_shape: bool, tok_cwd: str | None, env=None) -> None:
         if len(ordered) >= MAX_CANDIDATES:
             return                        # full: nothing more can be kept
@@ -1688,6 +1785,45 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
         if label:
             _note(extra, "skip-implicit", label, once=True)
             break
+
+    # Writes that name their files but must not switch on the speculative
+    # pass (Tier 2c) for the rest of the command: `rm a.go` is not a reason to
+    # guess at every word beside it.
+    quiet_write = False
+
+    # Deletions — `rm`, `git rm`. Snapshotting the file before it goes leaves
+    # a pending entry whose disk state is "missing"; Reject writes it back.
+    for (segment, _start), seg_cwd, seg_env in zip(segments, seg_cwds, seg_envs):
+        deletion = _deletion(segment)
+        if deletion is None:
+            continue
+        recursive, operands = deletion
+        quiet_write = True
+        for op in operands:
+            if any(c in op for c in _GLOB_CHARS):
+                _note(extra, "skip-glob", op)
+                continue
+            tok = explicit(op, seg_env)
+            if tok is None or _touches_git_dir(tok):
+                continue
+            if not os.path.isabs(tok) and not seg_cwd:
+                add(tok, False, seg_cwd)          # main() logs skip-unknown-cwd
+                continue
+            path = os.path.normpath(tok if os.path.isabs(tok) else os.path.join(seg_cwd, tok))
+            try:
+                if os.path.islink(path):
+                    continue                      # rm removes the link, not a file we can restore
+                if os.path.isdir(path):
+                    if recursive and path not in extra["dirs"] and len(extra["dirs"]) < MAX_CANDIDATES:
+                        extra["dirs"].append(path)
+                    continue
+                # Nothing there: deleting it changes nothing, and capturing it
+                # would record a "new file" that never existed.
+                if not os.path.isfile(path):
+                    continue
+            except (OSError, ValueError):
+                continue
+            add(tok, False, seg_cwd)
 
     # Tier 1/2b — known in-place writer tools and their arguments.
     for (segment, start), seg_cwd, seg_env in zip(segments, seg_cwds, seg_envs):
@@ -1764,7 +1900,7 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
         for literal, pos in _quoted_literals(code_text):
             add(literal, True, cwd_at(pos))
 
-    return may_write, ordered, unresolved, extra
+    return may_write or quiet_write, ordered, unresolved, extra
 
 
 def _new_extra() -> dict:
@@ -1945,6 +2081,22 @@ def main() -> None:
         except Exception:
             # One bad candidate must not cost us the rest of the command.
             log_event("error")
+    # `rm -r DIR`: each regular file in it, up to RM_WALK_CAP. Past the cap,
+    # nothing from that directory — one log line instead.
+    for directory in full["dirs"]:
+        try:
+            files, overflow = _walk_files(directory)
+        except Exception:
+            log_event("error")
+            continue
+        if overflow:
+            log_event("skip-too-many", "%s >%d" % (directory, RM_WALK_CAP))
+            continue
+        for f in files:
+            try:
+                capture_file(f, cwd, session_id, captured_at)
+            except Exception:
+                log_event("error")
 
 
 if __name__ == "__main__":
