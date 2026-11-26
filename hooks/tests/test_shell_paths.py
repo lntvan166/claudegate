@@ -1277,6 +1277,69 @@ class DeletionTest(unittest.TestCase):
         self.assertEqual(["a.go"], paths("rm a.go && echo see docs/notes.md b.go", self.tmp))
 
 
+class NamedWriteTest(unittest.TestCase):
+    """Commands that name the file they write as an argument."""
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        os.makedirs(os.path.join(self.tmp, "d"))
+        open(os.path.join(self.tmp, "exists.txt"), "w").close()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def full(self, cmd):
+        return hook.scan_full(cmd, self.tmp)
+
+    def names(self, cmd):
+        return [p for p, _ in self.full(cmd)["candidates"]]
+
+    def test_curl_output_forms(self):
+        for cmd in ["curl -o data.json https://x/y", "curl -sSLo data.json https://x/y",
+                    "curl --output data.json https://x/y", "curl --output=data.json https://x/y",
+                    "curl -H 'A: b' -o data.json https://x/y"]:
+            with self.subTest(cmd=cmd):
+                self.assertEqual(["data.json"], self.names(cmd))
+
+    def test_curl_remote_name_uses_the_url_basename(self):
+        self.assertEqual(["file.tgz"], self.names("curl -LO https://h/p/file.tgz?v=1"))
+        self.assertEqual(["a.zip"], self.names("curl --remote-name https://h/a.zip"))
+        full = self.full("curl -OJ https://h/dl")
+        self.assertEqual([], full["candidates"])
+        self.assertEqual([("skip-unknown-name", "curl -J")], full["notes"])
+        self.assertEqual([("skip-unknown-name", "https://h/")], self.full("curl -O https://h/")["notes"])
+
+    def test_wget_output_forms(self):
+        for cmd in ["wget -O page.html https://x", "wget -qO page.html https://x",
+                    "wget --output-document=page.html https://x",
+                    "wget --output-document page.html https://x"]:
+            with self.subTest(cmd=cmd):
+                self.assertEqual(["page.html"], self.names(cmd))
+
+    def test_stdout_and_devices_are_not_targets(self):
+        for cmd in ["curl https://x", "curl -o - https://x", "curl -o /dev/null https://x",
+                    "wget -qO- https://x", "wget -O /dev/null https://x"]:
+            with self.subTest(cmd=cmd):
+                self.assertEqual([], self.names(cmd))
+
+    def test_git_mv_captures_both_sides(self):
+        self.assertEqual(["a.go", "b.go"], self.names("git mv a.go b.go"))
+        self.assertEqual([], self.names("git mv -n a.go b.go"))
+
+    def test_ln_captures_only_a_new_link(self):
+        self.assertEqual(["link.go"], self.names("ln -s ../t.go link.go"))
+        self.assertEqual(["link.go"], self.names("ln ../t.go link.go"))
+        self.assertEqual(["y.sh"], self.names("ln -s ../x/y.sh"))
+        # Replacing an existing path: Reject would write through the new link.
+        full = self.full("ln -sf ../t.go exists.txt")
+        self.assertEqual([], full["candidates"])
+        self.assertEqual([("skip-link-replace", "exists.txt")], full["notes"])
+        self.assertEqual([], self.names("ln -s ../t.go d"))
+
+    def test_named_writes_do_not_switch_on_speculation(self):
+        self.assertEqual(["out.json"], self.names("curl -o out.json https://x && echo see notes.md"))
+
+
 class ShellCaptureEndToEndTest(unittest.TestCase):
     """A real `Bash` payload on stdin, isolated HOME, registered workspace."""
 

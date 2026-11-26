@@ -862,6 +862,164 @@ def _walk_files(top: str):
     return sorted(files), False
 
 
+# curl/wget options that take a value, so the value is not read as a URL.
+_CURL_VALUE_SHORT = frozenset("dHXuAeFTbcwxmrKECQUzYDpPt")
+_CURL_VALUE_LONG = frozenset("""
+    --data --data-raw --data-binary --data-urlencode --data-ascii --json --header
+    --request --user --user-agent --referer --form --form-string --upload-file
+    --cookie --cookie-jar --write-out --proxy --max-time --range --config --cert
+    --key --cacert --capath --connect-timeout --retry --retry-delay --dump-header
+    --resolve --connect-to --interface --limit-rate --max-filesize --oauth2-bearer
+    --output-dir --stderr --trace --trace-ascii --variable --expect100-timeout
+    """.split())
+_WGET_VALUE_SHORT = frozenset("oPeTtwQDlUARiBIXa")
+
+
+def _url_basename(url: str) -> str:
+    """The file name `curl -O` derives from a URL: its path's last segment."""
+    rest = url.split("://", 1)[1] if "://" in url else url
+    path = rest.split("/", 1)[1] if "/" in rest else ""
+    path = re.split(r"[?#]", path, 1)[0]
+    return path.rsplit("/", 1)[-1]
+
+
+def _curl_targets(args: list):
+    """`(targets, notes)` for curl: `-o F`, `--output[=] F`, and for `-O` /
+    `--remote-name` the URL's basename. None when curl writes to stdout."""
+    outs: list = []
+    urls: list = []
+    remote = header_name = False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        nxt = args[i + 1] if i + 1 < len(args) else None
+        if a.startswith("--"):
+            name, eq, val = a.partition("=")
+            if name == "--output":
+                if eq:
+                    outs.append(val)
+                elif nxt is not None:
+                    outs.append(nxt)
+                    i += 1
+            elif name in ("--remote-name", "--remote-name-all"):
+                remote = True
+            elif name == "--remote-header-name":
+                header_name = True
+            elif name == "--url":
+                if eq:
+                    urls.append(val)
+                elif nxt is not None:
+                    urls.append(nxt)
+                    i += 1
+            elif name in _CURL_VALUE_LONG and not eq:
+                i += 1
+        elif a.startswith("-") and len(a) > 1:
+            for j in range(1, len(a)):
+                c = a[j]
+                if c == "o":
+                    if a[j + 1:]:
+                        outs.append(a[j + 1:])
+                    elif nxt is not None:
+                        outs.append(nxt)
+                        i += 1
+                    break
+                if c == "O":
+                    remote = True
+                elif c == "J":
+                    header_name = True
+                elif c in _CURL_VALUE_SHORT:
+                    if not a[j + 1:]:
+                        i += 1
+                    break
+        else:
+            urls.append(a)
+        i += 1
+    notes: list = []
+    if remote:
+        if header_name:
+            notes.append(("skip-unknown-name", "curl -J"))
+        else:
+            for u in urls:
+                name = _url_basename(u)
+                if name:
+                    outs.append(name)
+                else:
+                    notes.append(("skip-unknown-name", u))
+    if not outs and not notes:
+        return None
+    return outs, notes
+
+
+def _wget_targets(args: list):
+    """`-O F`, `--output-document[=] F`. None without one: plain `wget URL`
+    names its file only at run time."""
+    outs: list = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        nxt = args[i + 1] if i + 1 < len(args) else None
+        if a.startswith("--"):
+            name, eq, val = a.partition("=")
+            if name == "--output-document":
+                if eq:
+                    outs.append(val)
+                elif nxt is not None:
+                    outs.append(nxt)
+                    i += 1
+        elif a.startswith("-") and len(a) > 1:
+            for j in range(1, len(a)):
+                c = a[j]
+                if c == "O":
+                    if a[j + 1:]:
+                        outs.append(a[j + 1:])
+                    elif nxt is not None:
+                        outs.append(nxt)
+                        i += 1
+                    break
+                if c in _WGET_VALUE_SHORT:
+                    if not a[j + 1:]:
+                        i += 1
+                    break
+        i += 1
+    return (outs, []) if outs else None
+
+
+def _named_writes(words: list):
+    """`(kind, targets, notes)` for a command that names the files it writes
+    as arguments — `curl -o`, `wget -O`, `git mv A B`, `ln T L` — else None."""
+    words = _strip_prefix(words)
+    if not words:
+        return None
+    name = os.path.basename(words[0])
+    args = words[1:]
+    if name == "curl":
+        got = _curl_targets(args)
+        return ("fetch",) + got if got else None
+    if name == "wget":
+        got = _wget_targets(args)
+        return ("fetch",) + got if got else None
+    if name == "git":
+        idx = 0
+        while idx < len(args) and args[idx].startswith("-"):
+            idx += 2 if args[idx] in ("-C", "-c") else 1
+        if idx >= len(args) or args[idx] != "mv":
+            return None
+        rest = args[idx + 1:]
+        if "-n" in rest or "--dry-run" in rest:
+            return None
+        return ("move", [a for a in rest if not a.startswith("-")], [])
+    if name == "ln":
+        if any(a in ("-t", "--target-directory") or a.startswith("--target-directory=")
+               for a in args):
+            return ("link", [], [("skip-unknown-name", "ln -t")])
+        operands = [a for a in args if not a.startswith("-")]
+        if not operands:
+            return None
+        link = operands[-1] if len(operands) >= 2 else os.path.basename(operands[0])
+        return ("link", [link], [])
+    return None
+
+
 def _touches_git_dir(path: str) -> bool:
     return ".git" in path.replace("\\", "/").split("/")
 
@@ -1823,6 +1981,36 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
                     continue
             except (OSError, ValueError):
                 continue
+            add(tok, False, seg_cwd)
+
+    # Named writes — `curl -o F`, `curl -O URL`, `wget -O F`, `git mv A B`,
+    # `ln T L`. Quiet, like deletions.
+    for (segment, _start), seg_cwd, seg_env in zip(segments, seg_cwds, seg_envs):
+        named = _named_writes(segment)
+        if named is None:
+            continue
+        kind, targets, notes = named
+        quiet_write = True
+        for event, detail in notes:
+            _note(extra, event, detail)
+        for t in targets:
+            tok = explicit(t, seg_env)
+            if tok is None:
+                continue
+            if kind == "link":
+                # Only a link that does not exist yet. Reject restores through
+                # a symlink (atomicWrite follows it), so capturing an existing
+                # L would write L's old content into the link's TARGET; a new
+                # link is rejected by unlinking it, which is safe.
+                base = tok if os.path.isabs(tok) else (os.path.join(seg_cwd, tok) if seg_cwd else None)
+                if base is None:
+                    continue
+                if os.path.isdir(base) and not os.path.islink(base):
+                    _note(extra, "skip-unknown-name", "ln into " + t)   # `ln -s ../x dir`
+                    continue
+                if os.path.lexists(base):
+                    _note(extra, "skip-link-replace", t)
+                    continue
             add(tok, False, seg_cwd)
 
     # Tier 1/2b — known in-place writer tools and their arguments.
