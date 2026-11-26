@@ -18,7 +18,7 @@ import {
 import { WorktreeSessionRegistry } from "./worktreeSessionRegistry";
 import { HookInstaller } from "./hookInstaller";
 import { SettingsTreeProvider, SettingsItem } from "./settingsPanel";
-import { ClaudeGateContentProvider, SCHEME, openDiff, openReviewRecord, openHistoryRecord, originalUri, setPendingScopeProvider } from "./diffProvider";
+import { ClaudeGateContentProvider, SCHEME, openDiff, openReviewRecord, openHistoryRecord, originalUri, pendingCurrentUri, setPendingScopeProvider } from "./diffProvider";
 import { HistoryTreeProvider, HistorySessionItem } from "./historyPanel";
 import { formatBytes } from "./historyModel";
 import { ClaudeGateDecorationProvider } from "./decorationProvider";
@@ -262,7 +262,12 @@ export function activate(context: vscode.ExtensionContext): void {
       if (stale.length > 0) await vscode.window.tabGroups.close(stale);
     };
     const openPendingMultiDiff = async (paths: string[]): Promise<void> => {
-      const resourceList = paths.map((fp) => [vscode.Uri.file(fp), originalUri(fp), vscode.Uri.file(fp)]);
+      // A file deleted since capture gets the empty `deleted` side, not a
+      // `file:` URI that no longer exists.
+      const resourceList = paths.map((fp) => {
+        const original = managerFor(fp).getSession()?.files[fp]?.originalContent ?? null;
+        return [vscode.Uri.file(fp), originalUri(fp), pendingCurrentUri(fp, original)];
+      });
       try {
         // No count in the title: VS Code appends its own "(N files)" to a
         // multi-diff label, so including one produced "Pending (11) (11 files)".

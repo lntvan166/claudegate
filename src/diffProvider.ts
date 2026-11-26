@@ -56,6 +56,8 @@ export class ClaudeGateContentProvider
     // Record URIs carry the real file path (so the editor infers the language
     // for syntax highlighting) plus a `rec` query identifying the record.
     const params = new URLSearchParams(uri.query);
+    // The right side of a deleted file's diff: nothing is left on disk.
+    if (params.get("deleted")) return "";
     const hist = params.get("hist");
     if (hist) {
       const raw = loadArchive(hist);
@@ -108,6 +110,30 @@ export function recordUri(filePath: string, id: string, side: "before" | "after"
 
 export function originalUri(filePath: string): vscode.Uri {
   return vscode.Uri.file(filePath).with({ scheme: SCHEME });
+}
+
+// A pending file the hook captured before a delete (`rm`, `git rm`) has no
+// file left to show. Opening its `file:` URI gives VS Code's "unable to open"
+// pane with a Create File button; this empty virtual side shows the deletion
+// as what it is — every line removed.
+export function deletedUri(filePath: string): vscode.Uri {
+  return vscode.Uri.file(filePath).with({ scheme: SCHEME, query: "deleted=1" });
+}
+
+/** The right side for a pending file: the file itself, or `deletedUri` when
+ *  it had a baseline and is gone from disk. */
+export function pendingCurrentUri(filePath: string, originalContent: string | null): vscode.Uri {
+  return isDeletedPending(filePath, originalContent) ? deletedUri(filePath) : vscode.Uri.file(filePath);
+}
+
+export function isDeletedPending(filePath: string, originalContent: string | null): boolean {
+  if (originalContent === null) return false;   // a new file not written yet is not a deletion
+  try {
+    fs.lstatSync(filePath);
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 // ─── History archives (view-only) ───────────────────────────────────────────
@@ -190,15 +216,18 @@ export async function openDiff(
   const beforeUri = originalUri(filePath);
   const beforeText = entry.originalContent ?? "";
 
-  // Pending: baseline ↔ disk.
-  const currentUri = vscode.Uri.file(filePath);
+  // Pending: baseline ↔ disk — or ↔ nothing, for a file deleted since.
+  const deleted = isDeletedPending(filePath, entry.originalContent);
+  const currentUri = deleted ? deletedUri(filePath) : vscode.Uri.file(filePath);
   let currentText = "";
   let suffix = "";
-  try {
-    currentText = (await vscode.workspace.openTextDocument(filePath)).getText();
-    suffix = ` · ${formatChangeCount(countChanges(beforeText, currentText))}`;
-  } catch {
-    suffix = "";
+  if (!deleted) {
+    try {
+      currentText = (await vscode.workspace.openTextDocument(filePath)).getText();
+      suffix = ` · ${formatChangeCount(countChanges(beforeText, currentText))}`;
+    } catch {
+      suffix = "";
+    }
   }
 
   const ordered = pendingScopes
@@ -207,13 +236,16 @@ export async function openDiff(
   const prog = pendingProgress(ordered, filePath);
   const progSuffix = prog ? `  ·  ${prog.index} of ${prog.total} pending` : "";
   const title =
-    (entry.originalContent === null
-      ? `Claude Gate: ${label}  (new file${suffix})`
-      : `Claude Gate: ${label}  (original ↔ current${suffix})`) + progSuffix;
+    (deleted
+      ? `Claude Gate: ${label}  (deleted · −${countChanges(beforeText, "").removed} lines)`
+      : entry.originalContent === null
+        ? `Claude Gate: ${label}  (new file${suffix})`
+        : `Claude Gate: ${label}  (original ↔ current${suffix})`) + progSuffix;
 
   await vscode.commands.executeCommand("vscode.diff", beforeUri, currentUri, title);
 
-  if (entry.originalContent !== null) {
+  // Nothing to scroll to on a deleted file: every line is a removal.
+  if (entry.originalContent !== null && !deleted) {
     revealFirstChange(beforeText, currentText);
   }
 }
