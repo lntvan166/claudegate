@@ -191,8 +191,9 @@ would orphan the in-flight record of every failed command.
 How the installer handles these entries:
 
 - **Ownership.** An audit entry counts as ours by **command shape**: `AUDIT_COMMAND_SHAPE`, which is `[\\/]\.claudegate[\\/]audit\.(sh|bat)$`. It never goes by the matcher or by a `claudegate` substring, so a foreign `/x/claudegate/lint.sh` PostToolUse hook is never rewritten.
-- **Malformed shapes.** If `hooks` is not a plain object, or an event we touch is not an array, the input is refused like malformed JSON (`parseError`). It is not thrown and not replaced.
+- **Malformed shapes.** If `hooks` is not a plain object, or an event we touch is not an array, the patch is refused (`parseError` + `shapeError`, with its own "hooks entry ClaudeGate doesn't understand" message). It is neither thrown nor replaced. `null` holds no data, so it counts as absent and is replaced.
 - **Missing wrapper.** Settings get the audit entries only once `audit.sh`/`audit.bat` exists, because an entry pointing at a missing wrapper would fail on every Bash call. A missing wrapper counts as out of date, so the hook sync writes it. The silent activation repair (`syncSettingsIfNeeded`) then adds the entries to an existing install.
+- **No Python.** If a hook sync finds no Python, it still writes the audit wrapper with the default `python3` command and latches for the rest of the activation. The error pop-up shows at most once, and **Setup Hook** clears the latch.
 - **Wrapper generation.** The wrappers are generated like `hook.sh`. They exit 0 when `audit.py` is absent, because `python` on a missing file exits 2, and a PostToolUse hook that exits 2 sends its stderr to Claude after every Bash call.
 - **Trust watcher.** `watchSettingsForTrustInvalidation` judges the **capture** registration only. Removing or editing an audit entry is benign and raises no warning.
 

@@ -71,7 +71,7 @@ export function computeSettingsPatch(
   raw: string,
   hookCommand: string,
   auditCommand?: string
-): { content: string; changed: boolean; parseError?: boolean } {
+): { content: string; changed: boolean; parseError?: boolean; shapeError?: boolean } {
   const trimmed = raw.trim();
   let settings: Record<string, unknown>;
   if (!trimmed) {
@@ -90,16 +90,17 @@ export function computeSettingsPatch(
 
   // A shape we cannot patch without discarding the user's data — `hooks` that
   // is not a plain object, or an event we would touch that is not an array —
-  // is refused exactly like malformed JSON, never thrown and never replaced.
+  // is refused (parseError + shapeError), never thrown and never replaced.
+  // `null` holds no data and is treated as absent, i.e. replaced.
   const isPlainObject = (v: unknown) => typeof v === "object" && v !== null && !Array.isArray(v);
-  if (settings.hooks !== undefined && !isPlainObject(settings.hooks)) {
-    return { content: raw, changed: false, parseError: true };
+  if (settings.hooks != null && !isPlainObject(settings.hooks)) {
+    return { content: raw, changed: false, parseError: true, shapeError: true };
   }
   const touched = auditCommand !== undefined ? ["PreToolUse", ...AUDIT_EVENTS] : ["PreToolUse"];
-  if (settings.hooks !== undefined) {
+  if (settings.hooks != null) {
     const existing = settings.hooks as Record<string, unknown>;
-    if (touched.some((e) => existing[e] !== undefined && !Array.isArray(existing[e]))) {
-      return { content: raw, changed: false, parseError: true };
+    if (touched.some((e) => existing[e] != null && !Array.isArray(existing[e]))) {
+      return { content: raw, changed: false, parseError: true, shapeError: true };
     }
   }
 
@@ -422,6 +423,10 @@ export class HookInstaller {
   // extension activation and stays latched off afterwards, so a failure can
   // never be retried on every window focus. setup() bypasses this latch.
   private settingsAutoWriteLatched = false;
+  // Set when a hook sync found no Python. The sync then does nothing more for
+  // the rest of the activation, so its error pop-up shows at most once rather
+  // than on every window focus. setup() (an explicit action) clears it.
+  private pythonMissingLatched = false;
   private readonly _onHealthChange = new vscode.EventEmitter<HookHealth>();
   readonly onHealthChange = this._onHealthChange.event;
 
@@ -460,6 +465,7 @@ export class HookInstaller {
 
       this.trustInvalidated = false;
       this.trustWarningShown = false;
+      this.pythonMissingLatched = false;
       this.fireHealth();
 
       this.log.appendLine(
@@ -479,7 +485,8 @@ export class HookInstaller {
     }
   }
 
-  private ensurePythonAvailable(): void {
+  // Protected so tests can simulate a machine without Python.
+  protected ensurePythonAvailable(): void {
     // On Windows try 'python' first (typical install), then 'python3'.
     // On macOS/Linux only 'python3' is checked to preserve existing behaviour.
     const candidates = this.isWindows ? ["python", "python3"] : ["python3"];
@@ -534,6 +541,7 @@ export class HookInstaller {
   }
 
   async syncHookIfNeeded(): Promise<HookSyncAction> {
+    if (this.pythonMissingLatched) return "none";
     const source = this.bundledHookSourcePath();
     if (!fs.existsSync(source)) {
       this.log.appendLine("[ERROR] Bundled hook.py not found; cannot sync.");
@@ -567,6 +575,15 @@ export class HookInstaller {
       this.installHookWrapper();
     } catch (err) {
       this.installHookPy();
+      // Write the audit wrapper with the default python command, as hook.sh was
+      // written before; its `audit.py exists` guard keeps it harmless. Without
+      // it a missing wrapper stays stale and this path re-runs on every focus.
+      try {
+        this.installAuditWrapper();
+      } catch (wrapErr) {
+        this.log.appendLine(`[WARN] Hook sync: audit wrapper: ${(wrapErr as Error).message}`);
+      }
+      this.pythonMissingLatched = true;
       this.log.appendLine(`[WARN] Hook sync: ${(err as Error).message}`);
       void vscode.window.showErrorMessage(
         "Claude Gate: Hook script updated but wrapper needs Python. Run 'Setup Hook'."
@@ -717,17 +734,24 @@ export class HookInstaller {
       // absolute path to hook.py so the script works regardless of cwd.
       const bat = `@echo off\n"${this.pythonCmd}" "${this.hookPyDest}"\n`;
       fs.writeFileSync(this.hookBatDest, bat, "utf-8");
-      // The audit wrapper exits 0 when audit.py is absent: `python` on a
-      // missing file exits 2, and a PostToolUse hook exiting 2 feeds its stderr
-      // to Claude after every Bash call.
+    } else {
+      const sh = `#!/usr/bin/env bash\n${this.pythonCmd} "$HOME/.claudegate/hook.py"\n`;
+      fs.writeFileSync(this.hookShDest, sh, "utf-8");
+      fs.chmodSync(this.hookShDest, 0o755);
+    }
+    this.installAuditWrapper();
+  }
+
+  // The audit wrapper exits 0 when audit.py is absent: `python` on a missing
+  // file exits 2, and a PostToolUse hook exiting 2 feeds its stderr to Claude
+  // after every Bash call.
+  private installAuditWrapper(): void {
+    if (this.isWindows) {
       const auditBat =
         `@echo off\nif not exist "${this.auditPyDest}" exit /b 0\n` +
         `"${this.pythonCmd}" "${this.auditPyDest}"\n`;
       fs.writeFileSync(this.auditBatDest, auditBat, "utf-8");
     } else {
-      const sh = `#!/usr/bin/env bash\n${this.pythonCmd} "$HOME/.claudegate/hook.py"\n`;
-      fs.writeFileSync(this.hookShDest, sh, "utf-8");
-      fs.chmodSync(this.hookShDest, 0o755);
       const auditSh =
         `#!/usr/bin/env bash\n[ -f "$HOME/.claudegate/audit.py" ] || exit 0\n` +
         `${this.pythonCmd} "$HOME/.claudegate/audit.py"\n`;
@@ -791,7 +815,18 @@ export class HookInstaller {
     // Register the audit hook only once its wrapper exists: an entry pointing
     // at a missing audit.sh would fail on every Bash call.
     const auditCommand = fs.existsSync(this.auditWrapperDest) ? this.auditWrapperDest : undefined;
-    const { content, changed, parseError } = computeSettingsPatch(raw ?? "", this.hookWrapperDest, auditCommand);
+    const { content, changed, parseError, shapeError } = computeSettingsPatch(raw ?? "", this.hookWrapperDest, auditCommand);
+    if (shapeError) {
+      this.log.appendLine(
+        `[ERROR] ${this.claudeSettingsPath} has a hooks entry that is not the expected shape ` +
+          "(hooks must be an object, each event an array); refusing to overwrite it (your config is untouched)."
+      );
+      vscode.window.showErrorMessage(
+        "Claude Gate: settings.json has a hooks entry ClaudeGate doesn't understand, so the hook was NOT installed — " +
+          "your configuration was left untouched. Fix the hooks block, then run Setup Hook again."
+      );
+      return false;
+    }
     if (parseError) {
       this.log.appendLine(
         `[ERROR] ${this.claudeSettingsPath} is not valid JSON; refusing to overwrite it (your config is untouched).`

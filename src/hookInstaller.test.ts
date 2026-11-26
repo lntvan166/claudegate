@@ -2,6 +2,7 @@ import * as assert from "assert";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import * as vscode from "vscode";
 import {
   computeSettingsPatch,
   shouldWarnTrustInvalidation,
@@ -341,23 +342,34 @@ const AUDIT_ENTRY = { matcher: POST_TOOL_MATCHER, hooks: [{ type: "command", com
 // G. Malformed hook shapes are refused (parseError, original bytes), never
 //    thrown and never replaced — for `hooks` itself and every event we touch.
 {
-  for (const bad of [[], "x", 1, null]) {
+  const REFUSED = (raw: string) => ({ content: raw, changed: false, parseError: true, shapeError: true });
+  for (const bad of [[], "x", 1, false]) {
     const raw = JSON.stringify({ model: "m", hooks: bad });
     const r = computeSettingsPatch(raw, CMD, AUDIT);
-    assert.deepEqual(r, { content: raw, changed: false, parseError: true }, `hooks=${JSON.stringify(bad)} refused`);
+    assert.deepEqual(r, REFUSED(raw), `hooks=${JSON.stringify(bad)} refused`);
   }
   for (const event of ["PreToolUse", ...AUDIT_EVENTS]) {
     for (const bad of [{ matcher: "x" }, "x", 1]) {
       const raw = JSON.stringify({ hooks: { [event]: bad, PreToolUse: event === "PreToolUse" ? bad : [ENTRY] } }, null, 2);
       const r = computeSettingsPatch(raw, CMD, AUDIT);
-      assert.deepEqual(r, { content: raw, changed: false, parseError: true }, `${event}=${JSON.stringify(bad)} refused`);
+      assert.deepEqual(r, REFUSED(raw), `${event}=${JSON.stringify(bad)} refused`);
       assert.equal(isRegistrationCorrect(raw.replace('"x"', '"claudegate"'), CMD, AUDIT), false, "no throw, not correct");
       const good = computeSettingsPatch("", CMD, AUDIT).content;
       assert.doesNotThrow(() => classifySettingsChange(good, raw, CMD));
       assert.doesNotThrow(() => classifySettingsChange(raw, good, CMD));
     }
   }
-  console.log("ok - malformed hooks / event shapes are refused, not thrown");
+  // null holds no data: it is treated as absent and replaced, for `hooks` and
+  // for each touched event.
+  const nullHooks = computeSettingsPatch(JSON.stringify({ model: "m", hooks: null }), CMD, AUDIT);
+  assert.equal(nullHooks.parseError, undefined, "hooks: null is not refused");
+  assert.deepEqual(JSON.parse(nullHooks.content).hooks, JSON.parse(computeSettingsPatch("", CMD, AUDIT).content).hooks);
+  for (const event of ["PreToolUse", ...AUDIT_EVENTS]) {
+    const r = computeSettingsPatch(JSON.stringify({ hooks: { [event]: null } }), CMD, AUDIT);
+    assert.equal(r.parseError, undefined, `${event}: null is not refused`);
+    assert.ok(Array.isArray(JSON.parse(r.content).hooks[event]), `${event}: null replaced with our entry`);
+  }
+  console.log("ok - malformed hooks / event shapes are refused, not thrown; null is replaced");
 }
 
 // H. Audit events identify ours by command shape, not by a "claudegate"
@@ -1102,8 +1114,57 @@ function testAuditVerifyFailureRollsBack(): void {
   console.log("ok - removing an audit entry raises no capture warning");
 }
 
+// No Python: the sync writes the audit wrapper with the default command, shows
+// its error once, and latches — the next focus-driven sync is a silent no-op.
+class NoPythonInstaller extends HookInstaller {
+  protected ensurePythonAvailable(): void {
+    throw new Error("Python 3 is required but not found.");
+  }
+}
+
+async function testNoPythonSyncLatches(): Promise<void> {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cg-nopy-"));
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  const extPath = fs.mkdtempSync(path.join(os.tmpdir(), "cg-ext-"));
+  fs.mkdirSync(path.join(extPath, "hooks"), { recursive: true });
+  fs.writeFileSync(path.join(extPath, "hooks", "hook.py"), "print('hook')\n");
+  fs.writeFileSync(path.join(extPath, "hooks", "audit.py"), "print('audit')\n");
+  const context = {
+    extensionPath: extPath,
+    globalState: { get: () => undefined, update: async () => undefined },
+    extension: { packageJSON: { version: "9.9.9" } },
+  } as never;
+
+  const errors: unknown[] = [];
+  // The test stub's window is a plain mutable object; the real typings are not.
+  const win = vscode.window as unknown as { showErrorMessage: (...args: unknown[]) => unknown };
+  const original = win.showErrorMessage;
+  win.showErrorMessage = (...args: unknown[]) => { errors.push(args[0]); return undefined; };
+  try {
+    const installer = new NoPythonInstaller(context, NO_LOG);
+    assert.equal(await installer.syncHookIfNeeded(), "installed", "hook.py still installed without Python");
+    assert.equal(errors.length, 1, "the Python error shows once");
+    const auditWrapper = path.join(home, ".claudegate", process.platform === "win32" ? "audit.bat" : "audit.sh");
+    assert.ok(fs.existsSync(auditWrapper), "audit wrapper written with the default python command");
+    if (process.platform !== "win32") {
+      assert.ok(fs.readFileSync(auditWrapper, "utf-8").includes("python3 "), "default command is python3");
+    }
+
+    assert.equal(await installer.syncHookIfNeeded(), "none", "second sync is a no-op");
+    assert.equal(errors.length, 1, "no second error pop-up");
+  } finally {
+    win.showErrorMessage = original;
+  }
+
+  fs.rmSync(home, { recursive: true, force: true });
+  fs.rmSync(extPath, { recursive: true, force: true });
+  console.log("ok - a sync without Python writes the audit wrapper and errors once per activation");
+}
+
 void (async () => {
   await testHookSyncHeals();
+  await testNoPythonSyncLatches();
   await testMissingAuditWrapperHeals();
   testAuditVerifyFailureRollsBack();
   await testHookSyncInstallsAudit();
