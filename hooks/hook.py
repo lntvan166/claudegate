@@ -1224,23 +1224,91 @@ _VAR_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9
 _ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
 
 
-def _expand_vars(value: str, env: dict) -> str | None:
+# Names the hook never takes from its own environment, even under the guard:
+# shell-managed or volatile values (`PWD` is the HOOK's directory, not the
+# session's), and `HOME` (see CLAUDE.md, "Hook behavior").
+_ENV_NEVER = frozenset({"PWD", "OLDPWD", "HOME", "TMPDIR", "SHLVL", "_"})
+
+
+def _env_fallback(name: str) -> str | None:
+    """An exported variable's value, if it may stand in for an unknown one.
+
+    `cd $PROJ_PATH && cat > features/x/commits.yaml` — `PROJ_PATH` is exported
+    from the user's shell rc, so the hook process sees the same value Claude's
+    shell does. Only an absolute value counts; the caller still checks where
+    the expanded path lands (see _expand_vars)."""
+    if name in _ENV_NEVER or name.startswith("CLAUDE"):
+        return None
+    value = os.environ.get(name)
+    if not value or not os.path.isabs(value):
+        return None
+    return value
+
+
+def _registered_roots() -> list:
+    """The workspace roots the extension registered, or [] on any trouble.
+    Read on demand: only an environment fallback asks."""
+    try:
+        with open(WORKSPACE_ROOTS_FILE, encoding="utf-8") as f:
+            roots = json.load(f)
+        return [os.path.normcase(os.path.abspath(r)) for r in roots if isinstance(r, str)]
+    except Exception:
+        return []
+
+
+def _inside_a_root(path: str) -> bool:
+    p = os.path.normcase(os.path.abspath(path))
+    return any(p == r or p.startswith(r + os.sep) for r in _registered_roots())
+
+
+def _cd_guard(path: str) -> bool:
+    """A `cd` through an environment value must land in a real directory."""
+    return os.path.isabs(path) and os.path.isdir(path)
+
+
+def _target_guard(path: str) -> bool:
+    """A write target through an environment value must have a real parent
+    directory or lie inside a registered workspace root."""
+    if not os.path.isabs(path):
+        return False
+    return os.path.isdir(os.path.dirname(path)) or _inside_a_root(path)
+
+
+def _assigned_before(env, name: str) -> bool:
+    """Was `name` assigned, unset, read or looped over earlier in the command?"""
+    if isinstance(env, _EnvAt):
+        h = env.hist.get(name)
+        return bool(h) and bisect.bisect_left(h[0], env.i) > 0
+    return name in env
+
+
+def _expand_vars(value: str, env, guard=None) -> str | None:
     """Substitute the literal assignments we have seen, or None if we cannot.
 
     `W=/tmp/wt-sandbox` followed by `cd "$W"` is how these commands are written
     in practice; without this the cd is unknowable and every relative target
-    after it is dropped. Only literals seen earlier in the same command are
-    substituted — the real environment is not consulted, so `$HOME` and
-    `$(pwd)` stay unknowable rather than being resolved against a process whose
-    directory is not the session's.
+    after it is dropped.
+
+    With a `guard` (a `cd` destination or an explicit write target), a name
+    the command never assigned may fall back to the hook's own environment —
+    `cd $PROJ_PATH`, where `PROJ_PATH` is exported from the user's shell rc.
+    Only when: nothing earlier in the command assigned or unset it (a local
+    assignment wins, even an unknowable one); it is not shell-managed (`PWD`,
+    `HOME`, … — _ENV_NEVER); its value is absolute; and `guard` accepts the
+    fully expanded path. `$(pwd)` and anything fancier stay unknowable.
     """
     if "$" not in value:
         return value
     missing = False
+    used_env = False
 
     def sub(m):
-        nonlocal missing
-        got = env.get(m.group(1) or m.group(2))
+        nonlocal missing, used_env
+        name = m.group(1) or m.group(2)
+        got = env.get(name)
+        if got is None and guard is not None and not _assigned_before(env, name):
+            got = _env_fallback(name)
+            used_env = used_env or got is not None
         if got is None:
             missing = True
             return ""
@@ -1248,6 +1316,8 @@ def _expand_vars(value: str, env: dict) -> str | None:
 
     out = _VAR_REF_RE.sub(sub, value)
     if missing or "$" in out:
+        return None
+    if used_env and not guard(out):
         return None
     return out
 
@@ -1393,7 +1463,7 @@ def _segment_cwds(segments: list, cwd: str | None, heredocs: list):
             h[1].append(expanded)
         dest = _cd_destination(words)
         if dest is not None:
-            expanded = _expand_vars(dest, here) if dest else dest
+            expanded = _expand_vars(dest, here, _cd_guard) if dest else dest
             eff = _apply_cd(eff, expanded) if expanded is not None else None
     return starts, cwds, envs
 
@@ -1514,7 +1584,7 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
         # record it as unresolved. Never for a speculative word — `$x` in a
         # python body is not a target, and logging it would only be noise.
         if not require_shape and "$" in tok:
-            expanded = _expand_vars(tok, env or {})
+            expanded = _expand_vars(tok, env if env is not None else {}, _target_guard)
             if expanded is None:
                 if tok not in unresolved and len(unresolved) < MAX_CANDIDATES:
                     unresolved.append(tok)

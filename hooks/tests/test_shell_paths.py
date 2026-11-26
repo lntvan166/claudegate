@@ -1055,6 +1055,83 @@ class UnresolvedVariableTest(unittest.TestCase):
         self.assertEqual([], unresolved)
 
 
+class EnvironmentFallbackTest(unittest.TestCase):
+    """A name the command never assigns may come from the hook's environment
+    (`cd $PROJ_PATH`, exported from the shell rc) — guarded."""
+
+    def setUp(self):
+        from unittest import mock
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.root = os.path.join(self.tmp, "root")
+        os.makedirs(os.path.join(self.root, "svc"))
+        roots = os.path.join(self.tmp, "workspace-roots.json")
+        with open(roots, "w") as f:
+            json.dump([self.root], f)
+        self.patches = [
+            mock.patch.object(hook, "WORKSPACE_ROOTS_FILE", roots),
+            mock.patch.dict(os.environ, {"PROJ_V": self.root}),
+        ]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def got(self, cmd):
+        return targets(cmd, "/elsewhere")
+
+    def test_exported_root_variable_resolves_a_cd(self):
+        self.assertEqual([os.path.join(self.root, "f.go")],
+                         self.got("cd $PROJ_V && sed -i 's/a/b/' f.go"))
+
+    def test_braced_and_quoted_forms_resolve(self):
+        self.assertEqual([os.path.join(self.root, "svc/x.go")],
+                         self.got("sed -i 's/a/b/' ${PROJ_V}/svc/x.go"))
+        self.assertEqual([os.path.join(self.root, "svc/y.go")],
+                         self.got('echo x > "$PROJ_V"/svc/y.go'))
+
+    def test_target_inside_a_root_need_not_exist_yet(self):
+        self.assertEqual([os.path.join(self.root, "new/dir/a.yaml")],
+                         self.got("cat > $PROJ_V/new/dir/a.yaml <<EOF\nx\nEOF"))
+
+    def test_assignment_in_the_command_wins(self):
+        other = os.path.join(self.tmp, "other")
+        os.makedirs(other)
+        self.assertEqual([os.path.join(other, "f.go")],
+                         self.got("PROJ_V=%s; cd $PROJ_V && sed -i 's/a/b/' f.go" % other))
+        # Even an unknowable one: it stays unknown, never the environment.
+        self.assertEqual([], self.got("PROJ_V=$(pwd); cd $PROJ_V && sed -i 's/a/b/' f.go"))
+
+    def test_unset_before_use_stays_unknown(self):
+        self.assertEqual([], self.got("unset PROJ_V; cd $PROJ_V && sed -i 's/a/b/' f.go"))
+
+    def test_relative_value_stays_unknown(self):
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"PROJ_V": "root"}):
+            self.assertEqual([], self.got("cd $PROJ_V && sed -i 's/a/b/' f.go"))
+
+    def test_missing_path_outside_every_root_stays_unknown(self):
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"PROJ_V": os.path.join(self.tmp, "gone")}):
+            self.assertEqual([], self.got("cd $PROJ_V && sed -i 's/a/b/' f.go"))
+            self.assertEqual([], self.got("echo x > $PROJ_V/sub/a.go"))
+
+    def test_shell_managed_names_stay_unknown(self):
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"HOME": self.root, "PWD": self.root,
+                                          "CLAUDE_X": self.root}):
+            for var in ("HOME", "PWD", "CLAUDE_X"):
+                with self.subTest(var=var):
+                    self.assertEqual([], self.got("cd $%s && sed -i 's/a/b/' f.go" % var))
+                    self.assertEqual([], self.got("echo x > $%s/a.go" % var))
+
+    def test_speculative_words_never_use_the_environment(self):
+        got = self.got("python3 - <<'PY'\nopen('$PROJ_V/a.json', 'w')\nPY")
+        self.assertEqual([], [p for p in got if p.startswith(self.root)])
+
+
 class ShellCaptureEndToEndTest(unittest.TestCase):
     """A real `Bash` payload on stdin, isolated HOME, registered workspace."""
 
