@@ -45,31 +45,37 @@ class ReportTest(unittest.TestCase):
             line(now, captured=3, missedCount=1, missed=["x"] * 200, commandHead="git pull origin", phantomCount=1),
             "{not json",
             line(now, background=True, captured=99, missedCount=99),
-            line(now, truncated=True, captured=50, missedCount=50),
+            line(now, truncated=True, captured=50, missedCount=50, phantomCount=9, tooLarge=3, commandHead="make all"),
             line(now, uncertainCount=2, covered=4, implicit=5, outOfScope=6),
         ])
         self.write("a.jsonl.1", [line(now - timedelta(days=1), captured=1, missedCount=1)])
-        s = audit_report.summarise(audit_report._fix_uncertain(audit_report.read_lines()))
+        s = audit_report.summarise(audit_report.read_lines())
         tot = {k: sum(r[k] for r in s["days"].values()) for k in audit_report.FIELDS}
         self.assertEqual(tot["calls"], 4)          # background and corrupt excluded
         self.assertEqual(tot["truncated"], 1)
-        self.assertEqual(tot["captured"], 4)       # truncated line adds nothing
-        self.assertEqual(tot["missed"], 2)         # the *Count, not the 200-entry list
-        self.assertEqual(tot["phantom"], 1)
+        self.assertEqual(tot["captured"], 54)      # truncated line counts
+        self.assertEqual(tot["missed"], 52)        # the *Count, not the list
+        self.assertEqual(tot["phantom"], 1)        # truncated phantoms skipped
+        self.assertEqual(tot["tooLarge"], 3)
+        self.assertEqual(s["heads"]["make all"], 50)
         self.assertEqual((tot["uncertain"], tot["covered"], tot["implicit"], tot["outOfScope"]), (2, 4, 5, 6))
         self.assertEqual(s["skippedBackground"], 1)
         self.assertEqual(s["heads"]["git pull"], 1)
         out = audit_report.render(s)
-        self.assertIn("recall    = captured / (captured + missed)  : 66.7%", out)
-        self.assertIn("precision = captured / (captured + phantom) : 80.0%", out)
+        self.assertIn("recall    = captured / (captured + missed)  : 50.9%  (missed is a lower bound)", out)
+        self.assertIn("precision = captured / (captured + phantom) : 98.2%  (phantoms from 1 truncated calls excluded)", out)
         self.assertIn("mtime scan cannot see deletions, or moves/copies that keep mtime", out)
 
     def test_days_filter_and_empty(self):
         now = datetime.now(timezone.utc)
         self.write("a.jsonl", [line(now - timedelta(days=10), captured=1)])
-        s = audit_report.summarise(audit_report._fix_uncertain(audit_report.read_lines(days=3)))
+        s = audit_report.summarise(audit_report.read_lines(days=3))
         self.assertEqual(s["days"], {})
         self.assertIn("n/a", audit_report.render(s))
+
+    def test_days_must_be_positive(self):
+        with self.assertRaises(SystemExit):
+            audit_report.main(["--days", "0"])
 
     def test_root_filter(self):
         now = datetime.now(timezone.utc)

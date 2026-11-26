@@ -7,8 +7,11 @@ recall    = captured / (captured + missed)
 precision = captured / (captured + phantom)
 
 Uses the *Count fields (the lists are capped at 200). Background calls are
-skipped; truncated calls (the scan ran out of budget) are counted apart and
-left out of the sums. Corrupt lines are skipped. Reads .jsonl and .jsonl.1.
+skipped. Truncated calls (the scan ran out of budget) still count in every
+total and in the command ranking, except phantoms: an unseen change is not a
+reliable phantom. With truncated calls present, missed is a lower bound.
+Days are bucketed in local time; --days is a rolling cutoff (now minus N
+days), not N calendar days. Corrupt lines are skipped. Reads .jsonl and .jsonl.1.
 
 Blind spots: an mtime scan cannot see deletions, or moves/copies that keep
 mtime. A call rejected before it runs, or cancelled mid-run, leaves an
@@ -27,7 +30,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 FIELDS = ("calls", "captured", "missed", "uncertain", "phantom", "covered",
-          "implicit", "outOfScope", "truncated")
+          "implicit", "outOfScope", "tooLarge", "truncated")
 BLIND_SPOT = "mtime scan cannot see deletions, or moves/copies that keep mtime"
 
 
@@ -91,16 +94,17 @@ def summarise(lines) -> dict:
         if line.get("background") is True:
             skipped_bg += 1
             continue
-        row = days.setdefault(at.astimezone(timezone.utc).date().isoformat(),
+        row = days.setdefault(at.astimezone().date().isoformat(),
                               dict.fromkeys(FIELDS, 0))
         row["calls"] += 1
-        if line.get("truncated") is True:
+        trunc = line.get("truncated") is True
+        if trunc:
             row["truncated"] += 1
-            continue
-        for k in ("captured", "uncertain", "covered", "implicit", "outOfScope"):
-            row[k] += _int(line.get(k))
+        for k in ("captured", "uncertain", "covered", "implicit", "outOfScope", "tooLarge"):
+            row[k] += _int(line.get(k + "Count" if k == "uncertain" else k))
         row["missed"] += _int(line.get("missedCount"))
-        row["phantom"] += _int(line.get("phantomCount"))
+        if not trunc:
+            row["phantom"] += _int(line.get("phantomCount"))
         if _int(line.get("missedCount")):
             head = " ".join(str(line.get("commandHead") or "").split()[:2]) or "(empty)"
             heads[head] += _int(line.get("missedCount"))
@@ -109,14 +113,6 @@ def summarise(lines) -> dict:
 
 def _ratio(num, den):
     return "n/a" if den == 0 else "%.1f%%" % (100.0 * num / den)
-
-
-def _fix_uncertain(lines):
-    """Map uncertainCount onto `uncertain` so summarise() stays generic."""
-    for at, line in lines:
-        line = dict(line)
-        line["uncertain"] = line.get("uncertainCount")
-        yield at, line
 
 
 def render(summary: dict) -> str:
@@ -129,17 +125,21 @@ def render(summary: dict) -> str:
             total[k] += r[k]
     rows.append(["TOTAL"] + [str(total[k]) for k in FIELDS])
     widths = [max(len(c), *(len(r[i]) for r in rows)) for i, c in enumerate(cols)]
-    out = ["  ".join(c.rjust(widths[i]) if i else c.ljust(widths[i]) for i, c in enumerate(cols))]
+    out = ["days are local time; --days is a rolling cutoff, not calendar days", ""]
+    out += ["  ".join(c.rjust(widths[i]) if i else c.ljust(widths[i]) for i, c in enumerate(cols))]
     for r in rows:
         out.append("  ".join(v.rjust(widths[i]) if i else v.ljust(widths[i]) for i, v in enumerate(r)))
     out.append("")
-    out.append("recall    = captured / (captured + missed)  : %s"
-               % _ratio(total["captured"], total["captured"] + total["missed"]))
-    out.append("precision = captured / (captured + phantom) : %s"
-               % _ratio(total["captured"], total["captured"] + total["phantom"]))
+    t = total["truncated"]
+    out.append("recall    = captured / (captured + missed)  : %s%s"
+               % (_ratio(total["captured"], total["captured"] + total["missed"]),
+                  "  (missed is a lower bound)" if t else ""))
+    out.append("precision = captured / (captured + phantom) : %s%s"
+               % (_ratio(total["captured"], total["captured"] + total["phantom"]),
+                  "  (phantoms from %d truncated calls excluded)" % t if t else ""))
     if summary["skippedBackground"]:
         out.append("background calls skipped: %d" % summary["skippedBackground"])
-    out.append("truncated calls are counted but contribute no files: %d" % total["truncated"])
+    out.append("truncated calls: %d (counted in every total except phantom)" % total["truncated"])
     out.append("")
     out.append("top command prefixes with misses:")
     if summary["heads"]:
@@ -153,12 +153,19 @@ def render(summary: dict) -> str:
     return "\n".join(out)
 
 
+def _days(v):
+    n = int(v)
+    if n < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return n
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--days", type=int, default=None, help="only the last N days")
+    ap.add_argument("--days", type=_days, default=None, help="only the last N days")
     ap.add_argument("--root", default=None, help="only this workspace root")
     args = ap.parse_args(argv)
-    print(render(summarise(_fix_uncertain(read_lines(args.root, args.days)))))
+    print(render(summarise(read_lines(args.root, args.days))))
     return 0
 
 

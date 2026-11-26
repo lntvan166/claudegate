@@ -199,7 +199,7 @@ How the installer handles these entries:
 
 **Measuring capture: `hooks/tools/audit_report.py`.** `audit.py` appends one JSON line per Bash call per innermost root to `~/.claudegate/audit/<md5(root)>.jsonl` (rotated to `.1` at 5 MB). Run `python3 hooks/tools/audit_report.py [--days N] [--root PATH]` for a per-day table, a total, and the top 20 two-word command prefixes with misses. It is a dev tool: `.vscodeignore` excludes `hooks/tools/**`, while `hooks/audit.py` ships.
 - `recall = captured / (captured + missed)`, `precision = captured / (captured + phantom)`. It sums the `*Count` fields, not the lists (capped at 200 entries).
-- `background` lines are skipped; `truncated` lines (the scan ran out of budget) are counted on their own and add no files; a corrupt line is skipped; `.jsonl` and `.jsonl.1` are both read.
+- `background` lines are skipped; `truncated` lines (the scan ran out of budget) still count in every total and in the command ranking, except `phantom` (an unseen change is no reliable phantom), and the report then flags recall as a lower bound and precision as excluding their phantoms; days are bucketed in local time and `--days N` (at least 1) is a rolling cutoff, not N calendar days; a corrupt line is skipped; `.jsonl` and `.jsonl.1` are both read.
 - **Blind spots:** an mtime scan cannot see deletions, or moves/copies that keep mtime. A call rejected before it runs, or cancelled mid-run, leaves an in-flight record and no audit line, so it never appears in the report.
 - The no-Python fallback for the audit wrapper is `defaultPythonCommand()`: `python` on Windows, `python3` elsewhere.
 
