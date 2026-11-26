@@ -18,6 +18,7 @@ import {
   AUDIT_EVENTS,
   AUDIT_COMMAND_SHAPE,
   HookInstaller,
+  defaultPythonCommand,
 } from "./hookInstaller";
 
 const CMD = "/home/me/.claudegate/hook.sh";
@@ -1121,6 +1122,11 @@ class NoPythonInstaller extends HookInstaller {
     throw new Error("Python 3 is required but not found.");
   }
 }
+
+assert.equal(defaultPythonCommand("win32"), "python");
+assert.equal(defaultPythonCommand("linux"), "python3");
+assert.equal(defaultPythonCommand("darwin"), "python3");
+console.log("ok - the no-Python wrapper fallback is python on Windows, python3 elsewhere");
 
 async function testNoPythonSyncLatches(): Promise<void> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cg-nopy-"));

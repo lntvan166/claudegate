@@ -410,9 +410,15 @@ export function buildVerifyReport(checks: VerifyCheck[]): { ok: boolean; lines: 
 const HOOK_SYNC_NOTIFIED_KEY = "claudegate.hookSyncNotifiedForHash";
 const HOOK_SETTINGS_WARNED_KEY = "claudegate.hookSettingsWarned";
 
+/** The interpreter a wrapper falls back to when no probe has found one:
+ *  `python` on Windows (python3 there is usually the Store stub), else `python3`. */
+export function defaultPythonCommand(platform: string = process.platform): string {
+  return platform === "win32" ? "python" : "python3";
+}
+
 export class HookInstaller {
   private readonly isWindows = process.platform === "win32";
-  private pythonCmd = "python3";
+  private pythonCmd = defaultPythonCommand();
 
   // Health-signal state: last settings.json content the extension has seen
   // (baseline + our own writes), and whether we've already warned this session.

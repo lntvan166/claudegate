@@ -53,6 +53,7 @@ tsconfig*.json
 
 # Hook tests (dev-only, not shipped to marketplace users)
 hooks/tests/**
+hooks/tools/**
 **/__pycache__/**
 
 # Manual test aids (dev-only, not shipped to marketplace users)

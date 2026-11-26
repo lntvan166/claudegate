@@ -197,6 +197,12 @@ How the installer handles these entries:
 - **Wrapper generation.** The wrappers are generated like `hook.sh`. They exit 0 when `audit.py` is absent, because `python` on a missing file exits 2, and a PostToolUse hook that exits 2 sends its stderr to Claude after every Bash call.
 - **Trust watcher.** `watchSettingsForTrustInvalidation` judges the **capture** registration only. Removing or editing an audit entry is benign and raises no warning.
 
+**Measuring capture: `hooks/tools/audit_report.py`.** `audit.py` appends one JSON line per Bash call per innermost root to `~/.claudegate/audit/<md5(root)>.jsonl` (rotated to `.1` at 5 MB). Run `python3 hooks/tools/audit_report.py [--days N] [--root PATH]` for a per-day table, a total, and the top 20 two-word command prefixes with misses. It is a dev tool: `.vscodeignore` excludes `hooks/tools/**`, while `hooks/audit.py` ships.
+- `recall = captured / (captured + missed)`, `precision = captured / (captured + phantom)`. It sums the `*Count` fields, not the lists (capped at 200 entries).
+- `background` lines are skipped; `truncated` lines (the scan ran out of budget) are counted on their own and add no files; a corrupt line is skipped; `.jsonl` and `.jsonl.1` are both read.
+- **Blind spots:** an mtime scan cannot see deletions, or moves/copies that keep mtime. A call rejected before it runs, or cancelled mid-run, leaves an in-flight record and no audit line, so it never appears in the report.
+- The no-Python fallback for the audit wrapper is `defaultPythonCommand()`: `python` on Windows, `python3` elsewhere.
+
 **Known risk, deliberately unchanged: PreToolUse ownership is a substring rule.** A
 PreToolUse group counts as ours when its JSON contains `claudegate` anywhere. So a
 foreign PreToolUse hook whose command merely contains that word (say
