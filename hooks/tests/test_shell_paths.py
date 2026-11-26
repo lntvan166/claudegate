@@ -930,12 +930,40 @@ class HeredocFeederEdgeTest(unittest.TestCase):
         # tee's stdin is the content it writes, not a list of names.
         self.assertEqual(["out.md"], paths("cat <<'EOF' | tee out.md\nf.go\nEOF"))
 
-    def test_detection_stops_at_the_first_real_command(self):
-        # `python3` here is an argument to cat, not the program run.
-        self.assertEqual(["out.md"],
-                         paths("cat notes python3 > out.md <<'EOF'\n%s\nEOF" % self.B))
-        self.assertEqual(["x.json"], paths("timeout 30s python3 - <<'EOF'\n%s\nEOF" % self.B))
-        self.assertEqual(["x.json"], paths("sudo -u svc python3 - <<'EOF'\n%s\nEOF" % self.B))
+    def test_unknown_runners_in_front_of_an_interpreter_still_harvest(self):
+        # Runners are an open set: an unrecognised word does not end the search.
+        for head in ["conda run -n env python -", "pipx run python -",
+                     "mise exec -- python3 -", "pyenv exec python -",
+                     "op run -- python3 -", "npm exec -- tsx -",
+                     "nix-shell -p python3 --run python3", "devbox run python3 -",
+                     "flock /tmp/l python3 -", "watch -n1 python3 -",
+                     "timeout 30s python3 -", "sudo -u svc python3 -"]:
+            with self.subTest(head=head):
+                self.assertIn("x.json", paths("%s <<'EOF'\n%s\nEOF" % (head, self.B)))
+
+    def test_shell_verdict_needs_the_command_position(self):
+        # Behind an unknown word a shell's body is harvested, not scanned as
+        # shell: its `sed -i f.go` is not an explicit target.
+        self.assertEqual([], paths("flock /tmp/l bash -s <<'EOF'\nsed -i s/a/b/ f.go\nEOF"))
+        self.assertEqual(["f.go"], paths("sudo bash -s <<'EOF'\nsed -i s/a/b/ f.go\nEOF"))
+
+    def test_heredoc_after_a_descriptor_duplication(self):
+        for head in ["python3 - 2>&1", "uv run python - 2>&1",
+                     "python3 - >out.log 2>&1", "(uv run python - > r.txt 2>&1"]:
+            with self.subTest(head=head):
+                tail = "\n)" if head.startswith("(") else ""
+                self.assertIn("x.json",
+                              paths("%s <<'EOF'\n%s\nEOF%s" % (head, self.B, tail)))
+        self.assertEqual(["f.go"], paths("bash -s 2>&1 <<'EOF'\nsed -i s/a/b/ f.go\nEOF"))
+
+    def test_descriptor_duplication_leaves_other_operators_alone(self):
+        self.assertEqual(["log"], paths("make &>log"))
+        self.assertEqual(["out.txt"], paths("cmd 2>/dev/null > out.txt"))
+        self.assertEqual(["out.txt"], paths("cmd 2>&1 > out.txt"))
+        self.assertEqual(["out.txt"], paths("echo x >&2 && echo y > out.txt"))
+        self.assertEqual(["out.txt"], paths("sleep 1 & echo y > out.txt"))
+        self.assertEqual(["f.go"], paths("go build 2>&1 && sed -i s/a/b/ f.go"))
+        self.assertEqual([], paths("echo x 2>&1 file.go"))
 
     def test_shell_with_a_script_operand_is_not_scanned_as_shell(self):
         # The body is deploy.sh's stdin, not shell we can read.

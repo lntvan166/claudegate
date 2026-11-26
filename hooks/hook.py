@@ -424,6 +424,15 @@ def _lex(text: str) -> list:
         if c in _REDIR_CHARS:
             while i < n and text[i] in _REDIR_CHARS:
                 i += 1
+            # `2>&1`, `<&0`, `>&-` duplicate a descriptor. The `&` is not a
+            # separator — splitting on it put a heredoc opened after `2>&1`
+            # into a segment whose only word was `1`, and dropped its body —
+            # and nothing here names a file, so it leaves no token at all.
+            if i + 1 < n and text[i] == "&" and (text[i + 1].isdigit() or text[i + 1] == "-"):
+                i += 2
+                while i < n and text[i].isdigit():
+                    i += 1
+                continue
             tokens.append(("redir", "", start))
             continue
         buf: list = []
@@ -958,13 +967,19 @@ def _segment_runs_code(words: list):
     if not names or not names[0] or any(c in names[0] for c in "$`"):
         return None
     value_next = False
+    # `strict` holds while every word so far is a runner, a flag or a value we
+    # know. A word we do not know (`conda run -n env python -`, `flock /tmp/l
+    # python3 -`, `mise exec -- python3 -`) does not end the search: runners
+    # are an open set, and an interpreter later in the segment still harvests.
+    # It does end the "shell" verdict, whose explicit targets need certainty.
+    strict = True
     for k, w in enumerate(names):
         base = _base(w)
         # A remote runner means the body runs elsewhere: `ssh host 'bash -s'`.
         if base in _REMOTE_RUNNERS:
             return False
         if _INTERPRETER_RE.match(base) or (base == "R" and k == 0):
-            if not _SHELL_INTERPRETER_RE.match(base):
+            if not strict or not _SHELL_INTERPRETER_RE.match(base):
                 return True
             # A shell reads stdin as its script only with no script of its
             # own: `bash -s`, bare `bash`. `bash deploy.sh <<EOF` hands the
@@ -986,7 +1001,7 @@ def _segment_runs_code(words: list):
         if value_next:              # `sudo -u svc`, `nice -n 5`
             value_next = False
             continue
-        return False
+        strict = False
     return False
 
 
