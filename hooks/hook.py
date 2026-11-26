@@ -2636,9 +2636,11 @@ def scan_full(command: str, cwd: str | None = None) -> dict:
     (event, detail) log lines, kept even then (`skip-implicit git pull`)."""
     may_write, candidates, unresolved, extra = _scan_command(command, cwd)
     if not may_write:
-        return {"candidates": [], "unresolved": [], "dirs": [], "notes": extra["notes"]}
+        return {"candidates": [], "unresolved": [], "dirs": [], "notes": extra["notes"],
+                "implicit": bool(extra.get("implicit"))}
     return {"candidates": candidates, "unresolved": unresolved,
-            "dirs": extra["dirs"], "notes": extra["notes"]}
+            "dirs": extra["dirs"], "notes": extra["notes"],
+            "implicit": bool(extra.get("implicit"))}
 
 
 # A file larger than this is not captured: its baseline would sit in the
@@ -2700,21 +2702,26 @@ def _prepare(file_path: str, cwd: str):
     return session_file, file_path, original_content
 
 
-def _commit(prepared: list, session_id, captured_at: str) -> None:
+def _commit(prepared: list, session_id, captured_at: str) -> list:
     """Record prepared captures: one lock, one load and one save per session
     file, however many files land in it. Per-file saves made `rm -rf` of a few
-    directories cost seconds on a 2 MB session."""
+    directories cost seconds on a 2 MB session.
+
+    Returns the paths this call captured plus those already pending (the audit
+    record counts both as covered)."""
+    covered: list = []
     by_session: dict = {}
     for session_file, path, content in prepared:
         by_session.setdefault(session_file, []).append((path, content))
     for session_file, items in by_session.items():
         try:
-            _commit_one(session_file, items, session_id, captured_at)
+            covered.extend(_commit_one(session_file, items, session_id, captured_at))
         except Exception:
             log_event("error")          # one session's trouble must not cost the others
+    return covered
 
 
-def _commit_one(session_file: str, items: list, session_id, captured_at: str) -> None:
+def _commit_one(session_file: str, items: list, session_id, captured_at: str) -> list:
     # Hold the advisory lock across the whole read-modify-write so an accept/
     # reject the extension persists in this window can't be clobbered by our
     # write (and vice-versa). Fail-open: acquire_lock returns None on timeout.
@@ -2722,6 +2729,7 @@ def _commit_one(session_file: str, items: list, session_id, captured_at: str) ->
     try:
         session = load_session(session_file) or new_session()
         changed = []
+        covered = []
         for path, content in items:
             existing = session["files"].get(path)
             if existing is None or existing.get("reviewStatus") != "pending":
@@ -2733,7 +2741,9 @@ def _commit_one(session_file: str, items: list, session_id, captured_at: str) ->
                     "capturedAt": captured_at,
                 }
                 changed.append(path)
+                covered.append(path)
             else:
+                covered.append(path)
                 # An existing pending entry keeps its frozen baseline (no-op).
                 log_event("skip-already-pending", path)
         if changed:
@@ -2742,8 +2752,59 @@ def _commit_one(session_file: str, items: list, session_id, captured_at: str) ->
             save_session(session, session_file)
             for path in changed:
                 log_event("captured", path)
+        return covered
     finally:
         release_lock(fd, lock_path)
+
+
+AUDIT_INFLIGHT_DIR = os.path.join(CLAUDEGATE_DIR, "audit", "inflight")
+AUDIT_STALE_MS = 3600000
+AUDIT_MAX_REMOVALS = 50
+
+
+def _audit_inflight(hook_input: dict, started_ms: int, cwd: str, session_id,
+                    captured: list, implicit: bool, background: bool) -> None:
+    """Leave `audit/inflight/<tool_use_id>.json` for the PostToolUse audit hook
+    and sweep records older than an hour. Never raises: the audit must not
+    affect capture."""
+    try:
+        try:
+            now = time.time()
+            removed = 0
+            for name in os.listdir(AUDIT_INFLIGHT_DIR):
+                if removed >= AUDIT_MAX_REMOVALS:
+                    break
+                fp = os.path.join(AUDIT_INFLIGHT_DIR, name)
+                try:
+                    if (now - os.stat(fp).st_mtime) * 1000 > AUDIT_STALE_MS:
+                        os.remove(fp)
+                        removed += 1
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        tool_use_id = hook_input.get("tool_use_id")
+        if hook_input.get("tool_name") != "Bash" or not isinstance(tool_use_id, str) \
+                or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", tool_use_id) \
+                or tool_use_id in (".", ".."):
+            return
+        os.makedirs(AUDIT_INFLIGHT_DIR, exist_ok=True)
+        record = {"startedAt": started_ms, "cwd": cwd,
+                  "sessionId": session_id if isinstance(session_id, str) else None,
+                  "captured": captured, "implicit": implicit, "background": background}
+        final = os.path.join(AUDIT_INFLIGHT_DIR, tool_use_id + ".json")
+        tmp = "%s.%d.tmp" % (final, os.getpid())
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(record, f)
+            os.replace(tmp, final)
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    except Exception:
+        pass
 
 
 def capture_file(file_path: str, cwd: str, session_id, captured_at: str) -> None:
@@ -2779,6 +2840,7 @@ def main() -> None:
     except (json.JSONDecodeError, ValueError):
         sys.exit(0)
 
+    started_ms = int(time.time() * 1000)
     tool_input = hook_input.get("tool_input") or {}
     cwd = hook_input.get("cwd", os.getcwd())
     session_id = hook_input.get("session_id")
@@ -2860,10 +2922,14 @@ def main() -> None:
         first = too_many[0].rsplit(" >", 1)[0]
         last = too_many[-1].rsplit(" >", 1)[0]
         log_event("skip-too-many", "%s..%s (%d dirs)" % (first, last, len(too_many)))
+    covered: list = []
     try:
-        _commit(prepared, session_id, captured_at)
+        covered = _commit(prepared, session_id, captured_at)
     except Exception:
         log_event("error")
+    _audit_inflight(hook_input, started_ms, cwd, session_id, covered,
+                    bool(full.get("implicit")),
+                    tool_input.get("run_in_background") is True)
 
 
 if __name__ == "__main__":
