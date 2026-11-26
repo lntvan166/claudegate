@@ -41,6 +41,14 @@ export const AUDIT_EVENTS = ["PostToolUse", "PostToolUseFailure"] as const;
 type HookGroup = { matcher?: string; hooks?: Array<{ type?: string; command?: unknown }> };
 
 /**
+ * How an audit-event hook command is recognised as ours: it ends in
+ * `.claudegate/audit.sh` or `.claudegate\audit.bat`. Stricter than PreToolUse's
+ * "mentions claudegate" rule, so a foreign `/x/claudegate/lint.sh` PostToolUse
+ * hook is never rewritten.
+ */
+export const AUDIT_COMMAND_SHAPE = /[\\/]\.claudegate[\\/]audit\.(sh|bat)$/;
+
+/**
  * Pure decision logic for the ~/.claude/settings.json registration write.
  *
  * Given the current file contents and the hook wrapper command, returns the
@@ -80,16 +88,43 @@ export function computeSettingsPatch(
     }
   }
 
+  // A shape we cannot patch without discarding the user's data — `hooks` that
+  // is not a plain object, or an event we would touch that is not an array —
+  // is refused exactly like malformed JSON, never thrown and never replaced.
+  const isPlainObject = (v: unknown) => typeof v === "object" && v !== null && !Array.isArray(v);
+  if (settings.hooks !== undefined && !isPlainObject(settings.hooks)) {
+    return { content: raw, changed: false, parseError: true };
+  }
+  const touched = auditCommand !== undefined ? ["PreToolUse", ...AUDIT_EVENTS] : ["PreToolUse"];
+  if (settings.hooks !== undefined) {
+    const existing = settings.hooks as Record<string, unknown>;
+    if (touched.some((e) => existing[e] !== undefined && !Array.isArray(existing[e]))) {
+      return { content: raw, changed: false, parseError: true };
+    }
+  }
+
   if (!settings.hooks) settings.hooks = {};
   const hooks = settings.hooks as Record<string, unknown[]>;
 
   // Order is load-bearing for byte-stable output (the Desktop app ports this
   // function and cross-checks it against fixtures): PreToolUse first, then the
   // audit pair. A key that is absent is appended in that order.
-  let changed = ensureHookEntry(hooks, "PreToolUse", PRE_TOOL_MATCHER, hookCommand);
+  // PreToolUse "ours" = any group whose JSON mentions claudegate. Kept as-is for
+  // parity with the Desktop app's capture-status detection (see CLAUDE.md for
+  // its known hijack risk). The audit events use the stricter command shape.
+  let changed = ensureHookEntry(hooks, "PreToolUse", PRE_TOOL_MATCHER, hookCommand, {
+    group: (h) => JSON.stringify(h).includes("claudegate"),
+    command: (c) => c.includes("claudegate"),
+  });
   if (auditCommand !== undefined) {
+    const auditOwns = (c: string) => AUDIT_COMMAND_SHAPE.test(c);
     for (const event of AUDIT_EVENTS) {
-      if (ensureHookEntry(hooks, event, POST_TOOL_MATCHER, auditCommand)) changed = true;
+      const owns = {
+        group: (h: HookGroup) =>
+          Array.isArray(h?.hooks) && h.hooks.some((x) => typeof x?.command === "string" && auditOwns(x.command)),
+        command: auditOwns,
+      };
+      if (ensureHookEntry(hooks, event, POST_TOOL_MATCHER, auditCommand, owns)) changed = true;
     }
   }
 
@@ -107,16 +142,16 @@ function ensureHookEntry(
   hooks: Record<string, unknown[]>,
   event: string,
   matcher: string,
-  command: string
+  command: string,
+  owns: { group: (h: HookGroup) => boolean; command: (c: string) => boolean }
 ): boolean {
   if (!hooks[event]) hooks[event] = [];
   const groups = hooks[event] as HookGroup[];
 
-  // "Ours" = any entry that references a claudegate wrapper path. Never the
-  // matcher: a foreign tool may legitimately register `^Bash$`, and rewriting
-  // that would hijack another tool's hook.
-  const isOurs = (h: unknown) => JSON.stringify(h).includes("claudegate");
-  const ours = groups.filter(isOurs);
+  // "Ours" is decided by the caller from the wrapper path, never the matcher: a
+  // foreign tool may legitimately register `^Bash$`, and rewriting that would
+  // hijack another tool's hook.
+  const ours = groups.filter((h) => owns.group(h));
   // Correct means BOTH halves are current. Comparing only the command is what
   // made an existing install un-upgradable: the wrapper path is already right,
   // so a widened matcher could never reach anyone who had installed before.
@@ -147,7 +182,7 @@ function ensureHookEntry(
       if (!Array.isArray(h.hooks)) continue;
       let mine = false;
       for (const x of h.hooks) {
-        if (typeof x.command === "string" && x.command.includes("claudegate")) {
+        if (typeof x.command === "string" && owns.command(x.command)) {
           x.command = command;
           mine = true;
         }
@@ -156,7 +191,10 @@ function ensureHookEntry(
       h.matcher = matcher;
       changed = true;
     }
-    return changed;
+    if (changed) return true;
+    // Nothing repaired: the group(s) mention claudegate only outside a command
+    // (a matcher, an arg). Not ours to edit — add our own entry beside them, or
+    // verification would fail and roll back on every attempt.
   }
 
   groups.push({ matcher, hooks: [{ type: "command", command }] });
@@ -486,6 +524,9 @@ export class HookInstaller {
    * reports false rather than looping on every focus.
    */
   private auditNeedsSync(): boolean {
+    // A missing wrapper is stale too: settings only gain the audit entries once
+    // it exists (registerHookInSettings), so it must be healed, not waited on.
+    if (!fs.existsSync(this.auditWrapperDest)) return true;
     const source = this.bundledAuditSourcePath();
     if (!fs.existsSync(source)) return false;
     if (!fs.existsSync(this.auditPyDest)) return true;
@@ -747,7 +788,10 @@ export class HookInstaller {
       raw = null; // genuinely absent → safe to create
     }
 
-    const { content, changed, parseError } = computeSettingsPatch(raw ?? "", this.hookWrapperDest, this.auditWrapperDest);
+    // Register the audit hook only once its wrapper exists: an entry pointing
+    // at a missing audit.sh would fail on every Bash call.
+    const auditCommand = fs.existsSync(this.auditWrapperDest) ? this.auditWrapperDest : undefined;
+    const { content, changed, parseError } = computeSettingsPatch(raw ?? "", this.hookWrapperDest, auditCommand);
     if (parseError) {
       this.log.appendLine(
         `[ERROR] ${this.claudeSettingsPath} is not valid JSON; refusing to overwrite it (your config is untouched).`
@@ -760,7 +804,7 @@ export class HookInstaller {
     }
     if (!changed) return false;
 
-    return this.writeSettingsGuarded(raw, content);
+    return this.writeSettingsGuarded(raw, content, auditCommand);
   }
 
   // The single read that decides fresh-install vs abort. Protected so tests can
@@ -795,7 +839,7 @@ export class HookInstaller {
    * Back up → write → verify → restore-on-failure. `previousRaw` is null when
    * the file was genuinely absent (nothing to back up, nothing to preserve).
    */
-  private writeSettingsGuarded(previousRaw: string | null, content: string): boolean {
+  private writeSettingsGuarded(previousRaw: string | null, content: string, auditCommand?: string): boolean {
     // Resolve symlinks so the temp+rename lands on the real file (keeping the
     // symlink intact) and stays on one filesystem. Falls back to the literal
     // path when realpath fails — notably when the file does not exist yet.
@@ -836,7 +880,7 @@ export class HookInstaller {
       after = ""; // unreadable → fails verification below, which restores
       this.log.appendLine(`[WARN] could not re-read settings.json after write: ${(err as Error).message}`);
     }
-    const problem = verifySettingsContent(after, previousRaw ?? "", this.hookWrapperDest, this.auditWrapperDest);
+    const problem = verifySettingsContent(after, previousRaw ?? "", this.hookWrapperDest, auditCommand);
     if (problem) {
       this.log.appendLine(`[ERROR] settings.json failed verification after write: ${problem}.`);
       if (backupPath && this.restoreSettingsBackup(backupPath, target)) {
@@ -950,6 +994,11 @@ export class HookInstaller {
    * because older versions did snapshot hook config at session start — but the
    * message is now a heads-up, not an outage report.
    *
+   * It judges the CAPTURE registration only (PreToolUse, `hookWrapperDest`).
+   * The audit entries are a measurement aid: a removed or edited audit entry is
+   * classified benign and raises no capture warning; the activation repair
+   * restores it.
+   *
    * Returns a Disposable that stops watching; register it on context.subscriptions.
    */
   watchSettingsForTrustInvalidation(): vscode.Disposable {
@@ -963,12 +1012,7 @@ export class HookInstaller {
       // clear an active trust-invalidation (which would drop the persistent
       // status-bar warning while running sessions are still untrusted).
       if (current === this.lastKnownSettingsRaw) return;
-      const kind = classifySettingsChange(
-        this.lastKnownSettingsRaw ?? "",
-        current,
-        this.hookWrapperDest,
-        this.auditWrapperDest
-      );
+      const kind = classifySettingsChange(this.lastKnownSettingsRaw ?? "", current, this.hookWrapperDest);
       this.lastKnownSettingsRaw = current;
 
       if (kind === "benign") {
@@ -977,7 +1021,7 @@ export class HookInstaller {
         // and if an earlier change had raised the warning, the registration is
         // correct again, so clear it. A warning that only Setup Hook or a window
         // reload could dismiss outlived the problem it described.
-        if (this.trustInvalidated && isRegistrationCorrect(current, this.hookWrapperDest, this.auditWrapperDest)) {
+        if (this.trustInvalidated && isRegistrationCorrect(current, this.hookWrapperDest)) {
           this.trustInvalidated = false;
           this.trustWarningShown = false;
           this.fireHealth();

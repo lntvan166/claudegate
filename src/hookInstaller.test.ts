@@ -15,6 +15,7 @@ import {
   PRE_TOOL_MATCHER,
   POST_TOOL_MATCHER,
   AUDIT_EVENTS,
+  AUDIT_COMMAND_SHAPE,
   HookInstaller,
 } from "./hookInstaller";
 
@@ -335,6 +336,60 @@ const AUDIT_ENTRY = { matcher: POST_TOOL_MATCHER, hooks: [{ type: "command", com
     "a missing audit entry fails verification by name"
   );
   console.log("ok - verification checks the audit entries landed");
+}
+
+// G. Malformed hook shapes are refused (parseError, original bytes), never
+//    thrown and never replaced — for `hooks` itself and every event we touch.
+{
+  for (const bad of [[], "x", 1, null]) {
+    const raw = JSON.stringify({ model: "m", hooks: bad });
+    const r = computeSettingsPatch(raw, CMD, AUDIT);
+    assert.deepEqual(r, { content: raw, changed: false, parseError: true }, `hooks=${JSON.stringify(bad)} refused`);
+  }
+  for (const event of ["PreToolUse", ...AUDIT_EVENTS]) {
+    for (const bad of [{ matcher: "x" }, "x", 1]) {
+      const raw = JSON.stringify({ hooks: { [event]: bad, PreToolUse: event === "PreToolUse" ? bad : [ENTRY] } }, null, 2);
+      const r = computeSettingsPatch(raw, CMD, AUDIT);
+      assert.deepEqual(r, { content: raw, changed: false, parseError: true }, `${event}=${JSON.stringify(bad)} refused`);
+      assert.equal(isRegistrationCorrect(raw.replace('"x"', '"claudegate"'), CMD, AUDIT), false, "no throw, not correct");
+      const good = computeSettingsPatch("", CMD, AUDIT).content;
+      assert.doesNotThrow(() => classifySettingsChange(good, raw, CMD));
+      assert.doesNotThrow(() => classifySettingsChange(raw, good, CMD));
+    }
+  }
+  console.log("ok - malformed hooks / event shapes are refused, not thrown");
+}
+
+// H. Audit events identify ours by command shape, not by a "claudegate"
+//    substring: a foreign hook that merely lives under a claudegate directory
+//    is preserved untouched, and ours is appended beside it.
+{
+  assert.ok(AUDIT_COMMAND_SHAPE.test("/home/me/.claudegate/audit.sh"));
+  assert.ok(AUDIT_COMMAND_SHAPE.test("C:\\Users\\me\\.claudegate\\audit.bat"));
+  assert.ok(!AUDIT_COMMAND_SHAPE.test("/x/claudegate/lint.sh"));
+  const foreign = { matcher: "^Bash$", hooks: [{ type: "command", command: "/x/claudegate/lint.sh" }] };
+  const raw = JSON.stringify({ hooks: { PreToolUse: [ENTRY], PostToolUse: [foreign] } }, null, 2);
+  const { content, changed } = computeSettingsPatch(raw, CMD, AUDIT);
+  assert.equal(changed, true);
+  const parsed = JSON.parse(content);
+  assert.deepEqual(parsed.hooks.PostToolUse, [foreign, AUDIT_ENTRY], "foreign claudegate-dir hook untouched, ours appended");
+  assert.equal(computeSettingsPatch(content, CMD, AUDIT).changed, false, "and that is a fixed point");
+  console.log("ok - a foreign hook under a claudegate directory is not mistaken for ours");
+}
+
+// I. A group mentioning claudegate only outside a command is not repairable as
+//    ours; our entry is appended beside it instead of silently doing nothing
+//    (which made verification fail and roll back on every attempt).
+{
+  const mention = { matcher: "^Bash$", hooks: [{ type: "command", command: "/other/x.sh", note: "after claudegate" }] };
+  const raw = JSON.stringify({ hooks: { PreToolUse: [mention] } }, null, 2);
+  const { content, changed } = computeSettingsPatch(raw, CMD, AUDIT);
+  assert.equal(changed, true);
+  const parsed = JSON.parse(content);
+  assert.deepEqual(parsed.hooks.PreToolUse, [mention, ENTRY], "mention kept, our entry appended");
+  assert.equal(verifySettingsContent(content, raw, CMD, AUDIT), null, "the result verifies");
+  assert.equal(computeSettingsPatch(content, CMD, AUDIT).changed, false, "fixed point");
+  console.log("ok - a non-command claudegate mention gets our entry appended");
 }
 
 function USER_CONFIG_FOR_AUDIT(): string {
@@ -943,6 +998,8 @@ function testAutomaticWriteAddsAuditEntries(): void {
   oldInstall.hooks.PreToolUse.push({ matcher: PRE_TOOL_MATCHER, hooks: [{ type: "command", command: wrapper("hook") }] });
   oldInstall.hooks.PostToolUse = [foreignPost];
   fs.writeFileSync(settingsPath, JSON.stringify(oldInstall, null, 2), "utf-8");
+  fs.mkdirSync(path.join(home, ".claudegate"), { recursive: true });
+  fs.writeFileSync(wrapper("audit"), "#!/usr/bin/env bash\n", "utf-8");
 
   assert.equal(new HookInstaller(NO_CONTEXT, NO_LOG).syncSettingsIfNeeded(), true, "missing audit entries self-heal");
   const after = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
@@ -962,8 +1019,93 @@ function testAutomaticWriteAddsAuditEntries(): void {
   console.log("ok - the silent activation repair adds the audit entries");
 }
 
+// I3. Current audit.py but no audit.sh: settings get no audit entry while the
+// wrapper is missing, the hook sync reports it stale and writes it, and only
+// then does the activation repair register the audit entries.
+async function testMissingAuditWrapperHeals(): Promise<void> {
+  const { home, settingsPath } = tempSettingsHome();
+  const extPath = fs.mkdtempSync(path.join(os.tmpdir(), "cg-ext-"));
+  fs.mkdirSync(path.join(extPath, "hooks"), { recursive: true });
+  fs.writeFileSync(path.join(extPath, "hooks", "hook.py"), "print('hook')\n");
+  fs.writeFileSync(path.join(extPath, "hooks", "audit.py"), "print('audit')\n");
+  const cg = path.join(home, ".claudegate");
+  fs.mkdirSync(cg, { recursive: true });
+  fs.copyFileSync(path.join(extPath, "hooks", "hook.py"), path.join(cg, "hook.py"));
+  fs.copyFileSync(path.join(extPath, "hooks", "audit.py"), path.join(cg, "audit.py"));
+  const win = process.platform === "win32";
+  const hookWrapper = path.join(cg, win ? "hook.bat" : "hook.sh");
+  const auditWrapper = path.join(cg, win ? "audit.bat" : "audit.sh");
+  fs.writeFileSync(hookWrapper, "#!/usr/bin/env bash\n", "utf-8");
+  const preOnly = computeSettingsPatch("", hookWrapper).content;
+  fs.writeFileSync(settingsPath, preOnly, "utf-8");
+  const context = {
+    extensionPath: extPath,
+    globalState: { get: () => undefined, update: async () => undefined },
+    extension: { packageJSON: { version: "9.9.9" } },
+  } as never;
+
+  const first = new HookInstaller(context, NO_LOG);
+  assert.equal(first.registerHookInSettings(), false, "no audit entry while audit.sh is missing");
+  assert.equal(fs.readFileSync(settingsPath, "utf-8"), preOnly, "settings untouched");
+  assert.equal(first.getStatus().upToDate, false, "a missing audit wrapper is out of date");
+
+  assert.equal(await first.syncHookIfNeeded(), "updated", "the sync heals the wrapper");
+  assert.ok(fs.existsSync(auditWrapper), "audit wrapper written");
+  assert.equal(first.getStatus().upToDate, true);
+
+  assert.equal(new HookInstaller(context, NO_LOG).syncSettingsIfNeeded(), true, "now the audit entries register");
+  const after = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+  assert.equal(after.hooks.PostToolUse[0].hooks[0].command, auditWrapper);
+  assert.equal(after.hooks.PostToolUseFailure[0].hooks[0].command, auditWrapper);
+
+  fs.rmSync(home, { recursive: true, force: true });
+  fs.rmSync(extPath, { recursive: true, force: true });
+  console.log("ok - a missing audit wrapper heals before the audit entries register");
+}
+
+// A write whose audit entry did not land fails verification and is rolled
+// back to the exact pre-write bytes.
+class AuditDroppingInstaller extends HookInstaller {
+  protected writeFileAtomic(filePath: string, content: string): void {
+    const parsed = JSON.parse(content);
+    delete parsed.hooks.PostToolUseFailure;
+    fs.writeFileSync(filePath, JSON.stringify(parsed, null, 2), "utf-8");
+  }
+}
+
+function testAuditVerifyFailureRollsBack(): void {
+  const { home, claudeDir, settingsPath } = tempSettingsHome();
+  fs.mkdirSync(path.join(home, ".claudegate"), { recursive: true });
+  fs.writeFileSync(
+    path.join(home, ".claudegate", process.platform === "win32" ? "audit.bat" : "audit.sh"),
+    "#!/usr/bin/env bash\n",
+    "utf-8"
+  );
+  fs.writeFileSync(settingsPath, USER_CONFIG, "utf-8");
+
+  assert.equal(new AuditDroppingInstaller(NO_CONTEXT, NO_LOG).registerHookInSettings(), false, "not reported as success");
+  assert.equal(fs.readFileSync(settingsPath, "utf-8"), USER_CONFIG, "restored byte for byte");
+  assert.equal(backupsIn(claudeDir).length, 1, "the backup is kept");
+
+  fs.rmSync(home, { recursive: true, force: true });
+  console.log("ok - a write missing an audit entry fails verification and rolls back byte for byte");
+}
+
+// I4. The trust watcher judges capture only: a removed audit entry is benign.
+{
+  const full = computeSettingsPatch("", CMD, AUDIT).content;
+  const noAudit = JSON.parse(full);
+  delete noAudit.hooks.PostToolUse;
+  const edited = JSON.stringify(noAudit, null, 2);
+  assert.equal(classifySettingsChange(full, edited, CMD), "benign", "audit entry removed → benign for capture");
+  assert.equal(shouldWarnTrustInvalidation(full, edited, CMD), false);
+  console.log("ok - removing an audit entry raises no capture warning");
+}
+
 void (async () => {
   await testHookSyncHeals();
+  await testMissingAuditWrapperHeals();
+  testAuditVerifyFailureRollsBack();
   await testHookSyncInstallsAudit();
   testAutomaticWriteAddsAuditEntries();
   testUnreadableSettingsIsNeverOverwritten();

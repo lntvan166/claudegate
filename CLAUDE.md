@@ -188,12 +188,22 @@ would orphan the in-flight record of every failed command.
 - Its stdin carries the same `tool_name`, `tool_input` and `tool_use_id` as `PostToolUse`, plus `error` (first line `Exit code N` for Bash), optional `is_interrupt` and `duration_ms`.
 - It does **not** fire for calls rejected before execution (validation failure, permission denial), and cancelling a running tool fires neither event. Those calls leave an in-flight record with no audit row.
 
-Like PreToolUse, "ours" is any group whose JSON mentions `claudegate`, never a
-matcher, so another tool's `^Bash$` PostToolUse hook is never touched. The silent
-activation repair (`syncSettingsIfNeeded`) adds missing audit entries to an
-existing install. `audit.sh`/`audit.bat` are generated like `hook.sh` and exit 0
-when `audit.py` is absent: `python` on a missing file exits 2, and a PostToolUse
-hook exiting 2 sends its stderr to Claude after every Bash call.
+How the installer handles these entries:
+
+- **Ownership.** An audit entry counts as ours by **command shape**: `AUDIT_COMMAND_SHAPE`, which is `[\\/]\.claudegate[\\/]audit\.(sh|bat)$`. It never goes by the matcher or by a `claudegate` substring, so a foreign `/x/claudegate/lint.sh` PostToolUse hook is never rewritten.
+- **Malformed shapes.** If `hooks` is not a plain object, or an event we touch is not an array, the input is refused like malformed JSON (`parseError`). It is not thrown and not replaced.
+- **Missing wrapper.** Settings get the audit entries only once `audit.sh`/`audit.bat` exists, because an entry pointing at a missing wrapper would fail on every Bash call. A missing wrapper counts as out of date, so the hook sync writes it. The silent activation repair (`syncSettingsIfNeeded`) then adds the entries to an existing install.
+- **Wrapper generation.** The wrappers are generated like `hook.sh`. They exit 0 when `audit.py` is absent, because `python` on a missing file exits 2, and a PostToolUse hook that exits 2 sends its stderr to Claude after every Bash call.
+- **Trust watcher.** `watchSettingsForTrustInvalidation` judges the **capture** registration only. Removing or editing an audit entry is benign and raises no warning.
+
+**Known risk, deliberately unchanged: PreToolUse ownership is a substring rule.** A
+PreToolUse group counts as ours when its JSON contains `claudegate` anywhere. So a
+foreign PreToolUse hook whose command merely contains that word (say
+`/opt/claudegate-tools/lint.sh`) would have its command and matcher rewritten to
+ours, which hijacks it. It stays this way for parity with ClaudeGate Desktop's
+capture-status detection, which uses the same rule. Tightening it to a command
+shape has to change both apps together. A group that mentions claudegate only
+outside a `command` field is not rewritten; ours is appended beside it.
 
 ## DocumentTracker (GUI path)
 
