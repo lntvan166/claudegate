@@ -7,6 +7,24 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.17.0] — 2026-11-26
+
+### Changed
+
+- **Text inside a heredoc that is only written to a file is no longer read as file names.** When Claude writes a file with `cat > notes.md <<'EOF' … EOF`, the text between the markers is the file's content. The hook still read every word in it that looked like a path, so a plan mentioning `deploy/sql/sandbox.sql`, or a test that wrote `home.join("cache/config.json")`, created pending entries for files nobody touched. A heredoc body is now searched for file names only when something runs it: an interpreter (`python3 -`, `node`, `bash -s`, also behind `uv run`, `conda run`, `npx` and similar), a loop or `xargs` that hands its lines to a tool that edits files, or a script that the same command writes and then runs. If the hook can't tell what receives the heredoc, it searches the body as before, because a missed edit costs more than an extra entry.
+- **Shell scripts fed through `bash -s <<EOF` are read as scripts.** Their own `cd` and edit commands are followed, so an in-place edit inside such a script is captured at the right path. Before, it was missed.
+- **Files written through a variable set in the same command are captured.** `W=build/out; cat >> $W/report.md` now resolves to `build/out/report.md`. A variable whose value the hook can't know (`$(mktemp -d)`, `$HOME`, a loop variable) is still never guessed. It is logged as `skip-unknown-var` in the hook log, so a missed edit can be traced.
+
+Replayed against 23,244 real shell commands, the paths that point to a real file rose from 8,177 to 8,414. The paths with nothing on disk fell from 2,139 to 1,790 from the heredoc change alone. The variable change adds about 700 more, almost all real writes to scratch files that were later deleted.
+
+### Internal
+
+- 213 unit assertions and 150 hook tests. Every case where the previous hook found a write and this one does not was inspected: each is a mention inside file content, not a written file. The slowest real command takes under 4 ms. Timing tests guard the new steps against adversarial input.
+
+### Notes
+
+- **No need to re-run Setup Hook.** The new `hook.py` is copied over automatically when the extension starts or the window regains focus.
+
 ## [1.16.1] — 2026-11-11
 
 ### Fixed
