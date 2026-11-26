@@ -802,24 +802,42 @@ def _heredocs(text: str) -> list:
     _heredoc_runs_code. `op` is what lets that be answered.
     """
     out: list = []
-    pos = 0
+    matches: list = []
     for m in _HEREDOC_RE.finditer(text):
-        if len(out) >= _MAX_HEREDOCS:
+        matches.append(m)
+        if len(matches) > 4 * _MAX_HEREDOCS:
             break
+    pos = 0
+    k = 0
+    while k < len(matches) and len(out) < _MAX_HEREDOCS:
+        m = matches[k]
         if m.start() < pos:      # inside a body we already mapped
+            k += 1
             continue
         nl = text.find("\n", m.end())
         if nl == -1:
-            continue
+            break                # no body follows this or any later operator
+        # `cat > a.md <<A; python3 - <<B` — every operator on the line opens a
+        # body, and the bodies follow one after another in the same order.
+        group = [m]
+        k += 1
+        while k < len(matches) and matches[k].start() < nl:
+            group.append(matches[k])
+            k += 1
         body = nl + 1
-        closer = re.compile(r"^[ \t]*" + re.escape(m.group(2)) + r"[ \t]*$", re.M)
-        found = closer.search(text, body)
-        # An unterminated heredoc runs to the end of the command — it is still a
-        # body, and its contents still must not steer the working directory.
-        end = found.start() if found else len(text)
-        if end > body:
-            out.append((m.start(), body, end))
-        pos = found.end() if found else len(text)
+        for g in group:
+            closer = re.compile(r"^[ \t]*" + re.escape(g.group(2)) + r"[ \t]*$", re.M)
+            found = closer.search(text, body)
+            # An unterminated heredoc runs to the end of the command — it is
+            # still a body, and must still not steer the working directory.
+            end = found.start() if found else len(text)
+            if end > body and len(out) < _MAX_HEREDOCS:
+                out.append((g.start(), body, end))
+            if not found:
+                body = len(text)
+                break
+            body = min(found.end() + 1, len(text))
+        pos = body
     return out
 
 
@@ -832,12 +850,32 @@ def _heredocs(text: str) -> list:
 # test file being written by `cat > x.rs <<EOF` into a pending entry.
 _INTERPRETER_RE = re.compile(
     r"^(?:python|pypy|ipython|node|nodejs|deno|bun|ts-node|tsx|ruby|perl|php|"
-    r"lua|luajit|bash|sh|zsh|dash|ksh|mksh|fish|Rscript|R|julia|tclsh|groovy|"
+    r"lua|luajit|bash|sh|zsh|dash|ksh|mksh|fish|Rscript|julia|tclsh|groovy|"
     r"pwsh|powershell|osascript)(?:[0-9]+(?:\.[0-9]+)*)?(?:\.exe)?$"
 )
+# The interpreters whose body is itself shell, and so can be scanned as a
+# command of its own: its `sed -i f`, `> f` are explicit targets.
+_SHELL_INTERPRETER_RE = re.compile(r"^(?:bash|sh|zsh|dash|ksh|mksh)(?:[0-9]+(?:\.[0-9]+)*)?$")
 # Commands that run a script FILE named by their argument, for the
 # write-then-run shape below. (`./gen.sh` is caught separately.)
 _RUNS_FILE = frozenset({"source", "."})
+# Words that may stand between the start of a segment and the interpreter it
+# runs: `sudo -u svc python3`, `uv run python`, `timeout 30 node`. Interpreter
+# detection walks past these (and flags, and a flag's value) and stops at the
+# first word that is none of them, so `cat notes python3` is not python.
+_RUNNERS = frozenset("""
+    sudo doas env nohup time timeout nice ionice stdbuf setsid exec command
+    chrt taskset unbuffer xvfb-run systemd-run uv uvx run poetry pipenv pdm rye
+    hatch npx pnpm pnpx yarn bunx dotenv direnv ! { do then else elif if while until
+    """.split())
+_DURATION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)?[smhd]?$")
+# A pipeline stage that turns its stdin into FILE NAMES for a writer: the body
+# of `xargs sed -i … <<EOF` or `cat <<EOF | while read f; do gofmt -w "$f"` is
+# a list of the files about to be rewritten.
+_LIST_CONSUMERS = frozenset({"xargs", "parallel"})
+# Writers whose stdin is the CONTENT they write, not names: their heredoc stays
+# data (`tee out.md <<EOF`).
+_CONTENT_WRITERS = frozenset({"tee", "sponge"})
 
 
 def _pipelines(tokens: list, text: str):
@@ -872,32 +910,102 @@ def _pipelines(tokens: list, text: str):
     return pipelines, where
 
 
-# The interpreters whose body is itself shell, and so can be scanned as a
-# command of its own: its `sed -i f`, `> f` are explicit targets.
-_SHELL_INTERPRETER_RE = re.compile(r"^(?:bash|sh|zsh|dash|ksh|mksh)(?:[0-9]+(?:\.[0-9]+)*)?$")
+def _base(w: str) -> str:
+    """`os.path.basename` for a shell word, without its per-call overhead —
+    this runs on every word of every segment of a command with a heredoc."""
+    return w[w.rfind("/") + 1:]
+
+
+def _cmd_word(w: str) -> str:
+    """`(python3`, `$(python3`, `` `python3 `` → `python3`. The lexer does not
+    split on a subshell or substitution opener, so it arrives glued on."""
+    while w:
+        if w.startswith("$("):
+            w = w[2:]
+        elif w[0] in "(`":
+            w = w[1:]
+        else:
+            break
+    return w
 
 
 def _segment_runs_code(words: list):
     """Does this command segment execute its stdin? "shell" when a local shell
-    runs it, True for any other interpreter, False when nothing does, None when
-    the command cannot be determined (`$PY - <<EOF`, an empty segment)."""
+    runs it as a script, True for any other interpreter, False when nothing
+    does, None when the command cannot be determined (`$PY - <<EOF`,
+    `OUT=$(python3 - <<EOF`, an empty segment)."""
     names = [w for w, _ in words]
-    while names and (names[0] in _WRAPPERS or
-                     ("=" in names[0] and not names[0].startswith("-")
-                      and names[0].partition("=")[0].isidentifier())):
-        names = names[1:]
-    if not names or any(c in names[0] for c in "$`"):
+    i = 0
+    while i < len(names):
+        m = _ASSIGN_RE.match(names[i])
+        if not m:
+            break
+        # `OUT=$(python3 - <<EOF` — the command is inside the substitution.
+        if "$(" in m.group(2) or "`" in m.group(2):
+            return None
+        i += 1
+    names = names[i:]
+    # `echo $(python3 - <<EOF …)` — a command substitution runs its own
+    # command, wherever it sits in the segment: judge from there.
+    for k, w in enumerate(names):
+        if "$(" in w or "`" in w:
+            if w.startswith(("$(", "`", "($(")):
+                names = names[k:]
+                break
+            if k > 0:
+                return None             # `x$(cmd` — glued on, cannot tell
+    names = [_cmd_word(w) for w in names]
+    if not names or not names[0] or any(c in names[0] for c in "$`"):
         return None
-    # Scan past wrappers we do not model (`sudo -u x python3`, `uv run python`,
-    # `timeout 30 node`) — but a remote runner means the body runs elsewhere:
-    # `ssh host 'bash -s' <<EOF` writes nothing on this machine.
-    for w in names:
-        base = os.path.basename(w)
+    value_next = False
+    for k, w in enumerate(names):
+        base = _base(w)
+        # A remote runner means the body runs elsewhere: `ssh host 'bash -s'`.
         if base in _REMOTE_RUNNERS:
             return False
-        if _INTERPRETER_RE.match(base):
-            return "shell" if _SHELL_INTERPRETER_RE.match(base) else True
+        if _INTERPRETER_RE.match(base) or (base == "R" and k == 0):
+            if not _SHELL_INTERPRETER_RE.match(base):
+                return True
+            # A shell reads stdin as its script only with no script of its
+            # own: `bash -s`, bare `bash`. `bash deploy.sh <<EOF` hands the
+            # body to deploy.sh — still code we cannot see, so harvested, but
+            # not scanned as shell.
+            rest = names[k + 1:]
+            if "-s" in rest:
+                return "shell"
+            if any(re.match(r"^-[a-z]*c", a) or not a.startswith("-") for a in rest):
+                return True
+            return "shell"
+        if w.startswith("-"):
+            value_next = "=" not in w
+            continue
+        if (base in _RUNNERS or base in _WRAPPERS or _DURATION_RE.match(w)
+                or _ASSIGN_RE.match(w)):    # `env FOO=1 python3`
+            value_next = False
+            continue
+        if value_next:              # `sudo -u svc`, `nice -n 5`
+            value_next = False
+            continue
+        return False
     return False
+
+
+def _feeds_file_list(words: list) -> bool:
+    """Does this segment read its stdin as a list of files to write?
+    `xargs sed -i …`, `parallel gofmt -w`, `while read f`, or a writer that
+    takes file operands (`sed -i … <<EOF` is harmless to harvest)."""
+    names = [_cmd_word(w) for w, _ in words]
+    if not names:
+        return False
+    if any(_base(w) in _LIST_CONSUMERS for w in names):
+        return True
+    if names[0] == "while" and "read" in names:
+        return True
+    plain = [w for w, _ in words]
+    stripped = [w for w in plain if w not in _WRAPPERS and not _ASSIGN_RE.match(w)]
+    if stripped and _base(stripped[0]) in _CONTENT_WRITERS:
+        return False
+    return _tool_targets(plain) is not None
 
 
 def _heredoc_runs_code(tokens: list, text: str, heredocs: list) -> list:
@@ -907,6 +1015,9 @@ def _heredoc_runs_code(tokens: list, text: str, heredocs: list) -> list:
     A body is harvested when
       * a command in its pipeline, from the one it feeds onward, is an
         interpreter (`python3 - <<EOF`, `cat <<EOF | bash`);
+      * it is a list of files for a writer: the redirect of a loop's `done`,
+        or a pipeline through `xargs`, `parallel`, `while read`, or an
+        in-place tool (`cat <<EOF | xargs sed -i …`);
       * the file it is written to is run later in the same command
         (`cat > gen.py <<EOF … EOF` then `python3 gen.py`) — the body still
         executes, just one step removed; or
@@ -920,9 +1031,9 @@ def _heredoc_runs_code(tokens: list, text: str, heredocs: list) -> list:
     # hundreds of heredocs and thousands of segments, and asking each heredoc
     # to walk the rest of the command was quadratic (350 ms on a 64 KiB input).
     #
-    # verdict_from[p][s] — the first non-False _segment_runs_code at or after
-    # segment s of pipeline p: what a heredoc feeding segment s flows into.
-    # Built only for the pipelines that hold a heredoc.
+    # verdict_from[p][s] — the first non-False verdict at or after segment s
+    # of pipeline p: what a heredoc feeding segment s flows into. Built only
+    # for the pipelines that hold a heredoc.
     verdict_from: dict = {}
 
     def verdicts(p: int) -> list:
@@ -932,8 +1043,12 @@ def _heredoc_runs_code(tokens: list, text: str, heredocs: list) -> list:
             suffix = [False] * len(pipeline)
             for s in range(len(pipeline) - 1, -1, -1):
                 runs = _segment_runs_code(pipeline[s])
-                if runs is None or runs:
-                    acc = True if runs is None else runs
+                if runs is None:
+                    acc = True
+                elif runs:
+                    acc = runs
+                elif _feeds_file_list(pipeline[s]):
+                    acc = True
                 suffix[s] = acc
             verdict_from[p] = suffix
         return verdict_from[p]
@@ -953,7 +1068,7 @@ def _heredoc_runs_code(tokens: list, text: str, heredocs: list) -> list:
             for s, seg in enumerate(pipeline):
                 order[(p, s)] = len(order)
                 for f in _scripts_run_by([w for w, _ in seg]):
-                    last_run[os.path.basename(f)] = order[(p, s)]
+                    last_run[_base(f)] = order[(p, s)]
         for tok, at in zip(tokens, where):
             seg_tokens.setdefault(at, []).append(tok)
 
@@ -966,16 +1081,29 @@ def _heredoc_runs_code(tokens: list, text: str, heredocs: list) -> list:
             out.append(True)
             continue
         p, s = where[i]
+        seg = pipelines[p][s]
+        # `while read f; do sed -i … "$f"; done <<EOF` — the loop's input.
+        if seg and _cmd_word(seg[0][0]) == "done":
+            out.append(True)
+            continue
         verdict = verdicts(p)[s]
         if not verdict:
-            # Written to a file that a later segment runs as its script.
+            # Written to a file that a later segment runs as its script. The
+            # file may be written anywhere along the pipeline: `cat <<EOF |
+            # tee gen.py`.
             index()
-            names = {os.path.basename(t)
-                     for t, _ in _redirect_targets(seg_tokens.get((p, s), []), text)}
-            names |= {os.path.basename(a)
-                      for a in (_tool_targets([w for w, _ in pipelines[p][s]]) or [])}
+            if not last_run:            # nothing in the command runs a script
+                out.append(False)
+                continue
+            names: set = set()
+            for t in range(s, len(pipelines[p])):
+                names |= {_base(x)
+                          for x, _ in _redirect_targets(seg_tokens.get((p, t), []), text)}
+                names |= {_base(a)
+                          for a in (_tool_targets([w for w, _ in pipelines[p][t]]) or [])}
             names.discard("")
-            verdict = any(last_run.get(n, -1) > order[(p, s)] for n in names)
+            last = order[(p, len(pipelines[p]) - 1)]
+            verdict = any(last_run.get(n, -1) > last for n in names)
         out.append(verdict)
     return out
 
@@ -986,30 +1114,78 @@ def _heredoc_runs_code(tokens: list, text: str, heredocs: list) -> list:
 _SCRIPT_EXTS = frozenset("""
     py js mjs cjs ts mts cts sh bash zsh rb pl php lua r jl tcl groovy ps1
     """.split())
+_MAKEFILES = ("Makefile", "makefile", "GNUmakefile")
+# Commands that only read, move or stage a file. Naming the written file does
+# not run it: `cat > gen.py <<EOF … EOF; git add gen.py` leaves the body data.
+_NEVER_RUNS = frozenset("""
+    cat head tail less more wc grep rg egrep fgrep diff cmp git chmod chown ls
+    stat file rm mv cp ln echo printf sed awk jq yq bat code vim vi nano
+    touch install mkdir realpath readlink basename dirname sha256sum md5sum
+    shellcheck ruff black prettier eslint gofmt tsc mypy pyright
+    """.split())
+
+
+def _has_script_ext(a: str) -> bool:
+    return os.path.splitext(a)[1][1:].lower() in _SCRIPT_EXTS
 
 
 def _scripts_run_by(words: list) -> list:
     """The files this segment may execute as a script: `./gen.sh` itself, or
     an interpreter's (or `source`'s) first operand and any later operand with a
-    script extension (`python3 -I gen.py`, `node --import ./r.mjs bench.mjs`).
+    script extension (`python3 -I gen.py`, `node --import ./r.mjs bench.mjs`),
+    `python3 -m gen` as `gen.py`, `go run x.go`, a Makefile under `make`. With
+    no interpreter in sight, any operand with a script extension counts
+    (`uv run gen.py`, `npx vitest gen.test.ts`).
+
     A data operand is not one: in `python3 render.py notes.body` the body is
     content, and so is the heredoc that wrote it."""
-    while words and (os.path.basename(words[0]) in _WRAPPERS or _ASSIGN_RE.match(words[0])):
+    i = 0
+    while i < len(words):
+        m = _ASSIGN_RE.match(words[i])
+        if not m:
+            break
+        i += 1
+    words = [_cmd_word(w) for w in words[i:]]
+    while words and _base(words[0]) in _WRAPPERS:
         words = words[1:]
     if not words:
         return []
-    if "/" in words[0] and not _INTERPRETER_RE.match(os.path.basename(words[0])):
+    first = _base(words[0])
+    if "/" in words[0] and not _INTERPRETER_RE.match(first) and first not in _RUNNERS:
         return [words[0]]
-    for i, w in enumerate(words):
-        base = os.path.basename(w)
+    for k, w in enumerate(words):
+        base = _base(w)
         if base in _REMOTE_RUNNERS:
             return []
-        if _INTERPRETER_RE.match(base) or w in _RUNS_FILE:
-            operands = [a for a in words[i + 1:] if not a.startswith("-")]
-            return operands[:1] + [
-                a for a in operands[1:]
-                if os.path.splitext(a)[1][1:].lower() in _SCRIPT_EXTS]
-    return []
+        if _INTERPRETER_RE.match(base) or (base == "R" and k == 0) or w in _RUNS_FILE:
+            args = words[k + 1:]
+            modules: list = []
+            operands: list = []
+            j = 0
+            while j < len(args):
+                a = args[j]
+                if a == "-m" and j + 1 < len(args):
+                    modules.append(args[j + 1].rsplit(".", 1)[-1] + ".py")
+                    j += 2
+                    continue
+                if not a.startswith("-"):
+                    operands.append(a)
+                j += 1
+            if modules:
+                return modules + [a for a in operands if _has_script_ext(a)]
+            return operands[:1] + [a for a in operands[1:] if _has_script_ext(a)]
+    if first in _NEVER_RUNS:
+        return []
+    operands = [a for a in words[1:] if not a.startswith("-")]
+    if first == "make":
+        out = list(_MAKEFILES)
+        for j, a in enumerate(words[1:-1], 1):
+            if a in ("-f", "--file", "--makefile"):
+                out.append(words[j + 1])
+        return out
+    if first == "go" and operands[:1] == ["run"]:
+        return [a for a in operands[1:] if a.endswith(".go")]
+    return [a for a in operands if _has_script_ext(a)]
 
 
 def _blank_spans(text: str, spans: list) -> str:
@@ -1118,6 +1294,58 @@ def _apply_cd(cur: str | None, dest: str) -> str | None:
     return out
 
 
+class _EnvAt:
+    """The literal assignments in force just before segment `i`, read from a
+    per-variable history. A dict snapshot per segment was quadratic: 20,000
+    `A<n>=x;` assignments in one command copied a growing dict 20,000 times."""
+
+    __slots__ = ("hist", "i")
+
+    def __init__(self, hist: dict, i: int):
+        self.hist = hist
+        self.i = i
+
+    def get(self, name: str, default=None):
+        h = self.hist.get(name)
+        if not h:
+            return default
+        k = bisect.bisect_left(h[0], self.i) - 1
+        return h[1][k] if k >= 0 else default
+
+
+# Builtins whose operands are assignments that persist (`export F=a.go`).
+_DECLARE_WORDS = frozenset({"export", "local", "readonly", "declare", "typeset"})
+
+
+def _segment_assignments(words: list) -> list:
+    """`[(name, value | None)]` this segment leaves behind in the shell. None
+    means the variable now holds something we cannot know (`unset F`, `read F`,
+    `for F in …`).
+
+    A prefix assignment followed by a command (`F=a.go make`) only reaches that
+    command's environment; it does not persist, so it is not recorded."""
+    assignments = _leading_assignments(words)
+    if len(assignments) == len(words):
+        return assignments
+    words = words[len(assignments):]   # a prefix: judge the command it precedes
+    head = words[0]
+    if head in _DECLARE_WORDS:
+        out = []
+        for w in words[1:]:
+            m = _ASSIGN_RE.match(w)
+            if m:
+                out.append((m.group(1), m.group(2)))
+        return out
+    if head == "unset":
+        return [(w, None) for w in words[1:] if not w.startswith("-") and w.isidentifier()]
+    if head == "for" and len(words) > 1 and words[1].isidentifier():
+        return [(words[1], None)]
+    if "read" in words[:2] and head in ("read", "while", "until"):
+        k = words.index("read")
+        return [(w, None) for w in words[k + 1:] if not w.startswith("-") and w.isidentifier()]
+    return []
+
+
 def _segment_cwds(segments: list, cwd: str | None, heredocs: list):
     """Return (starts, cwds, envs) — the working directory, and the literal
     `VAR=value` assignments (see _expand_vars), in force at each segment.
@@ -1133,27 +1361,24 @@ def _segment_cwds(segments: list, cwd: str | None, heredocs: list):
     cwds: list = []
     envs: list = []
     hd_starts = [a for a, _ in heredocs]
-    env: dict = {}
+    hist: dict = {}          # name -> ([segment index], [value or None])
     eff = cwd
-    for words, start in segments:
+    for j, (words, start) in enumerate(segments):
         starts.append(start)
         cwds.append(eff)
-        envs.append(env)
+        envs.append(_EnvAt(hist, j))
         i = bisect.bisect_right(hd_starts, start) - 1
         if i >= 0 and start < heredocs[i][1]:
             continue                      # heredoc body — prose, not a command
-        assignments = _leading_assignments(words)
-        if assignments:
-            env = dict(env)               # copy-on-write: earlier envs[] stay as they were
-            for name, value in assignments:
-                expanded = _expand_vars(value, env)
-                if expanded is None:
-                    env.pop(name, None)   # now holds something we cannot know
-                else:
-                    env[name] = expanded
+        here = _EnvAt(hist, j + 1)        # sees this segment's own earlier assignments
+        for name, value in _segment_assignments(words):
+            expanded = _expand_vars(value, here) if value is not None else None
+            h = hist.setdefault(name, ([], []))
+            h[0].append(j)
+            h[1].append(expanded)
         dest = _cd_destination(words)
         if dest is not None:
-            expanded = _expand_vars(dest, env) if dest else dest
+            expanded = _expand_vars(dest, here) if dest else dest
             eff = _apply_cd(eff, expanded) if expanded is not None else None
     return starts, cwds, envs
 
@@ -1237,11 +1462,23 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
     shell_text = _blank_spans(text, heredocs)
     tokens = _lex(shell_text)
     runs = _heredoc_runs_code(tokens, shell_text, found)
-    code_bodies = [span for span, r in zip(heredocs, runs) if r]
     code_text = _blank_spans(text, [span for span, r in zip(heredocs, runs) if not r])
-    body_words = [(value, start + pos)
-                  for start, end in code_bodies
-                  for kind, value, pos in _lex(text[start:end]) if kind == "word"]
+    body_words: list = []
+    for (start, end), r in zip(heredocs, runs):
+        if not r:
+            continue
+        body_tokens = _lex(text[start:end])
+        # A shell body runs its own `cd`s (see Tier 2a″ below, which resolves
+        # its explicit targets through them). A word after the first one does
+        # not live where the heredoc was opened, so it is not guessed there.
+        stop = len(text)
+        if r == "shell":
+            for words, pos in _segments(body_tokens):
+                if _cd_destination(words) is not None:
+                    stop = pos
+                    break
+        body_words.extend((value, start + pos) for kind, value, pos in body_tokens
+                          if kind == "word" and pos < stop)
     segments = _segments(tokens)
     seg_starts, seg_cwds, seg_envs = _segment_cwds(segments, cwd, heredocs)
 
@@ -1504,7 +1741,8 @@ def main() -> None:
     # not captured — guessing would record a path with no file behind it — but
     # it is logged, one line per token, so the gap shows up in hook.log.
     for token in unresolved:
-        log_event("skip-unknown-var", token)
+        log_event("skip-unknown-var",
+                  token[:MAX_CANDIDATE_LEN].replace("\\", "\\\\").replace("\n", "\\n"))
     for candidate, candidate_cwd in candidates:
         # A relative path whose directory the command made unknowable (`cd
         # "$REPO"`) must be dropped. Falling back to the session cwd would

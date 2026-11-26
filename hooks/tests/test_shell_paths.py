@@ -705,6 +705,8 @@ class CdAwareResolutionTest(unittest.TestCase):
         self.assertIn(os.path.join(self.tmp, "svc-lib/manager/repo/rule.go"), got)
         self.assertIn(os.path.join(self.tmp, "after.go"), got)
         self.assertNotIn(os.path.join(self.tmp, "svc-lib/after.go"), got)
+        # Nor is the body's word guessed where the heredoc was opened.
+        self.assertNotIn(os.path.join(self.tmp, "manager/repo/rule.go"), got)
 
     def test_a_real_cd_still_applies_to_the_heredoc_it_opens(self):
         # The body is data, but the shell that opened it is not: candidates in
@@ -900,6 +902,81 @@ class HeredocFeederTest(unittest.TestCase):
         self.assertEqual([], [p for p, c in hook.paths_from_command(cmd, "/w") if "elsewhere" in p])
 
 
+class HeredocFeederEdgeTest(unittest.TestCase):
+    """Shapes found in review: a feeder hidden behind a subshell or a
+    substitution, bodies that list files, and files run one step removed."""
+
+    B = "open('x.json', 'w').write(s)"
+
+    def test_interpreter_behind_a_subshell_or_substitution(self):
+        for cmd in [
+            "(python3 - <<'EOF'\n%s\nEOF\n) | tail" % self.B,
+            "echo $(python3 - <<'EOF'\n%s\nEOF\n)" % self.B,
+            "OUT=$(python3 - <<'EOF'\n%s\nEOF\n)" % self.B,
+            "env FOO=1 python3 - <<'EOF'\n%s\nEOF" % self.B,
+        ]:
+            with self.subTest(cmd=cmd.splitlines()[0]):
+                self.assertIn("x.json", paths(cmd))
+
+    def test_bodies_that_list_files_for_a_writer(self):
+        for cmd in [
+            "while read f; do sed -i 's/a/b/' \"$f\"; done <<'EOF'\nf.go\nEOF",
+            "cat <<'EOF' | while read f; do gofmt -w \"$f\"; done\nf.go\nEOF",
+            "xargs sed -i 's/a/b/' <<'EOF'\nf.go\nEOF",
+            "cat <<'EOF' | xargs sed -i 's/a/b/'\nf.go\nEOF",
+        ]:
+            with self.subTest(cmd=cmd.splitlines()[0]):
+                self.assertIn("f.go", paths(cmd))
+        # tee's stdin is the content it writes, not a list of names.
+        self.assertEqual(["out.md"], paths("cat <<'EOF' | tee out.md\nf.go\nEOF"))
+
+    def test_detection_stops_at_the_first_real_command(self):
+        # `python3` here is an argument to cat, not the program run.
+        self.assertEqual(["out.md"],
+                         paths("cat notes python3 > out.md <<'EOF'\n%s\nEOF" % self.B))
+        self.assertEqual(["x.json"], paths("timeout 30s python3 - <<'EOF'\n%s\nEOF" % self.B))
+        self.assertEqual(["x.json"], paths("sudo -u svc python3 - <<'EOF'\n%s\nEOF" % self.B))
+
+    def test_shell_with_a_script_operand_is_not_scanned_as_shell(self):
+        # The body is deploy.sh's stdin, not shell we can read.
+        self.assertEqual([], paths("bash deploy.sh <<'EOF'\nrm > out.txt\nEOF"))
+        self.assertEqual(["f.go"], paths("bash <<'EOF'\nsed -i 's/a/b/' f.go\nEOF"))
+
+    def test_bare_r_counts_only_as_the_command(self):
+        self.assertEqual(["x.json"], paths("R --vanilla <<'EOF'\n%s\nEOF" % self.B))
+        self.assertEqual(["out.md"], paths("echo R > out.md <<'EOF'\n%s\nEOF" % self.B))
+
+    def test_written_then_run_one_step_removed(self):
+        for write, run in [
+            ("cat > g.py", "uv run g.py"),
+            ("cat > main.go", "go run main.go"),
+            ("cat > g.py", "python3 -m g"),
+            ("cat > g.ts", "npx tsx g.ts"),
+            ("cat > Makefile", "make"),
+        ]:
+            with self.subTest(run=run):
+                cmd = "%s <<'EOF'\n%s\nEOF\n%s" % (write, self.B, run)
+                self.assertIn("x.json", paths(cmd))
+        cmd = "cat <<'EOF' | tee g.py >/dev/null\n%s\nEOF\npython3 g.py" % self.B
+        self.assertIn("x.json", paths(cmd))
+        # Staging or reading the file does not run it.
+        for after in ["git add g.py", "cat g.py", "chmod +x g.py"]:
+            with self.subTest(after=after):
+                cmd = "cat > g.py <<'EOF'\n%s\nEOF\n%s" % (self.B, after)
+                self.assertNotIn("x.json", paths(cmd))
+
+    def test_two_heredocs_on_one_line(self):
+        for cmd in [
+            "cat > a.md <<A; python3 - <<B\nmention docs/z.md\nA\n%s\nB" % self.B,
+            "python3 - <<B; cat > a.md <<A\n%s\nB\nmention docs/z.md\nA" % self.B,
+        ]:
+            with self.subTest(cmd=cmd.splitlines()[0]):
+                got = paths(cmd)
+                self.assertIn("a.md", got)
+                self.assertIn("x.json", got)
+                self.assertNotIn("docs/z.md", got)
+
+
 class UnresolvedVariableTest(unittest.TestCase):
     """An explicit target whose variable cannot be expanded is reported, not
     guessed; a literal assignment earlier in the command is substituted."""
@@ -917,6 +994,32 @@ class UnresolvedVariableTest(unittest.TestCase):
         cands, unresolved = hook.scan_targets("F=gen/a.go\nsed -i 's/a/b/' \"$F\"", "/w")
         self.assertIn("gen/a.go", [p for p, _ in cands])
         self.assertEqual([], unresolved)
+
+    def test_variable_scope(self):
+        cases = [
+            ("export F=a.go; sed -i s/a/b/ \"$F\"", "a.go", []),
+            ("local F=a.go; sed -i s/a/b/ \"$F\"", "a.go", []),
+            ("F=a.go; unset F; sed -i s/a/b/ \"$F\"", None, ["$F"]),
+            ("F=a.go cmd; sed -i s/a/b/ \"$F\"", None, ["$F"]),
+            ("F=a.go; read F; sed -i s/a/b/ \"$F\"", None, ["$F"]),
+            ("F=a.go; for F in b c; do sed -i s/a/b/ \"$F\"; done", None, ["$F"]),
+        ]
+        for cmd, want, unresolved in cases:
+            with self.subTest(cmd=cmd):
+                _c, got_unresolved = hook.scan_targets(cmd, "/w")
+                self.assertEqual(unresolved, got_unresolved)
+                if want:
+                    self.assertIn(want, [p for p, _ in _c])
+
+    def test_many_assignments_stay_off_the_hot_path(self):
+        # A dict snapshot per segment copied a growing env 20,000 times.
+        import time
+        cmd = "".join("A%d=x;" % i for i in range(20000))[: hook.MAX_COMMAND_CHARS - 20]
+        cmd += "\nsed -i s/a/b/ f.go"
+        start = time.perf_counter()
+        hook.paths_from_command(cmd, "/w")
+        elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, 0.09, "env tracking went quadratic: %.3fs" % elapsed)
 
     def test_speculative_words_are_never_reported(self):
         _c, unresolved = hook.scan_targets(
@@ -1078,6 +1181,13 @@ class ShellCaptureEndToEndTest(unittest.TestCase):
         self.assertEqual(1, len(lines), lines)
         self.assertTrue(lines[0].endswith("skip-unknown-var $T/x"), lines[0])
         self.assertNotIn("captured", self.log())
+
+    def test_unknown_variable_log_line_is_bounded_and_one_line(self):
+        self.run_bash('echo x > "$D/a\nb' + "c" * 5000 + '"')
+        lines = [l for l in self.log().splitlines() if "skip-unknown-var" in l]
+        self.assertEqual(1, len(lines), lines)
+        self.assertIn("$D/a\\nb", lines[0])
+        self.assertLess(len(lines[0]), 600)
 
     def test_empty_bash_payload_fails_open(self):
         payload = json.dumps({
