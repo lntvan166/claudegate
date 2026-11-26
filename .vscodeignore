@@ -64,3 +64,4 @@ manual-test-seed.py
 test.txt
 out/integration/**
 dev/**
+.playwright-mcp/**
