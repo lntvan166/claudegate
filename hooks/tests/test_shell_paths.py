@@ -1340,6 +1340,72 @@ class NamedWriteTest(unittest.TestCase):
         self.assertEqual(["out.json"], self.names("curl -o out.json https://x && echo see notes.md"))
 
 
+class ManifestTest(unittest.TestCase):
+    """Package commands rewrite their manifest and lockfile without naming
+    them. Only the files that already exist are captured."""
+
+    ALL = ("go.mod", "go.sum", "package.json", "package-lock.json", "pnpm-lock.yaml",
+           "yarn.lock", "bun.lock", "Cargo.toml", "Cargo.lock", "pyproject.toml",
+           "uv.lock", "poetry.lock")
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        for f in self.ALL:
+            open(os.path.join(self.tmp, f), "w").close()
+        os.makedirs(os.path.join(self.tmp, "web"))
+        open(os.path.join(self.tmp, "web", "package.json"), "w").close()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def names(self, cmd):
+        return [os.path.relpath(p, self.tmp) for p, _ in hook.scan_full(cmd, self.tmp)["candidates"]]
+
+    def test_each_manifest_command(self):
+        cases = [
+            ("go mod tidy", ["go.mod", "go.sum"]),
+            ("go get example.com/x@v1.2.3", ["go.mod", "go.sum"]),
+            ("npm install", ["package.json", "package-lock.json"]),
+            ("npm i -D left-pad", ["package.json", "package-lock.json"]),
+            ("npm uninstall left-pad", ["package.json", "package-lock.json"]),
+            ("pnpm add zod", ["package.json", "pnpm-lock.yaml"]),
+            ("yarn add zod", ["package.json", "yarn.lock"]),
+            ("yarn", ["package.json", "yarn.lock"]),
+            ("bun add zod", ["package.json", "bun.lock"]),
+            ("cargo add serde", ["Cargo.toml", "Cargo.lock"]),
+            ("uv add httpx", ["pyproject.toml", "uv.lock"]),
+            ("uv sync", ["pyproject.toml", "uv.lock"]),
+            ("poetry lock", ["pyproject.toml", "poetry.lock"]),
+        ]
+        for cmd, want in cases:
+            with self.subTest(cmd=cmd):
+                self.assertEqual(want, self.names(cmd))
+
+    def test_read_only_and_global_commands_capture_nothing(self):
+        for cmd in ["go build ./...", "go mod download", "npm test", "npm run build",
+                    "npm ci --dry-run", "npm i -g typescript", "cargo build", "uv run pytest",
+                    "poetry run pytest", "yarn test"]:
+            with self.subTest(cmd=cmd):
+                self.assertEqual([], self.names(cmd))
+
+    def test_only_existing_files(self):
+        os.remove(os.path.join(self.tmp, "go.sum"))
+        os.remove(os.path.join(self.tmp, "bun.lock"))
+        self.assertEqual(["go.mod"], self.names("go mod tidy"))
+        self.assertEqual(["package.json"], self.names("bun install"))
+
+    def test_project_directory_options(self):
+        for cmd in ["npm --prefix web install", "npm install --prefix web", "npm -C web i",
+                    "yarn --cwd web add zod", "pnpm --dir=web add zod", "cd web && npm install"]:
+            with self.subTest(cmd=cmd):
+                self.assertEqual([os.path.join("web", "package.json")], self.names(cmd))
+        self.assertEqual(["Cargo.toml", "Cargo.lock"],
+                         self.names("cargo add serde --manifest-path Cargo.toml"))
+
+    def test_manifest_commands_do_not_switch_on_speculation(self):
+        self.assertEqual(["go.mod", "go.sum"], self.names("go mod tidy && echo package.json"))
+
+
 class ShellCaptureEndToEndTest(unittest.TestCase):
     """A real `Bash` payload on stdin, isolated HOME, registered workspace."""
 

@@ -1020,6 +1020,68 @@ def _named_writes(words: list):
     return None
 
 
+# Package commands that rewrite their manifest and lockfile without naming
+# them: tool -> (subcommands, files). Only files that already exist are
+# captured; a lockfile the command creates is left alone.
+_MANIFEST_COMMANDS = {
+    "npm": (frozenset({"install", "i", "add", "remove", "uninstall", "update", "rm", "un", "up", "r"}),
+            ("package.json", "package-lock.json")),
+    "pnpm": (frozenset({"add", "remove", "install", "update", "i", "rm", "up", "un", "uninstall"}),
+             ("package.json", "pnpm-lock.yaml")),
+    "yarn": (frozenset({"add", "remove", "install", "upgrade"}),
+             ("package.json", "yarn.lock")),
+    "bun": (frozenset({"add", "remove", "install", "i", "rm"}),
+            ("package.json", "bun.lockb", "bun.lock")),
+    "cargo": (frozenset({"add", "remove", "update", "rm"}),
+              ("Cargo.toml", "Cargo.lock")),
+    "uv": (frozenset({"add", "remove", "lock", "sync"}),
+           ("pyproject.toml", "uv.lock")),
+    "poetry": (frozenset({"add", "remove", "lock"}),
+               ("pyproject.toml", "poetry.lock")),
+}
+# Options that move the project directory: `npm --prefix X`, `pnpm -C X`,
+# `yarn --cwd X`, `uv --directory X`, `go -C X`.
+_PROJECT_DIR_FLAGS = frozenset({"--prefix", "-C", "--cwd", "--dir", "--directory", "--project"})
+
+
+def _manifest_files(words: list):
+    """`(project_dir or None, files)` for a package command that rewrites its
+    manifest (`go mod tidy`, `npm install`, `cargo add`, …), else None.
+    `project_dir` None means the segment's own directory."""
+    words = _strip_prefix(words)
+    if not words:
+        return None
+    name = os.path.basename(words[0])
+    if name != "go" and name not in _MANIFEST_COMMANDS:
+        return None
+    project = None
+    operands: list = []
+    args = words[1:]
+    i = 0
+    while i < len(args):
+        a = args[i]
+        flag, eq, val = a.partition("=")
+        if flag in _PROJECT_DIR_FLAGS or flag == "--manifest-path":
+            value = val if eq else (args[i + 1] if i + 1 < len(args) else None)
+            if not eq:
+                i += 1
+            if value:
+                project = (os.path.dirname(value) or ".") if flag == "--manifest-path" else value
+        elif a in ("-g", "--global", "--location=global"):
+            return None                     # a global install touches no project
+        elif not a.startswith("-"):
+            operands.append(a)
+        i += 1
+    if name == "go":
+        if operands[:2] == ["mod", "tidy"] or operands[:1] == ["get"]:
+            return project, ("go.mod", "go.sum")
+        return None
+    subs, files = _MANIFEST_COMMANDS[name]
+    if (operands[:1] and operands[0] in subs) or (name == "yarn" and not operands):
+        return project, files
+    return None
+
+
 def _touches_git_dir(path: str) -> bool:
     return ".git" in path.replace("\\", "/").split("/")
 
@@ -2012,6 +2074,28 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
                     _note(extra, "skip-link-replace", t)
                     continue
             add(tok, False, seg_cwd)
+
+    # Manifests a package command rewrites without naming them: `go mod tidy`
+    # -> go.mod, go.sum; `npm install` -> package.json, package-lock.json.
+    # Only those that exist now, in the project directory the command uses.
+    for (segment, _start), seg_cwd, seg_env in zip(segments, seg_cwds, seg_envs):
+        manifest = _manifest_files(segment)
+        if manifest is None:
+            continue
+        quiet_write = True
+        project, files = manifest
+        if project is not None:
+            project = explicit(project, seg_env)
+            if project is None:
+                continue
+        if project is None or not os.path.isabs(project):
+            if not seg_cwd:
+                continue
+            project = os.path.join(seg_cwd, project or "")
+        for f in files:
+            path = os.path.normpath(os.path.join(project, f))
+            if os.path.isfile(path):
+                add(path, False, seg_cwd)
 
     # Tier 1/2b — known in-place writer tools and their arguments.
     for (segment, start), seg_cwd, seg_env in zip(segments, seg_cwds, seg_envs):
