@@ -288,6 +288,22 @@ class AuditClassifyTest(AuditTestBase):
         line = self.one()
         self.assertEqual((line["captured"], line["missed"], line["phantom"]), (1, [], []))
 
+    def test_already_pending_absent_before_is_nothing(self):
+        # Deleted by an earlier call, named again: its directory is old.
+        os.makedirs(os.path.join(self.root, "d"))
+        os.utime(os.path.join(self.root, "d"), (self.old, self.old))
+        gone = os.path.join(self.root, "d", "gone.go")
+        self.record(already=[gone])
+        audit.run(self.payload())
+        self.assertEqual(self.lines(), [])
+
+    def test_already_pending_deleted_now_is_captured(self):
+        os.makedirs(os.path.join(self.root, "d"))
+        gone = os.path.join(self.root, "d", "gone.go")   # dir mtime is now
+        self.record(already=[gone])
+        audit.run(self.payload())
+        self.assertEqual(self.one()["captured"], 1)
+
     def test_latin1_text_out_of_scope(self):
         self.put("notes.txt", "caf\xe9 au lait\n".encode("latin-1"), changed=True)
         self.record()
@@ -354,6 +370,10 @@ class AuditClassifyTest(AuditTestBase):
             ("curl -H 'Authorization: tok123' https://x", ["tok123"]),
             ("curl -H 'X: Basic dXNlcjpw' https://x", ["dXNlcjpw"]),
             ("git clone https://bob:hunter2@host/p", ["hunter2"]),
+            ("curl -H 'Authorization: token ghp_X' https://api", ["ghp_X"]),
+            ("curl -u admin:pw https://x", ["admin:pw"]),
+            ("curl --user=admin:pw https://x", ["admin:pw"]),
+            ('curl -H "X-Api-Key: S" https://x', ["S\""]),
             ("mysql -uroot -pS3cret db < dump.sql", ["S3cret"]),
             ("tool --password=pw1 --token=tk2 --api-key=ak3 --secret=sc4",
              ["pw1", "tk2", "ak3", "sc4"]),
@@ -510,18 +530,36 @@ class AuditProcessTest(AuditTestBase):
                            text=True, capture_output=True, env=env)
         elapsed = time.monotonic() - t0
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
-        self.assertLess(elapsed, 1.8)
+        self.assertLess(elapsed, 1.0)          # git is capped at 300 ms
         line = self.one()
         self.assertEqual((line["uncertain"], line["missed"], line["truncated"]), ([a], [], True))
 
-    def test_check_ignore_128_is_uncertain(self):
+    def run_with(self, env):
+        r = subprocess.run([sys.executable, AUDIT], input=json.dumps(self.payload()),
+                           text=True, capture_output=True, env=env)
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        return self.one()
+
+    def test_implicit_with_hanging_git_never_uncertain(self):
+        env = self.fake_git("exec sleep 2")
+        self.put("a.go", changed=True)
+        self.record(implicit=True)
+        line = self.run_with(env)
+        self.assertEqual((line["uncertain"], line["missed"], line["implicit"]), ([], [], 1))
+
+    def test_binary_with_hanging_git_out_of_scope(self):
+        env = self.fake_git("exec sleep 2")
+        self.put("img.bin", b"\x00\x01\x02", changed=True)
+        self.record()
+        line = self.run_with(env)
+        self.assertEqual((line["outOfScope"], line["uncertain"]), (1, []))
+
+    def test_check_ignore_128_is_like_no_git(self):
         env = self.fake_git("exit 128")
         a = self.put("a.go", changed=True)
         self.record()
-        subprocess.run([sys.executable, AUDIT], input=json.dumps(self.payload()),
-                       text=True, capture_output=True, env=env)
-        line = self.one()
-        self.assertEqual((line["uncertain"], line["missed"]), ([a], []))
+        line = self.run_with(env)
+        self.assertEqual((line["missed"], line["uncertain"], line["truncated"]), ([a], [], False))
 
 
 if __name__ == "__main__":

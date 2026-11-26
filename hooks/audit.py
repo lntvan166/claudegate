@@ -17,7 +17,7 @@ Classes of a changed file, in the order they are tested:
   implicit    the command contains an implicit op (git pull, make, ...)
   missed      none of the above; `uncertain` instead when the call ran longer
               than UNCERTAIN_AFTER_MS (the user may have saved meanwhile), or
-              when git could not answer in time
+              when git ran out of time for it
 A newly captured path that did not change is a `phantom`. An already-pending
 one that did not change is nothing: naming it cost no session write.
 
@@ -49,7 +49,7 @@ NESTED_ROOTS_CAP = 5            # registered roots inside cwd also scanned
 DEADLINE_EVERY = 256            # entries between deadline checks
 ROTATE_BYTES = 5_000_000
 COMMAND_HEAD = 120
-GIT_TIMEOUT_S = 1.0
+GIT_TIMEOUT_S = 0.3             # cap per git check-ignore call
 BINARY_SNIFF = 8192
 _TOOL_USE_ID_RE = re.compile(r"[A-Za-z0-9_.-]{1,128}")
 
@@ -305,7 +305,8 @@ def git_ignored(paths: list, deadline: float = None):
             unchecked.update(files)     # timed out, or could not run
             continue
         if r.returncode not in (0, 1):
-            unchecked.update(files)     # 128: git could not tell
+            # 128 (not a repo to git, a safe.directory refusal, ...): as if
+            # there were no git. Nothing is ignored; the prune list applies.
             continue
         back = dict(zip(rels, files))
         for rel in r.stdout.split("\0"):
@@ -401,6 +402,19 @@ class Sessions:
 
 # ── classify ─────────────────────────────────────────────────────────────────
 
+def _dir_changed(d: str, since_ns: int) -> bool:
+    """Whether the nearest existing ancestor of `d` changed in the window
+    (a deletion updates its directory's mtime)."""
+    while True:
+        try:
+            return os.lstat(d).st_mtime_ns >= since_ns
+        except OSError:
+            parent = os.path.dirname(d)
+            if parent == d:
+                return False
+            d = parent
+
+
 def innermost_root(path: str, roots: list):
     np = _norm(path)
     best = None
@@ -448,7 +462,10 @@ def classify(changed: list, record: dict, roots: list, since_ms: int, duration_m
             return os.lstat(p).st_mtime_ns >= since_ns
         except FileNotFoundError:
             if not new:
-                return True             # pending before, gone now: deleted
+                # Pending before, gone now: deleted by this call only if its
+                # directory changed in the window. Named again after an
+                # earlier deletion, it is nothing new.
+                return _dir_changed(os.path.dirname(p), since_ns)
             # Gone after the call: a deletion, unless the capture recorded a
             # file that never existed (originalContent null) and still doesn't.
             e = sessions.entry(p)
@@ -491,9 +508,6 @@ def classify(changed: list, record: dict, roots: list, since_ms: int, duration_m
         if p in ignored:
             b["outOfScope"] += 1
             continue
-        if p in unchecked:
-            b["uncertain"].append(p)
-            continue
         try:
             too_large = os.lstat(p).st_size > MAX_CAPTURE_BYTES
         except OSError:
@@ -504,7 +518,8 @@ def classify(changed: list, record: dict, roots: list, since_ms: int, duration_m
             b["outOfScope"] += 1
         elif implicit:
             b["implicit"] += 1
-        elif long_call:
+        elif long_call or p in unchecked:
+            # Git ran out of time for it: it may be ignored, so not a miss.
             b["uncertain"].append(p)
         else:
             b["missed"].append(p)
@@ -520,8 +535,10 @@ def classify(changed: list, record: dict, roots: list, since_ms: int, duration_m
 _SECRET_NAME = r"[A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY)[A-Za-z0-9_]*"
 _VALUE = r"""(?:"[^"]*"|'[^']*'|[^\s'"]+)"""
 _REDACTIONS = [
+    (re.compile(r"(?i)(Authorization:\s*)[^'\"\n]+"), r"\1***"),
+    (re.compile(r"(?i)([\w-]*(?:token|key|secret|auth)[\w-]*:\s*)[^'\"\n]+"), r"\1***"),
     (re.compile(r"(?i)\b(Bearer|Basic)(\s+)[^\s'\"]+"), r"\1\2***"),
-    (re.compile(r"(?i)(Authorization:\s*)(?!(?:Bearer|Basic)\b)[^\s'\"]+"), r"\1***"),
+    (re.compile(r"(?i)((?:^|\s)(?:-u|--user)[ =])\S+:\S+"), r"\1***"),
     (re.compile(r"(?i)(--(?:password|token|api-key|secret)=)" + _VALUE), r"\1***"),
     (re.compile(r"(?i)\b(" + _SECRET_NAME + r")=" + _VALUE), r"\1=***"),
     (re.compile(r"(\b[A-Za-z][A-Za-z0-9+.-]*://)[^\s/@'\"]+@"), r"\1***@"),
