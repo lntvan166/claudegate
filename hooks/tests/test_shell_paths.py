@@ -141,7 +141,7 @@ class PathExtractionTest(unittest.TestCase):
         ("cat > f <<EOF\nbody\nEOF", ["f"]),
         (CAT_HEREDOC, ["notes/out.txt"]),
         ("go test ./... 2>&1 | tee out.log", ["out.log"]),
-        ("make build &> build.log", ["build.log"]),
+        ("go build ./... &> build.log", ["build.log"]),
         ("echo x 2> err.txt", ["err.txt"]),
         # --- in-place tools ----------------------------------------------
         ("sed -i 's/old/new/' src/app.go", ["src/app.go"]),
@@ -504,7 +504,7 @@ class RedirectionSourceTest(unittest.TestCase):
     def test_real_redirections_still_found(self):
         self.assertEqual(paths("echo x > a.txt"), ["a.txt"])
         self.assertEqual(paths("echo x >> a.txt 2>&1"), ["a.txt"])
-        self.assertEqual(paths("make 2> err.log"), ["err.log"])
+        self.assertEqual(paths("go vet 2> err.log"), ["err.log"])
         self.assertEqual(paths("cmd &> all.log"), ["all.log"])
         self.assertEqual(paths("echo x >a.txt"), ["a.txt"])
         self.assertEqual(paths('echo x > "my file.txt"'), ["my file.txt"])
@@ -959,7 +959,7 @@ class HeredocFeederEdgeTest(unittest.TestCase):
         self.assertEqual(["f.go"], paths("bash -s 2>&1 <<'EOF'\nsed -i s/a/b/ f.go\nEOF"))
 
     def test_descriptor_duplication_leaves_other_operators_alone(self):
-        self.assertEqual(["log"], paths("make &>log"))
+        self.assertEqual(["log"], paths("go build &>log"))
         self.assertEqual(["out.txt"], paths("cmd 2>/dev/null > out.txt"))
         self.assertEqual(["out.txt"], paths("cmd 2>&1 > out.txt"))
         self.assertEqual(["out.txt"], paths("echo x >&2 && echo y > out.txt"))
@@ -982,13 +982,15 @@ class HeredocFeederEdgeTest(unittest.TestCase):
             ("cat > main.go", "go run main.go"),
             ("cat > g.py", "python3 -m g"),
             ("cat > g.ts", "npx tsx g.ts"),
-            ("cat > Makefile", "make"),
         ]:
             with self.subTest(run=run):
                 cmd = "%s <<'EOF'\n%s\nEOF\n%s" % (write, self.B, run)
                 self.assertIn("x.json", paths(cmd))
         cmd = "cat <<'EOF' | tee g.py >/dev/null\n%s\nEOF\npython3 g.py" % self.B
         self.assertIn("x.json", paths(cmd))
+        # `make` is codegen: the command's speculative pass is off (C1).
+        self.assertEqual(["Makefile"],
+                         paths("cat > Makefile <<'EOF'\n%s\nEOF\nmake" % self.B))
         # Staging or reading the file does not run it.
         for after in ["git add g.py", "cat g.py", "chmod +x g.py"]:
             with self.subTest(after=after):
@@ -1174,6 +1176,65 @@ class ImplicitOperationTest(unittest.TestCase):
         self.assertEqual(["pkg/a.go"], paths("git restore pkg/a.go"))
         self.assertEqual(["fix.patch"], paths("git apply fix.patch"))
         self.assertEqual([], hook.scan_full("git apply fix.patch", "/w")["notes"])
+
+    def test_no_speculation_at_all_in_an_implicit_command(self):
+        # C1: once a command pulls, generates or extracts, its words may name
+        # what that rewrote; only explicit targets elsewhere still count.
+        tmp = os.path.realpath(tempfile.mkdtemp())
+        try:
+            for rel in ("src/app.ts", "internal/gen/models.go"):
+                os.makedirs(os.path.dirname(os.path.join(tmp, rel)), exist_ok=True)
+                open(os.path.join(tmp, rel), "w").close()
+            for cmd in [
+                "make gen OUT=internal/gen/models.go > /tmp/g.log 2>&1",
+                "buf generate internal/gen/models.go 2>&1 | tail -3 > /tmp/b.txt",
+                "git stash pop 2>&1 | tee /tmp/s.log; git diff --stat src/app.ts",
+                "git pull > /tmp/p.log; git log -- src/app.ts",
+                "git pull && python3 - <<'PY'\nopen('src/app.ts','w').write(s)\nPY",
+                "git pull && python3 -c \"open('src/app.ts','w')\"",
+            ]:
+                with self.subTest(cmd=cmd.splitlines()[0]):
+                    got = [p for p, _ in hook.scan_full(cmd, tmp)["candidates"]]
+                    self.assertFalse([p for p in got if not p.startswith("/tmp/") or p == "/tmp/g.log"], got)
+            # The explicit target of another segment is still captured.
+            self.assertEqual(["src/app.ts"],
+                             [p for p, _ in hook.scan_full("git pull && sed -i s/a/b/ src/app.ts", tmp)["candidates"]])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_more_implicit_shapes(self):
+        for cmd, label in [("git checkout -- .", "git checkout"), ("git checkout -- src/", "git checkout"),
+                           ("git restore .", "git restore"), ("git restore --source=HEAD~3 .", "git restore"),
+                           ("git stash", "git stash"), ("git stash -u", "git stash"),
+                           ("git clean -fdx", "git clean"), ("git am x.patch", "git am"),
+                           ("npm run gen", "npm run gen"), ("npm run generate:api", "npm run generate:api"),
+                           ("timeout 60 buf generate", "buf generate"), ("npx prisma generate", "prisma generate"),
+                           ("nice -n 5 make gen", "make gen"), ("git checkout release/1.x", "git checkout"),
+                           ("git checkout feature/x.go", "git checkout")]:
+            with self.subTest(cmd=cmd):
+                full = hook.scan_full(cmd, "/nonexistent-dir")
+                self.assertEqual([], full["candidates"])
+                self.assertEqual([("skip-implicit", label)], full["notes"])
+        for cmd in ["git stash list", "git stash show -p", "npm run build"]:
+            with self.subTest(cmd=cmd):
+                self.assertEqual([], hook.scan_full(cmd, "/w")["notes"])
+
+    def test_checkout_of_an_existing_file_is_a_restore(self):
+        tmp = os.path.realpath(tempfile.mkdtemp())
+        try:
+            open(os.path.join(tmp, "a.go"), "w").close()
+            full = hook.scan_full("git checkout a.go", tmp)
+            self.assertEqual([("a.go", tmp)], full["candidates"])
+            self.assertEqual([], full["notes"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_unfollowable_deletions_are_logged(self):
+        for cmd, label in [("find . -name '*.o' -delete", "find -delete"),
+                           ("find . -name x -exec rm {} +", "find -exec rm"),
+                           ("xargs rm < list.txt", "xargs rm")]:
+            with self.subTest(cmd=cmd):
+                self.assertIn(("skip-unsupported", label), hook.scan_full(cmd, "/w")["notes"])
 
     def test_tar_create_is_not_an_extract(self):
         self.assertEqual([], hook.scan_full("tar -czf a.tgz src", "/w")["notes"])

@@ -753,10 +753,29 @@ _IMPLICIT_GIT = frozenset({"pull", "merge", "rebase", "cherry-pick", "revert", "
 _CODEGEN = frozenset({"protoc", "sqlc", "swag", "buf", "make", "gmake"})
 
 
-def _implicit_op(words: list):
+# Generators that rewrite files they do not name on the command line.
+_CODEGEN_EXTRA = frozenset({"mockgen", "stringer", "wire", "oapi-codegen", "ent", "gqlgen",
+                            "openapi-generator", "openapi-generator-cli", "prisma", "drizzle-kit"})
+# Runners in front of a generator: `timeout 60 buf generate`, `npx prisma generate`.
+_CODEGEN_RUNNERS = frozenset({"timeout", "nice", "ionice", "stdbuf", "npx", "pnpx", "bunx",
+                              "uvx", "time", "nohup"})
+# A pathspec naming the whole tree, or a whole directory: `git checkout -- .`.
+_WHOLE_TREE = frozenset({".", "./", ":/", ":", "*"})
+
+
+def _whole_tree(a: str) -> bool:
+    return a in _WHOLE_TREE or a.endswith("/")
+
+
+def _implicit_op(words: list, cwd: str | None = None):
     """A short label (`git pull`, `make gen`, `tar -xzf`) when this segment is a
-    never-capture operation, else None."""
+    never-capture operation, else None. `cwd` lets `git checkout X` be told
+    apart: X that is not an existing path is a branch."""
     words = _strip_prefix(words)
+    while words and _base(words[0]) in _CODEGEN_RUNNERS:
+        words = words[1:]
+        while words and (words[0].startswith("-") or _DURATION_RE.match(words[0])):
+            words = words[1:]
     if not words:
         return None
     name = _base(words[0])
@@ -768,15 +787,35 @@ def _implicit_op(words: list):
         if idx >= len(args):
             return None
         sub, rest = args[idx], args[idx + 1:]
-        hit = (sub in _IMPLICIT_GIT
-               or (sub == "stash" and rest[:1] in (["pop"], ["apply"]))
-               or (sub == "reset" and "--hard" in rest)
-               or (sub == "checkout" and "--" not in rest
-                   and not any(not a.startswith("-") and _pathspec_shaped(a) for a in rest)))
+        operands = [a for a in rest if not a.startswith("-") and a != "--"]
+        if sub in ("checkout", "restore"):
+            after = rest[rest.index("--") + 1:] if "--" in rest else None
+            paths = after if after is not None else operands
+            if any(_whole_tree(a) for a in paths):
+                return "git " + sub
+            if sub == "checkout" and after is None:
+                # No `--`: git takes X as a ref unless it is a path. Anything
+                # we cannot show to be a file is a branch switch.
+                def is_path(a):
+                    if not _pathspec_shaped(a):
+                        return False
+                    if cwd is None and not os.path.isabs(a):
+                        return False
+                    return os.path.lexists(a if os.path.isabs(a) else os.path.join(cwd, a))
+                if not operands or not all(is_path(a) for a in operands):
+                    return "git checkout"
+            return None
+        hit = (sub in _IMPLICIT_GIT or sub in ("clean", "am")
+               or (sub == "stash" and rest[:1] not in (["list"], ["show"], ["drop"], ["clear"]))
+               or (sub == "reset" and "--hard" in rest))
         return "git " + sub if hit else None
     if name == "go":
         return "go generate" if args[:1] == ["generate"] else None
-    if name in _CODEGEN or name == "unzip":
+    if name in ("npm", "pnpm", "yarn", "bun"):
+        script = args[1] if args[:1] == ["run"] and len(args) > 1 else (
+            args[0] if args and name in ("yarn", "pnpm") else "")
+        return (name + " run " + script) if script.startswith("gen") else None
+    if name in _CODEGEN or name in _CODEGEN_EXTRA or name == "unzip":
         return (name + " " + args[0]) if args else name
     if name == "tar" and args:
         first = args[0]
@@ -784,6 +823,24 @@ def _implicit_op(words: list):
                     or any(re.match(r"^-[a-zA-Z]*x", a) or a in ("--extract", "--get")
                            for a in args))
         return ("tar " + first) if extracts else None
+    return None
+
+
+def _unsupported_delete(words: list):
+    """A deletion whose files we cannot name: `find … -delete`, `xargs rm`."""
+    for k, w in enumerate(words[:-1]):
+        if _base(w) == "xargs" and any(_base(x) in ("rm", "unlink") for x in words[k + 1:]):
+            return "xargs rm"
+    words = _strip_prefix(words)
+    if not words:
+        return None
+    name = _base(words[0])
+    if name == "find" and any(a in ("-delete",) for a in words[1:]):
+        return "find -delete"
+    if name == "find" and "-exec" in words and any(_base(w) == "rm" for w in words):
+        return "find -exec rm"
+    if name == "xargs" and any(_base(w) in ("rm", "unlink") for w in words[1:]):
+        return "xargs rm"
     return None
 
 
@@ -818,6 +875,11 @@ def _deletion(words: list):
             return None
         args = args[idx + 1:]
         if "--cached" in args:
+            return None
+    elif name == "unlink":
+        return (False, args[:1]) if args else None
+    elif name == "shred":
+        if not any(a in ("-u", "--remove") or re.match(r"^-[a-zA-Z]*u", a) for a in args):
             return None
     elif name != "rm":
         return None
@@ -1996,6 +2058,21 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
         if len(ordered) < MAX_CANDIDATES:
             ordered.append((tok, tok_cwd))
 
+    # Never-capture operations: `git pull`, `make gen`, `tar -xzf`. Logged once
+    # per command, never a candidate. The command's explicit targets elsewhere
+    # still count; its speculative pass does not run at all (see Tier 2c).
+    implicit_segs: set = set()
+    for k, ((segment, _start), seg_cwd) in enumerate(zip(segments, seg_cwds)):
+        label = _implicit_op(segment, seg_cwd)
+        if label:
+            implicit_segs.add(k)
+            extra["implicit"] = True
+            _note(extra, "skip-implicit", label, once=True)
+        else:
+            unsupported = _unsupported_delete(segment)
+            if unsupported:
+                _note(extra, "skip-unsupported", unsupported, once=True)
+
     # Tier 2a — explicit redirection targets (write targets by definition, so
     # they need no path shape: `cat > f <<EOF` names `f`).
     #
@@ -2010,15 +2087,9 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
         if not _is_device(target):
             may_write = True
             i = at(pos)
+            if i in implicit_segs:
+                continue                  # `make gen > out.go`: the generator's output
             add(target, False, cwd_at(pos), seg_envs[i] if i >= 0 else None)
-
-    # Never-capture operations: `git pull`, `make gen`, `tar -xzf`. Logged once
-    # per command, never a candidate. Anything else in the command still counts.
-    for segment, _start in segments:
-        label = _implicit_op(segment)
-        if label:
-            _note(extra, "skip-implicit", label, once=True)
-            break
 
     # Writes that name their files but must not switch on the speculative
     # pass (Tier 2c) for the rest of the command: `rm a.go` is not a reason to
@@ -2145,7 +2216,9 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
                 add(path, False, seg_cwd)
 
     # Tier 1/2b — known in-place writer tools and their arguments.
-    for (segment, start), seg_cwd, seg_env in zip(segments, seg_cwds, seg_envs):
+    for k, ((segment, start), seg_cwd, seg_env) in enumerate(zip(segments, seg_cwds, seg_envs)):
+        if k in implicit_segs:
+            continue                      # `git checkout release/1.x` names a ref
         targets = _tool_targets(segment)
         if targets is None:
             continue
@@ -2214,7 +2287,12 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
     # Not inside a `sh -c` script (depth > 0): there the words are mostly the
     # program being run (`sh -c './run_all.sh > out.log'`), and only the
     # explicit targets above are worth taking.
-    if may_write and _depth == 0:
+    #
+    # Never in a command that contains an implicit operation (`git pull`, `make
+    # gen`, `tar x`): its words are then as likely to name what the pull or the
+    # generator rewrote as what Claude did, and a baseline taken before the
+    # pull would mix upstream changes into the review. The maintainer's rule.
+    if may_write and _depth == 0 and not extra.get("implicit"):
         for kind, value, pos in tokens:
             if kind == "word":
                 add(value, True, cwd_at(pos))
@@ -2227,7 +2305,7 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
 
 
 def _new_extra() -> dict:
-    return {"notes": [], "dirs": []}
+    return {"notes": [], "dirs": [], "implicit": False}
 
 
 def _note(extra: dict, event: str, detail: str, once: bool = False) -> None:
@@ -2239,6 +2317,8 @@ def _note(extra: dict, event: str, detail: str, once: bool = False) -> None:
 
 
 def _merge_extra(into: dict, other: dict) -> None:
+    if other.get("implicit"):
+        into["implicit"] = True
     for event, detail in other["notes"]:
         _note(into, event, detail, once=(event == "skip-implicit"))
     for d in other["dirs"]:
