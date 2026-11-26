@@ -152,6 +152,10 @@ def is_excluded(file_path: str, root: str, globs: list) -> bool:
     """Port of ExcludeMatcher.isExcluded: test the absolute path, the
     root-relative path and each ancestor directory of it, so a glob naming a
     folder (`.superpowers/sdd`, `**/dist`) excludes everything inside."""
+    return _excluded_by(file_path, root, _compile_globs(globs))
+
+
+def _compile_globs(globs: list) -> list:
     patterns = []
     for glob in globs:
         if not isinstance(glob, str):
@@ -160,6 +164,10 @@ def is_excluded(file_path: str, root: str, globs: list) -> bool:
             patterns.append(re.compile(glob_to_regex(glob)))
         except re.error:
             continue  # an invalid glob excludes nothing, as in the extension
+    return patterns
+
+
+def _excluded_by(file_path: str, root: str, patterns: list) -> bool:
     if not patterns:
         return False
     abs_path = file_path.replace("\\", "/")
@@ -900,14 +908,22 @@ def _deletion(words: list):
     return recursive, operands
 
 
-def _walk_files(top: str):
+def _walk_files(top: str, cap: int = None, skip=None):
     """`(files, overflow)` — the regular files under `top`, never following a
-    symlink and never entering `.git`. `overflow` is True, and the walk stops
-    at once, when there are more than RM_WALK_CAP files or the walk has looked
-    at _WALK_ENTRY_CAP entries."""
+    symlink, never entering `.git`, never leaving `top`'s filesystem. `skip`
+    (a path predicate) prunes excluded directories and files before they are
+    counted. `overflow` is True, and the walk stops at once, when there are
+    more than `cap` (RM_WALK_CAP) files or it has looked at _WALK_ENTRY_CAP
+    entries."""
+    if cap is None:
+        cap = RM_WALK_CAP
     files: list = []
     stack = [top]
     looked = 0
+    try:
+        device = os.stat(top, follow_symlinks=False).st_dev
+    except OSError:
+        return files, False
     while stack:
         d = stack.pop()
         try:
@@ -925,10 +941,16 @@ def _walk_files(top: str):
                     if e.is_symlink():
                         continue
                     if e.is_dir(follow_symlinks=False):
+                        if skip is not None and skip(e.path):
+                            continue
+                        if e.stat(follow_symlinks=False).st_dev != device:
+                            continue          # a mount point: another filesystem
                         stack.append(e.path)
                     elif e.is_file(follow_symlinks=False):
+                        if skip is not None and skip(e.path):
+                            continue
                         files.append(e.path)
-                        if len(files) > RM_WALK_CAP:
+                        if len(files) > cap:
                             return files, True
                 except OSError:
                     continue
@@ -2027,9 +2049,19 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
             unresolved.append(tok)
         return expanded
 
+    def dropped(tok: str) -> None:
+        _drop(extra, tok)
+
     def add(tok: str, require_shape: bool, tok_cwd: str | None, env=None) -> None:
         if len(ordered) >= MAX_CANDIDATES:
-            return                        # full: nothing more can be kept
+            # Full. Count what would have been kept, cheaply (no disk probe),
+            # so the truncation shows up as one `skip-budget` line.
+            t = _normalize_token(tok)
+            if "$" not in t and _plausible(t) and (not require_shape or _path_shaped(t)) \
+                    and (t, tok_cwd) not in seen:
+                seen.add((t, tok_cwd))
+                dropped(t)
+            return
         tok = _normalize_token(tok)
         # An explicit target naming a variable: substitute the literal
         # assignments seen earlier in the command (`F=a.go; sed -i … "$F"`), or
@@ -2108,7 +2140,8 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
         quiet_write = True
         for op in operands:
             if budget[0] <= 0:
-                break
+                dropped(op)
+                continue
             budget[0] -= 1
             if any(c in op for c in _GLOB_CHARS):
                 _note(extra, "skip-glob", op)
@@ -2124,8 +2157,11 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
                 if os.path.islink(path):
                     continue                      # rm removes the link, not a file we can restore
                 if os.path.isdir(path):
-                    if recursive and path not in extra["dirs"] and len(extra["dirs"]) < MAX_CANDIDATES:
-                        extra["dirs"].append(path)
+                    if recursive and path not in extra["dirs"]:
+                        if len(extra["dirs"]) < MAX_CANDIDATES:
+                            extra["dirs"].append(path)
+                        else:
+                            dropped(op)
                     continue
                 # Nothing there: deleting it changes nothing, and capturing it
                 # would record a "new file" that never existed.
@@ -2144,6 +2180,8 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
         kind, targets, notes, source, symbolic = named
         quiet_write = True
         if budget[0] <= 0 or len(ordered) >= MAX_CANDIDATES:
+            for t in targets:
+                dropped(t)
             continue
         budget[0] -= 1
         for event, detail in notes:
@@ -2194,10 +2232,11 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
     # -> go.mod, go.sum; `npm install` -> package.json, package-lock.json.
     # Only those that exist now, in the project directory the command uses.
     for (segment, _start), seg_cwd, seg_env in zip(segments, seg_cwds, seg_envs):
-        if len(ordered) >= MAX_CANDIDATES or budget[0] <= 0:
-            break
         manifest = _manifest_files(segment)
         if manifest is None:
+            continue
+        if len(ordered) >= MAX_CANDIDATES or budget[0] <= 0:
+            dropped(_base(segment[0]) + " manifest")
             continue
         budget[0] -= 1
         quiet_write = True
@@ -2246,9 +2285,12 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
                     unresolved.append(tok)
             for tok, tok_cwd in inner:
                 key = (tok, tok_cwd)
-                if key not in seen and len(ordered) < MAX_CANDIDATES:
+                if key not in seen:
                     seen.add(key)
-                    ordered.append(key)
+                    if len(ordered) < MAX_CANDIDATES:
+                        ordered.append(key)
+                    else:
+                        dropped(tok)
 
     # Tier 2a″ — a heredoc fed to a local shell (`bash -s <<EOF`, `cat <<EOF |
     # sh`) is a script like a `sh -c` one: scan it as a command of its own,
@@ -2267,9 +2309,12 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
                 if tok not in unresolved and len(unresolved) < MAX_CANDIDATES:
                     unresolved.append(tok)
             for key in inner:
-                if key not in seen and len(ordered) < MAX_CANDIDATES:
+                if key not in seen:
                     seen.add(key)
-                    ordered.append(key)
+                    if len(ordered) < MAX_CANDIDATES:
+                        ordered.append(key)
+                    else:
+                        dropped(key[0])
 
     # Tier 1 — in-language writes (python heredocs and -c one-liners). Not in
     # a body that is data: a test file written by `cat` that calls `.write(`.
@@ -2301,24 +2346,37 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
         for literal, pos in _quoted_literals(code_text):
             add(literal, True, cwd_at(pos))
 
+    if _depth == 0 and extra["dropped"][0]:
+        _note(extra, "skip-budget", "%d dropped (first: %s)" % tuple(extra["dropped"]), once=True)
     return may_write or quiet_write, ordered, unresolved, extra
 
 
 def _new_extra() -> dict:
-    return {"notes": [], "dirs": [], "implicit": False}
+    # dropped: [count, first token] of candidates the caps cut off.
+    return {"notes": [], "dirs": [], "implicit": False, "dropped": [0, ""]}
+
+
+def _drop(extra: dict, tok: str) -> None:
+    if not extra["dropped"][0]:
+        extra["dropped"][1] = tok[:MAX_CANDIDATE_LEN]
+    extra["dropped"][0] += 1
 
 
 def _note(extra: dict, event: str, detail: str, once: bool = False) -> None:
     """Queue a log line. `once`: at most one line of this event per command."""
     if once and any(e == event for e, _ in extra["notes"]):
         return
-    if len(extra["notes"]) < MAX_CANDIDATES:
+    if len(extra["notes"]) < MAX_CANDIDATES or event in ("skip-budget", "skip-implicit"):
         extra["notes"].append((event, detail))
 
 
 def _merge_extra(into: dict, other: dict) -> None:
     if other.get("implicit"):
         into["implicit"] = True
+    if other["dropped"][0]:
+        if not into["dropped"][0]:
+            into["dropped"][1] = other["dropped"][1]
+        into["dropped"][0] += other["dropped"][0]
     for event, detail in other["notes"]:
         _note(into, event, detail, once=(event == "skip-implicit"))
     for d in other["dirs"]:
@@ -2368,21 +2426,30 @@ def scan_full(command: str, cwd: str | None = None) -> dict:
             "dirs": extra["dirs"], "notes": extra["notes"]}
 
 
-def capture_file(file_path: str, cwd: str, session_id, captured_at: str) -> None:
-    """Run one target through the capture pipeline. Returns (never exits) on
-    every skip, so a Bash command with several candidates keeps going."""
+# A file larger than this is not captured: its baseline would sit in the
+# session JSON, which the extension re-parses on every change — one 100 MB
+# dump.sql would make every later decision slow.
+MAX_CAPTURE_BYTES = 2 * 1024 * 1024
+# Files one Bash command may capture in all: its candidates plus the files of
+# its recursive deletes.
+MAX_FILES_PER_COMMAND = 50
+
+
+def _prepare(file_path: str, cwd: str):
+    """`(session_file, path, original_content)` for one target, or None after
+    logging why it is skipped. Reads the file; touches no session."""
     if not os.path.isabs(file_path):
         file_path = os.path.normpath(os.path.join(cwd, file_path))
 
     workspace_root = workspace_root_for_file(file_path, cwd)
     if workspace_root is None:
         log_event("skip-no-root", file_path)
-        return
+        return None
     # Matched against the window's root, not a nested worktree's: the extension's
     # ExcludeMatcher is anchored at the primary workspace folder.
     if is_excluded(file_path, workspace_root, excludes_for_root(workspace_root)):
         log_event("skip-excluded", file_path)
-        return
+        return None
     # A nested git worktree owns its own session deterministically, regardless of
     # which windows are open (fail-open: falls back to workspace_root on any error).
     worktree_root = worktree_root_for_file(file_path, workspace_root)
@@ -2390,49 +2457,104 @@ def capture_file(file_path: str, cwd: str, session_id, captured_at: str) -> None
         workspace_root = worktree_root
     session_file = workspace_session_file(workspace_root)
 
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                original_content: str | None = f.read()
-        except UnicodeDecodeError:
-            # Not UTF-8 text (binary). We cannot safely baseline or later
-            # restore it, and must NOT record it as a null "new" file — that
-            # would let a reject delete the user's real file. Skip capture (a
-            # non-zero exit could also block the edit).
-            log_event("skip-binary", file_path)
-            return
-        except OSError:
-            # Exists but unreadable (permissions, etc) — or a directory, which a
-            # liberal shell-path candidate can be. Same reasoning as above.
-            log_event("skip-unreadable", file_path)
-            return
-    else:
-        original_content = None  # genuinely new — Claude is creating it
+    try:
+        st = os.stat(file_path)
+    except FileNotFoundError:
+        return session_file, file_path, None   # genuinely new — Claude is creating it
+    except OSError:
+        log_event("skip-unreadable", file_path)
+        return None
+    if st.st_size > MAX_CAPTURE_BYTES:
+        log_event("skip-too-large", "%s %d" % (file_path, st.st_size))
+        return None
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            original_content: str | None = f.read()
+    except UnicodeDecodeError:
+        # Not UTF-8 text (binary). We cannot safely baseline or later
+        # restore it, and must NOT record it as a null "new" file — that
+        # would let a reject delete the user's real file. Skip capture (a
+        # non-zero exit could also block the edit).
+        log_event("skip-binary", file_path)
+        return None
+    except OSError:
+        # Exists but unreadable (permissions, etc) — or a directory, which a
+        # liberal shell-path candidate can be. Same reasoning as above.
+        log_event("skip-unreadable", file_path)
+        return None
+    return session_file, file_path, original_content
 
+
+def _commit(prepared: list, session_id, captured_at: str) -> None:
+    """Record prepared captures: one lock, one load and one save per session
+    file, however many files land in it. Per-file saves made `rm -rf` of a few
+    directories cost seconds on a 2 MB session."""
+    by_session: dict = {}
+    for session_file, path, content in prepared:
+        by_session.setdefault(session_file, []).append((path, content))
+    for session_file, items in by_session.items():
+        try:
+            _commit_one(session_file, items, session_id, captured_at)
+        except Exception:
+            log_event("error")          # one session's trouble must not cost the others
+
+
+def _commit_one(session_file: str, items: list, session_id, captured_at: str) -> None:
     # Hold the advisory lock across the whole read-modify-write so an accept/
     # reject the extension persists in this window can't be clobbered by our
     # write (and vice-versa). Fail-open: acquire_lock returns None on timeout.
     fd, lock_path = acquire_lock(session_file)
     try:
         session = load_session(session_file) or new_session()
-        existing = session["files"].get(file_path)
-        if existing is None or existing.get("reviewStatus") != "pending":
-            session["files"][file_path] = {
-                "originalContent": original_content,
-                "reviewStatus": "pending",
-                "newFile": original_content is None,
-                "sessionId": session_id,
-                "capturedAt": captured_at,
-            }
+        changed = []
+        for path, content in items:
+            existing = session["files"].get(path)
+            if existing is None or existing.get("reviewStatus") != "pending":
+                session["files"][path] = {
+                    "originalContent": content,
+                    "reviewStatus": "pending",
+                    "newFile": content is None,
+                    "sessionId": session_id,
+                    "capturedAt": captured_at,
+                }
+                changed.append(path)
+            else:
+                # An existing pending entry keeps its frozen baseline (no-op).
+                log_event("skip-already-pending", path)
+        if changed:
             if session.get("status") == "reviewed":
                 session["status"] = "active"
             save_session(session, session_file)
-            log_event("captured", file_path)
-        else:
-            # An existing pending entry keeps its frozen baseline (no-op).
-            log_event("skip-already-pending", file_path)
+            for path in changed:
+                log_event("captured", path)
     finally:
         release_lock(fd, lock_path)
+
+
+def capture_file(file_path: str, cwd: str, session_id, captured_at: str) -> None:
+    """Run one target through the capture pipeline. Returns (never exits) on
+    every skip, so a Bash command with several candidates keeps going."""
+    prepared = _prepare(file_path, cwd)
+    if prepared is not None:
+        _commit([prepared], session_id, captured_at)
+
+
+def _walk_deleted_dir(directory: str, cwd: str, room: int):
+    """`(files, reason)` for `rm -r directory`: the files to capture, or [] and
+    the reason nothing is — outside every root, excluded, or more than `room`
+    files. Exclusion is checked before walking, and excluded subtrees are
+    pruned rather than counted."""
+    root = workspace_root_for_file(directory, cwd)
+    if root is None:
+        return [], ("skip-no-root", directory)
+    patterns = _compile_globs(excludes_for_root(root))
+    if _excluded_by(directory, root, patterns):
+        return [], ("skip-excluded", directory)
+    files, overflow = _walk_files(directory, cap=room,
+                                  skip=(lambda p: _excluded_by(p, root, patterns)) if patterns else None)
+    if overflow:
+        return [], ("skip-too-many", "%s >%d" % (directory, room))
+    return files, None
 
 
 def main() -> None:
@@ -2471,6 +2593,7 @@ def main() -> None:
     for token in unresolved:
         log_event("skip-unknown-var",
                   token[:MAX_CANDIDATE_LEN].replace("\\", "\\\\").replace("\n", "\\n"))
+    prepared: list = []
     for candidate, candidate_cwd in candidates:
         # A relative path whose directory the command made unknowable (`cd
         # "$REPO"`) must be dropped. Falling back to the session cwd would
@@ -2480,26 +2603,42 @@ def main() -> None:
             log_event("skip-unknown-cwd", candidate)
             continue
         try:
-            capture_file(candidate, candidate_cwd or cwd, session_id, captured_at)
+            got = _prepare(candidate, candidate_cwd or cwd)
         except Exception:
             # One bad candidate must not cost us the rest of the command.
             log_event("error")
-    # `rm -r DIR`: each regular file in it, up to RM_WALK_CAP. Past the cap,
-    # nothing from that directory — one log line instead.
+            continue
+        if got is not None:
+            prepared.append(got)
+    # `rm -r DIR`: each regular file in it, within what is left of the
+    # command's MAX_FILES_PER_COMMAND. A directory that does not fit
+    # contributes nothing; the first such logs one `skip-too-many`.
+    too_many_logged = False
     for directory in full["dirs"]:
+        room = min(RM_WALK_CAP, MAX_FILES_PER_COMMAND - len(prepared))
         try:
-            files, overflow = _walk_files(directory)
+            files, reason = _walk_deleted_dir(directory, cwd, max(room, 0)) if room > 0 \
+                else ([], ("skip-too-many", "%s >%d" % (directory, 0)))
         except Exception:
             log_event("error")
             continue
-        if overflow:
-            log_event("skip-too-many", "%s >%d" % (directory, RM_WALK_CAP))
+        if reason is not None:
+            if reason[0] != "skip-too-many" or not too_many_logged:
+                log_event(*reason)
+            too_many_logged = too_many_logged or reason[0] == "skip-too-many"
             continue
         for f in files:
             try:
-                capture_file(f, cwd, session_id, captured_at)
+                got = _prepare(f, cwd)
             except Exception:
                 log_event("error")
+                continue
+            if got is not None:
+                prepared.append(got)
+    try:
+        _commit(prepared, session_id, captured_at)
+    except Exception:
+        log_event("error")
 
 
 if __name__ == "__main__":

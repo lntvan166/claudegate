@@ -1165,6 +1165,20 @@ class ImplicitOperationTest(unittest.TestCase):
         full = hook.scan_full("git pull && make gen && git merge x", "/w")
         self.assertEqual([("skip-implicit", "git pull")], full["notes"])
 
+    def test_truncation_is_logged_once(self):
+        full = hook.scan_full(" ".join("echo x > f%d.txt;" % i for i in range(30)), "/w")
+        self.assertEqual(hook.MAX_CANDIDATES, len(full["candidates"]))
+        self.assertEqual([("skip-budget", "5 dropped (first: f25.txt)")],
+                         [n for n in full["notes"] if n[0] == "skip-budget"])
+        tmp = os.path.realpath(tempfile.mkdtemp())
+        try:
+            cmd = "rm " + " ".join("f%d.go" % i for i in range(hook._FS_OPERAND_BUDGET + 3))
+            notes = hook.scan_full(cmd, tmp)["notes"]
+            self.assertIn(("skip-budget", "3 dropped (first: f%d.go)" % hook._FS_OPERAND_BUDGET), notes)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.assertFalse([n for n in hook.scan_full("echo x > a.txt", "/w")["notes"]])
+
     def test_mixed_command_still_captures_its_explicit_target(self):
         full = hook.scan_full("cd sub && git pull && sed -i 's/a/b/' f.go", "/w")
         self.assertEqual([("f.go", "/w/sub")], full["candidates"])
@@ -1703,6 +1717,54 @@ class ShellCaptureEndToEndTest(unittest.TestCase):
         self.run_bash("rm -rf many")
         self.assertIn("skip-too-many %s >%d" % (os.path.join(self.root, "many"), hook.RM_WALK_CAP),
                       self.log())
+        self.assertFalse(os.path.exists(self.session_file))
+
+    def test_recursive_rm_of_several_dirs_is_one_batch(self):
+        for d in range(3):
+            for i in range(3):
+                self.seed("d%d/f%d.go" % (d, i), "x\n")
+        before = os.path.exists(self.session_file)
+        self.run_bash("rm -rf d0 d1 d2")
+        self.assertFalse(before)
+        self.assertEqual(9, len(self.session()["files"]))
+        self.assertEqual(9, self.log().count(" captured "))
+
+    def test_total_files_per_command_is_capped(self):
+        for d in range(2):
+            for i in range(30):
+                self.seed("t%d/f%d.go" % (d, i), "x\n")
+        self.run_bash("rm -rf t0 t1")
+        # t0 fits (30), t1 does not (30 > 50 - 30): nothing from it.
+        files = self.session()["files"]
+        self.assertEqual(30, len(files))
+        self.assertTrue(all("/t0/" in f for f in files))
+        self.assertEqual(1, self.log().count("skip-too-many"))
+
+    def test_walk_outside_every_root_or_excluded_is_skipped(self):
+        outside = os.path.join(self.home, "outside")
+        os.makedirs(outside)
+        open(os.path.join(outside, "a.go"), "w").close()
+        self.seed("gen/a.go", "x\n")
+        with open(os.path.join(self.cg, "excludes.json"), "w") as f:
+            json.dump({self.root: ["gen"]}, f)
+        self.run_bash("rm -rf %s gen" % outside)
+        self.assertIn("skip-no-root %s" % outside, self.log())
+        self.assertIn("skip-excluded %s" % os.path.join(self.root, "gen"), self.log())
+        self.assertFalse(os.path.exists(self.session_file))
+
+    def test_large_file_is_not_captured(self):
+        big = self.seed("dump.sql", "x" * (hook.MAX_CAPTURE_BYTES + 1))
+        self.run_bash("rm -f dump.sql")
+        self.assertIn("skip-too-large %s %d" % (big, hook.MAX_CAPTURE_BYTES + 1), self.log())
+        self.assertFalse(os.path.exists(self.session_file))
+
+    def test_large_file_edit_is_not_captured(self):
+        big = self.seed("big.json", "x" * (hook.MAX_CAPTURE_BYTES + 1))
+        payload = json.dumps({"tool_name": "Edit", "cwd": self.root, "session_id": "s1",
+                              "tool_input": {"file_path": big}})
+        subprocess.run([sys.executable, HOOK], input=payload, text=True,
+                       env=dict(os.environ, HOME=self.home), check=True)
+        self.assertIn("skip-too-large", self.log())
         self.assertFalse(os.path.exists(self.session_file))
 
     def test_never_capture_command_logs_skip_implicit_once(self):
