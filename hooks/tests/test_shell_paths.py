@@ -1347,6 +1347,17 @@ class DeletionTest(unittest.TestCase):
         self.assertFalse(overflow)
         self.assertEqual(hook.RM_WALK_CAP, len(files))
 
+    def test_entry_budget_is_shared_by_every_walk_of_a_command(self):
+        for d in ("w1", "w2"):
+            os.makedirs(os.path.join(self.tmp, d))
+            for i in range(30):
+                open(os.path.join(self.tmp, d, "f%d.txt" % i), "w").close()
+        budget = [40]
+        _f, overflow = hook._walk_files(os.path.join(self.tmp, "w1"), entries=budget)
+        self.assertFalse(overflow)
+        _f, overflow = hook._walk_files(os.path.join(self.tmp, "w2"), entries=budget)
+        self.assertTrue(overflow, "the second walk must stop on what the first left")
+
     def test_walk_of_a_large_tree_stays_off_the_hot_path(self):
         import time
         big = os.path.join(self.tmp, "huge")

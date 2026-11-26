@@ -911,18 +911,21 @@ def _deletion(words: list):
     return recursive, operands
 
 
-def _walk_files(top: str, cap: int = None, skip=None):
+def _walk_files(top: str, cap: int = None, skip=None, entries: list = None):
     """`(files, overflow)` — the regular files under `top`, never following a
     symlink, never entering `.git`, never leaving `top`'s filesystem. `skip`
     (a path predicate) prunes excluded directories and files before they are
     counted. `overflow` is True, and the walk stops at once, when there are
     more than `cap` (RM_WALK_CAP) files or it has looked at _WALK_ENTRY_CAP
-    entries."""
+    entries — or, when `entries` (a one-item list) is given, once the
+    command's shared entry budget in it runs out, so ten large directories
+    cost one budget, not ten."""
     if cap is None:
         cap = RM_WALK_CAP
+    if entries is None:
+        entries = [_WALK_ENTRY_CAP]
     files: list = []
     stack = [top]
-    looked = 0
     try:
         device = os.stat(top, follow_symlinks=False).st_dev
     except OSError:
@@ -935,8 +938,8 @@ def _walk_files(top: str, cap: int = None, skip=None):
             continue
         with it:
             for e in it:
-                looked += 1
-                if looked > _WALK_ENTRY_CAP:
+                entries[0] -= 1
+                if entries[0] < 0:
                     return files, True
                 if e.name == ".git":
                     continue
@@ -2687,7 +2690,7 @@ def capture_file(file_path: str, cwd: str, session_id, captured_at: str) -> None
         _commit([prepared], session_id, captured_at)
 
 
-def _walk_deleted_dir(directory: str, cwd: str, room: int):
+def _walk_deleted_dir(directory: str, cwd: str, room: int, entries: list = None):
     """`(files, reason)` for `rm -r directory`: the files to capture, or [] and
     the reason nothing is — outside every root, excluded, or more than `room`
     files. Exclusion is checked before walking, and excluded subtrees are
@@ -2699,7 +2702,8 @@ def _walk_deleted_dir(directory: str, cwd: str, room: int):
     if _excluded_by(directory, root, patterns):
         return [], ("skip-excluded", directory)
     files, overflow = _walk_files(directory, cap=room,
-                                  skip=(lambda p: _excluded_by(p, root, patterns)) if patterns else None)
+                                  skip=(lambda p: _excluded_by(p, root, patterns)) if patterns else None,
+                                  entries=entries)
     if overflow:
         return [], ("skip-too-many", "%s >%d" % (directory, room))
     return files, None
@@ -2762,10 +2766,11 @@ def main() -> None:
     # command's MAX_FILES_PER_COMMAND. A directory that does not fit
     # contributes nothing; the first such logs one `skip-too-many`.
     too_many_logged = False
+    entries = [_WALK_ENTRY_CAP]           # shared by every walk of this command
     for directory in full["dirs"]:
         room = min(RM_WALK_CAP, MAX_FILES_PER_COMMAND - len(prepared))
         try:
-            files, reason = _walk_deleted_dir(directory, cwd, max(room, 0)) if room > 0 \
+            files, reason = _walk_deleted_dir(directory, cwd, max(room, 0), entries) if room > 0 \
                 else ([], ("skip-too-many", "%s >%d" % (directory, 0)))
         except Exception:
             log_event("error")
