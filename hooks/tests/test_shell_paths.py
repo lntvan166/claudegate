@@ -1406,6 +1406,38 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(["go.mod", "go.sum"], self.names("go mod tidy && echo package.json"))
 
 
+class NodeWriteTest(unittest.TestCase):
+    """A JavaScript write call fed to node/tsx/deno/bun counts like python's
+    open(…,'w'); its path-shaped literals are then harvested."""
+
+    def test_eval_and_heredoc_forms(self):
+        cases = [
+            "node -e \"require('fs').writeFileSync('out/data.json', s)\"",
+            "node --eval \"fs.appendFileSync('log.txt', s)\"",
+            "node - <<'EOF'\nconst fs = require('fs');\nfs.writeFileSync('gen/a.json', s);\nEOF",
+            "tsx - <<'EOF'\nawait fs.promises.writeFile('gen/a.json', s)\nEOF",
+            "bun -e \"await Bun.write('gen/a.json', s)\"",
+            "deno eval \"Deno.writeTextFileSync('gen/a.json', s)\"",
+            "cat <<'EOF' | node\nfs.createWriteStream('gen/a.json')\nEOF",
+        ]
+        for cmd in cases:
+            with self.subTest(cmd=cmd.splitlines()[0]):
+                got = paths(cmd)
+                self.assertTrue(got, cmd)
+                self.assertTrue(all(p.endswith((".json", ".txt")) for p in got), got)
+
+    def test_without_a_js_runtime_it_is_not_a_write(self):
+        for cmd in ["grep -rn 'writeFileSync(' src/", "rg \"writeFile\\(\" lib/a.ts"]:
+            with self.subTest(cmd=cmd):
+                self.assertFalse(hook.command_may_write(cmd))
+        # Written as file content, not run: still data.
+        self.assertEqual(["a.ts"], paths(
+            "cat > a.ts <<'EOF'\nfs.writeFileSync('x.json', s)\nEOF\ngit add a.ts"))
+
+    def test_reading_is_not_writing(self):
+        self.assertEqual([], paths("node -e \"console.log(fs.readFileSync('a.json'))\""))
+
+
 class ShellCaptureEndToEndTest(unittest.TestCase):
     """A real `Bash` payload on stdin, isolated HOME, registered workspace."""
 

@@ -335,6 +335,14 @@ MAX_CANDIDATE_LEN = 400
 # pathlib/file-object write calls that usually accompany them.
 _OPEN_WRITE_RE = re.compile(r"""open\s*\([^()]*?,\s*(['"])[^'"]*[wa+][^'"]*\1""")
 _WRITE_CALL_RE = re.compile(r"\.write(?:_text|_bytes|lines)?\s*\(")
+# The same for JavaScript runtimes: `fs.writeFileSync(p, s)`, `fs.promises.writeFile`,
+# `createWriteStream`, `Bun.write`, `Deno.writeTextFile`. Counted only when the
+# command runs node/tsx/deno/bun (_NODE_RUNTIME_RE), so a `grep writeFile(` or a
+# python body that mentions one is not a write.
+_NODE_WRITE_RE = re.compile(
+    r"\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|"
+    r"Bun\.write|Deno\.writeTextFile(?:Sync)?|Deno\.writeFile(?:Sync)?)\s*\(")
+_NODE_RUNTIME_RE = re.compile(r"^(?:node|nodejs|tsx|ts-node|deno|bun)(?:[0-9]+(?:\.[0-9]+)*)?$")
 
 # Tools whose non-flag arguments are write targets whenever they are invoked.
 _ALWAYS_WRITE_TOOLS = frozenset({
@@ -2154,6 +2162,10 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
     # Tier 1 — in-language writes (python heredocs and -c one-liners). Not in
     # a body that is data: a test file written by `cat` that calls `.write(`.
     if _OPEN_WRITE_RE.search(code_text) or _WRITE_CALL_RE.search(code_text):
+        may_write = True
+    elif _NODE_WRITE_RE.search(code_text) and any(
+            kind == "word" and _NODE_RUNTIME_RE.match(_base(_cmd_word(value)))
+            for kind, value, _pos in tokens):
         may_write = True
 
     # Tier 2c — every path-shaped literal in the command. This is what catches
