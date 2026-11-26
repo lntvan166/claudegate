@@ -1272,6 +1272,18 @@ class DeletionTest(unittest.TestCase):
         self.assertTrue(overflow)
         self.assertLess(elapsed, 0.05, "walk did not stop at the cap: %.3fs" % elapsed)
 
+    def test_many_operands_stay_off_the_hot_path(self):
+        # Each operand is a stat or two; a 64 KiB `rm a b c …` must not pay
+        # for thousands of them (_FS_OPERAND_BUDGET).
+        import time
+        for cmd in ["rm " + " ".join("d%d/f%d.go" % (i, i) for i in range(8000)),
+                    " ; ".join("npm i x%d" % i for i in range(5000))]:
+            cmd = cmd[: hook.MAX_COMMAND_CHARS]
+            start = time.perf_counter()
+            hook.paths_from_command(cmd, self.tmp)
+            elapsed = time.perf_counter() - start
+            self.assertLess(elapsed, 0.09, "operand checks went unbounded: %.3fs" % elapsed)
+
     def test_deletion_alone_does_not_switch_on_speculation(self):
         # `docs/notes.md` exists but is only mentioned: rm names a.go alone.
         self.assertEqual(["a.go"], paths("rm a.go && echo see docs/notes.md b.go", self.tmp))

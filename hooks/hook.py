@@ -759,7 +759,7 @@ def _implicit_op(words: list):
     words = _strip_prefix(words)
     if not words:
         return None
-    name = os.path.basename(words[0])
+    name = _base(words[0])
     args = words[1:]
     if name == "git":
         idx = 0
@@ -797,6 +797,9 @@ _GLOB_CHARS = frozenset("*?[{")
 RM_WALK_CAP = 50
 # Directory entries a walk may look at before giving up, whatever it finds.
 _WALK_ENTRY_CAP = 2000
+# Operands of deletions and package commands one command may check on disk.
+# Each check is a stat or two; a 64 KiB `rm a b c …` must not cost thousands.
+_FS_OPERAND_BUDGET = 100
 
 
 def _deletion(words: list):
@@ -805,7 +808,7 @@ def _deletion(words: list):
     words = _strip_prefix(words)
     if not words:
         return None
-    name = os.path.basename(words[0])
+    name = _base(words[0])
     args = words[1:]
     if name == "git":
         idx = 0
@@ -998,7 +1001,7 @@ def _named_writes(words: list):
     words = _strip_prefix(words)
     if not words:
         return None
-    name = os.path.basename(words[0])
+    name = _base(words[0])
     args = words[1:]
     if name == "curl":
         got = _curl_targets(args)
@@ -1062,7 +1065,7 @@ def _manifest_files(words: list):
     words = _strip_prefix(words)
     if not words:
         return None
-    name = os.path.basename(words[0])
+    name = _base(words[0])
     if name != "go" and name not in _MANIFEST_COMMANDS:
         return None
     project = None
@@ -2022,6 +2025,8 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
     # guess at every word beside it.
     quiet_write = False
 
+    budget = [_FS_OPERAND_BUDGET]
+
     # Deletions — `rm`, `git rm`. Snapshotting the file before it goes leaves
     # a pending entry whose disk state is "missing"; Reject writes it back.
     for (segment, _start), seg_cwd, seg_env in zip(segments, seg_cwds, seg_envs):
@@ -2031,6 +2036,9 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
         recursive, operands = deletion
         quiet_write = True
         for op in operands:
+            if budget[0] <= 0:
+                break
+            budget[0] -= 1
             if any(c in op for c in _GLOB_CHARS):
                 _note(extra, "skip-glob", op)
                 continue
@@ -2064,6 +2072,9 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
             continue
         kind, targets, notes, source, symbolic = named
         quiet_write = True
+        if budget[0] <= 0 or len(ordered) >= MAX_CANDIDATES:
+            continue
+        budget[0] -= 1
         for event, detail in notes:
             _note(extra, event, detail)
 
@@ -2112,9 +2123,12 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
     # -> go.mod, go.sum; `npm install` -> package.json, package-lock.json.
     # Only those that exist now, in the project directory the command uses.
     for (segment, _start), seg_cwd, seg_env in zip(segments, seg_cwds, seg_envs):
+        if len(ordered) >= MAX_CANDIDATES or budget[0] <= 0:
+            break
         manifest = _manifest_files(segment)
         if manifest is None:
             continue
+        budget[0] -= 1
         quiet_write = True
         project, files = manifest
         if project is not None:
