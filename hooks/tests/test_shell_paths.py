@@ -1325,6 +1325,10 @@ class NamedWriteTest(unittest.TestCase):
     def test_git_mv_captures_both_sides(self):
         self.assertEqual(["a.go", "b.go"], self.names("git mv a.go b.go"))
         self.assertEqual([], self.names("git mv -n a.go b.go"))
+        # Moving a directory moves files it does not name.
+        full = self.full("git mv d e")
+        self.assertEqual([], full["candidates"])
+        self.assertEqual([("skip-unknown-name", "git mv d e")], full["notes"])
 
     def test_ln_captures_only_a_new_link(self):
         self.assertEqual(["link.go"], self.names("ln -s ../t.go link.go"))
@@ -1335,6 +1339,9 @@ class NamedWriteTest(unittest.TestCase):
         self.assertEqual([], full["candidates"])
         self.assertEqual([("skip-link-replace", "exists.txt")], full["notes"])
         self.assertEqual([], self.names("ln -s ../t.go d"))
+        # A link to a directory has no content to review.
+        self.assertEqual([], self.names("ln -s d d-link"))
+        self.assertEqual([], self.names("ln -s ../%s/d d-link2" % os.path.basename(self.tmp)))
 
     def test_named_writes_do_not_switch_on_speculation(self):
         self.assertEqual(["out.json"], self.names("curl -o out.json https://x && echo see notes.md"))

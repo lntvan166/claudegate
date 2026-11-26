@@ -1002,10 +1002,10 @@ def _named_writes(words: list):
     args = words[1:]
     if name == "curl":
         got = _curl_targets(args)
-        return ("fetch",) + got if got else None
+        return ("fetch",) + got + (None, False) if got else None
     if name == "wget":
         got = _wget_targets(args)
-        return ("fetch",) + got if got else None
+        return ("fetch",) + got + (None, False) if got else None
     if name == "git":
         idx = 0
         while idx < len(args) and args[idx].startswith("-"):
@@ -1015,16 +1015,19 @@ def _named_writes(words: list):
         rest = args[idx + 1:]
         if "-n" in rest or "--dry-run" in rest:
             return None
-        return ("move", [a for a in rest if not a.startswith("-")], [])
+        return ("move", [a for a in rest if not a.startswith("-")], [], None, False)
     if name == "ln":
         if any(a in ("-t", "--target-directory") or a.startswith("--target-directory=")
                for a in args):
-            return ("link", [], [("skip-unknown-name", "ln -t")])
+            return ("link", [], [("skip-unknown-name", "ln -t")], None, False)
         operands = [a for a in args if not a.startswith("-")]
         if not operands:
             return None
         link = operands[-1] if len(operands) >= 2 else os.path.basename(operands[0])
-        return ("link", [link], [])
+        # The link's source, for the directory check in _scan_command: a
+        # symbolic one resolves against the link's own directory.
+        symbolic = any(re.match(r"^-[a-zA-Z]*s", a) or a == "--symbolic" for a in args)
+        return ("link", [link], [], operands[0], symbolic)
     return None
 
 
@@ -2059,10 +2062,32 @@ def _scan_command(command: str, cwd: str | None = None, _depth: int = 0):
         named = _named_writes(segment)
         if named is None:
             continue
-        kind, targets, notes = named
+        kind, targets, notes, source, symbolic = named
         quiet_write = True
         for event, detail in notes:
             _note(extra, event, detail)
+
+        def at_seg(tok):
+            if os.path.isabs(tok):
+                return tok
+            return os.path.join(seg_cwd, tok) if seg_cwd else None
+
+        if kind == "move":
+            # A directory is not a file we can snapshot, and neither is where
+            # it lands: `git mv old-dir new-dir` moves many files unnamed.
+            resolved = [at_seg(t) for t in targets if "$" not in t]
+            if any(r and os.path.isdir(r) for r in resolved):
+                _note(extra, "skip-unknown-name", "git mv " + " ".join(targets)[:200])
+                continue
+        if kind == "link" and source and targets and "$" not in source:
+            link_at = at_seg(targets[0])
+            src = source
+            if symbolic and link_at and not os.path.isabs(src):
+                src = os.path.join(os.path.dirname(link_at), src)
+            elif not os.path.isabs(src):
+                src = at_seg(src)
+            if src and os.path.isdir(src):
+                continue                          # a link to a directory: no file to review
         for t in targets:
             tok = explicit(t, seg_env)
             if tok is None:
