@@ -8,6 +8,7 @@ import {
   shouldWarnTrustInvalidation,
   classifySettingsChange,
   isRegistrationCorrect,
+  isCaptureRegistered,
   hookHealthFrom,
   buildVerifyReport,
   backupsToPrune,
@@ -1141,6 +1142,49 @@ function testAuditVerifyFailureRollsBack(): void {
   console.log("ok - removing an audit entry raises no capture warning");
 }
 
+// Final-review I1. Only a PreToolUse entry is "registered": the audit entries
+// alone mention claudegate too, and must not make a removed capture entry look
+// installed (the silent repair would then re-add it — a first-time install).
+function auditOnlySettings(home: string): string {
+  const full = JSON.parse(computeSettingsPatch(USER_CONFIG, path.join(home, ".claudegate", "hook.sh"),
+    path.join(home, ".claudegate", "audit.sh")).content);
+  full.hooks.PreToolUse = full.hooks.PreToolUse.filter((g: unknown) => !JSON.stringify(g).includes("claudegate"));
+  return JSON.stringify(full, null, 2);
+}
+{
+  const auditOnly = auditOnlySettings("/h");
+  assert.ok(auditOnly.includes("claudegate"), "sanity: audit entries mention claudegate");
+  assert.equal(isCaptureRegistered(auditOnly), false, "audit entries alone are not a capture registration");
+  assert.equal(isCaptureRegistered(computeSettingsPatch("", CMD, AUDIT).content), true, "full install is registered");
+  assert.equal(isCaptureRegistered(computeSettingsPatch("", CMD).content), true, "capture-only install is registered");
+  assert.equal(isCaptureRegistered(USER_CONFIG), false, "foreign hooks only");
+  assert.equal(isCaptureRegistered(""), false, "empty file");
+  assert.equal(isCaptureRegistered("null"), false, "JSON null");
+  assert.equal(isCaptureRegistered('{"hooks":{"PreToolUse":{"x":"claudegate"}}}'), false, "PreToolUse not an array");
+  assert.equal(isCaptureRegistered('{ "hooks": claudegate'), true, "unparseable → substring fallback");
+  assert.equal(isCaptureRegistered('{ "hooks": nope'), false, "unparseable without the word");
+  assert.equal(classifySettingsChange(computeSettingsPatch("", CMD, AUDIT).content, auditOnly, CMD, AUDIT),
+    "unregistered", "removing only PreToolUse is an uninstall");
+  assert.equal(isRegistrationCorrect(auditOnly, CMD, AUDIT), false);
+  console.log("ok - audit entries alone do not count as a capture registration");
+}
+
+function testAuditOnlySettingsIsNotRepaired(): void {
+  const { home, claudeDir, settingsPath } = tempSettingsHome();
+  fs.mkdirSync(path.join(home, ".claudegate"), { recursive: true });
+  fs.writeFileSync(path.join(home, ".claudegate", "hook.py"), "print('hook')\n");
+  fs.writeFileSync(path.join(home, ".claudegate", "audit.sh"), "#!/usr/bin/env bash\n");
+  const auditOnly = auditOnlySettings(home);
+  fs.writeFileSync(settingsPath, auditOnly, "utf-8");
+  const installer = new HookInstaller(NO_CONTEXT, NO_LOG);
+  assert.equal(installer.getStatus().registered, false, "getStatus: not registered");
+  assert.equal(installer.syncSettingsIfNeeded(), false, "the repair does not re-add a removed PreToolUse");
+  assert.equal(fs.readFileSync(settingsPath, "utf-8"), auditOnly, "settings.json untouched");
+  assert.deepEqual(backupsIn(claudeDir), [], "no backup churn");
+  fs.rmSync(home, { recursive: true, force: true });
+  console.log("ok - a settings file with only the audit entries is never auto-repaired");
+}
+
 // No Python: the sync writes the audit wrapper with the default command, shows
 // its error once, and latches — the next focus-driven sync is a silent no-op.
 class NoPythonInstaller extends HookInstaller {
@@ -1201,6 +1245,7 @@ void (async () => {
   testAuditVerifyFailureRollsBack();
   await testHookSyncInstallsAudit();
   testAutomaticWriteAddsAuditEntries();
+  testAuditOnlySettingsIsNotRepaired();
   testUnreadableSettingsIsNeverOverwritten();
   testSymlinkedSettingsStaysASymlink();
   testVerificationFailureRestoresBackup();

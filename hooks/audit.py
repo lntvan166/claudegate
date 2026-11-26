@@ -42,7 +42,7 @@ PRUNE = frozenset({".git", "node_modules", "vendor", "target", "dist", "build", 
 WINDOW_SLACK_MS = 1000          # mtime >= startedAt - this counts as changed
 UNCERTAIN_AFTER_MS = 10000      # a longer call makes its misses uncertain
 SCAN_BUDGET_MS = 150            # hard stop for the walk
-RUN_BUDGET_MS = 1000            # hard stop for the whole run (walk + git)
+RUN_BUDGET_MS = 300             # hard stop for the whole run (walk + git)
 MAX_CAPTURE_BYTES = 2 * 1024 * 1024   # hook.py does not capture larger files
 LIST_CAP = 200                  # entries kept per list in a line
 NESTED_ROOTS_CAP = 5            # registered roots inside cwd also scanned
@@ -57,6 +57,22 @@ _TOOL_USE_ID_RE = re.compile(r"[A-Za-z0-9_.-]{1,128}")
 def _cg_dir() -> str:
     # Resolved per call, not at import: tests run this in-process with a temp HOME.
     return os.path.join(os.path.expanduser("~"), ".claudegate")
+
+
+def default_skip_paths() -> list:
+    """Never walked: ~/.claudegate (the audit's own writes, the sessions) and
+    ~/.claude (Claude Code's transcripts, todos and settings change on every
+    call and are no project file). Both as spelled and as resolved, since a
+    root may reach them either way."""
+    home = os.path.expanduser("~")
+    out = []
+    for p in (_cg_dir(), os.path.join(home, ".claude")):
+        out.append(p)
+        try:
+            out.append(os.path.realpath(p))
+        except (OSError, ValueError):
+            pass
+    return out
 
 
 def _norm(p: str) -> str:
@@ -78,6 +94,35 @@ def _load_json(path: str):
             return json.load(f)
     except (OSError, ValueError):
         return None
+
+
+_ISO_RE = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:?\d\d)?$")
+
+
+def _iso_ms(s):
+    """Epoch ms of an ISO 8601 timestamp (`toISOString()`, or chrono's
+    `+00:00` with any number of fraction digits), or None. A timestamp with no
+    offset is taken as UTC."""
+    if not isinstance(s, str):
+        return None
+    m = _ISO_RE.match(s.strip())
+    if not m:
+        return None
+    from datetime import datetime, timezone, timedelta
+    try:
+        dt = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    tz = m.group(3)
+    if tz and tz != "Z":
+        sign = -1 if tz[0] == "-" else 1
+        hh, mm = int(tz[1:3]), int(tz[-2:])
+        dt -= sign * timedelta(hours=hh, minutes=mm)
+    ms = int(dt.timestamp()) * 1000
+    frac = m.group(2)
+    if frac:
+        ms += int((frac + "000")[:3])
+    return ms
 
 
 def registered_roots() -> list:
@@ -164,8 +209,8 @@ def scan_changed(roots, since_ms: int, budget_ms: float = SCAN_BUDGET_MS,
     """Regular files under `roots` whose mtime >= since_ms, and whether the
     walk ran out of budget. Iterative, never follows symlinks, never crosses
     a filesystem boundary, prunes PRUNE, excluded directories and
-    `skip_paths` (by default ~/.claudegate, so the audit never sees its own
-    writes). A root nested inside another given root is covered by the outer
+    `skip_paths` (by default `default_skip_paths()`: ~/.claudegate, so the
+    audit never sees its own writes, and ~/.claude). A root nested inside another given root is covered by the outer
     walk. `all_roots` (the registered roots) decides which exclude globs apply
     below each directory: those of the innermost registered root, as in
     hook.py. `deadline` (perf_counter seconds) caps the budget further."""
@@ -174,7 +219,7 @@ def scan_changed(roots, since_ms: int, budget_ms: float = SCAN_BUDGET_MS,
         stop = min(stop, deadline)
     since_ns = int(since_ms) * 1_000_000
     excludes = excludes or {}
-    skip = {_norm(p) for p in (skip_paths if skip_paths is not None else [_cg_dir()])}
+    skip = {_norm(p) for p in (skip_paths if skip_paths is not None else default_skip_paths())}
     registered = set(all_roots or ()) | {_norm(r) for r in roots}
     tops = sorted({_norm(r) for r in roots})
     tops = [r for r in tops if not any(o != r and _inside(r, o) for o in tops)]
@@ -353,32 +398,57 @@ class Sessions:
             self.raw[name] = data.lower() if self.fold else data
         return self.raw[name]
 
-    def _index(self, name: str) -> dict:
+    def _index(self, name: str) -> tuple:
+        """`(files, decided)`: pending entries by normalised path, and the
+        latest review decision (`decidedAt`, epoch ms) by normalised path,
+        from `rejected{}` and `accepted[]`."""
         if name not in self.index:
-            idx = {}
+            idx: dict = {}
+            decided: dict = {}
+
+            def note(p, rec):
+                if not isinstance(p, str) or not isinstance(rec, dict):
+                    return
+                ms = _iso_ms(rec.get("decidedAt"))
+                if ms is not None:
+                    k = _norm(p)
+                    decided[k] = max(ms, decided.get(k, ms))
             try:
                 with open(os.path.join(self.dir, name), "rb") as f:
                     data = json.loads(f.read())
-                files = data.get("files") if isinstance(data, dict) else None
+                if not isinstance(data, dict):
+                    data = {}
+                files = data.get("files")
                 if isinstance(files, dict):
                     for k, v in files.items():
                         if isinstance(k, str):
                             idx[_norm(k)] = v
+                rejected = data.get("rejected")
+                if isinstance(rejected, dict):
+                    for k, v in rejected.items():
+                        note(k, v)
+                accepted = data.get("accepted")
+                if isinstance(accepted, list):
+                    for v in accepted:
+                        note(v.get("path") if isinstance(v, dict) else None, v)
             except (OSError, ValueError, TypeError):
                 pass
-            self.index[name] = idx
+            self.index[name] = (idx, decided)
         return self.index[name]
 
-    def entry(self, path: str):
+    def _holding(self, path: str):
+        """Session file names that may hold `path`, innermost first: those
+        keyed by an ancestor up to the outermost registered root, whose raw
+        bytes mention the path."""
         if not self.names:
-            return None
+            return
         np = _norm(path)
         outer = None
         for r in self.roots:
             if _inside(np, r) and (outer is None or len(r) < len(outer)):
                 outer = r
         if outer is None:
-            return None
+            return
         needles = None
         cur = os.path.dirname(np)
         while True:
@@ -388,16 +458,33 @@ class Sessions:
                     needles = _needles(np if self.fold else path)
                 raw = self._raw(name)
                 if any(n in raw for n in needles):
-                    e = self._index(name).get(np)
-                    if isinstance(e, dict) and e.get("reviewStatus", "pending") == "pending":
-                        return e
+                    yield name
             if cur == outer or len(cur) <= len(outer):
                 break
             parent = os.path.dirname(cur)
             if parent == cur:
                 break
             cur = parent
+
+    def entry(self, path: str):
+        np = _norm(path)
+        for name in self._holding(path):
+            e = self._index(name)[0].get(np)
+            if isinstance(e, dict) and e.get("reviewStatus", "pending") == "pending":
+                return e
         return None
+
+    def decided_since(self, path: str, since_ms: int) -> bool:
+        """Whether the user accepted, rejected, reverted or reapplied `path` at
+        or after `since_ms`. Reject and reapply write the file and drop it from
+        `files`; accept drops it from `files` too. Either way a change seen in
+        the window may be the user's own, or was pending until the decision."""
+        np = _norm(path)
+        for name in self._holding(path):
+            ms = self._index(name)[1].get(np)
+            if ms is not None and ms >= since_ms:
+                return True
+        return False
 
 
 # ── classify ─────────────────────────────────────────────────────────────────
@@ -493,7 +580,10 @@ def classify(changed: list, record: dict, roots: list, since_ms: int, duration_m
     for p in changed:
         if _norm(p) in known:
             continue
-        if sessions.entry(p) is not None:
+        if sessions.entry(p) is not None or sessions.decided_since(p, since_ms):
+            # Pending, or reviewed in the window: a reject or reapply writes
+            # the file itself, and an accept took it out of `files` after the
+            # change. Neither is Claude's uncaptured write.
             b = bucket(p)
             if b is not None:
                 b["covered"] += 1
@@ -539,7 +629,9 @@ _REDACTIONS = [
     (re.compile(r"(?i)([\w-]*(?:token|key|secret|auth)[\w-]*:\s*)[^'\"\n]+"), r"\1***"),
     (re.compile(r"(?i)\b(Bearer|Basic)(\s+)[^\s'\"]+"), r"\1\2***"),
     (re.compile(r"(?i)((?:^|\s)(?:-u|--user)[ =])\S+:\S+"), r"\1***"),
-    (re.compile(r"(?i)(--(?:password|token|api-key|secret)=)" + _VALUE), r"\1***"),
+    # --password=X and --password X; also --db-password, --api_key, --access-token.
+    (re.compile(r"(?i)(--(?:[a-z0-9]+[-_])*(?:password|passwd|token|secret|api[-_]?key)(?:=|\s+))"
+                + _VALUE), r"\1***"),
     (re.compile(r"(?i)\b(" + _SECRET_NAME + r")=" + _VALUE), r"\1=***"),
     (re.compile(r"(\b[A-Za-z][A-Za-z0-9+.-]*://)[^\s/@'\"]+@"), r"\1***@"),
 ]

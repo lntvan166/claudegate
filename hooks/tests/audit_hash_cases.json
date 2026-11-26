@@ -1,0 +1,6 @@
+{
+  "comment": "Audit file names, pinned as literals: md5 of the normalised root. audit.py (hooks/tests/test_audit.py) and the Desktop app (core/tests/audit.rs, via its .xcheck-cache checkout) must both produce these, so the two never look for an audit file under different names.",
+  "cases": [
+    { "root": "/work/acme/acme-api", "file": "2d91df225581d15bbef1b5593f152409.jsonl" }
+  ]
+}

@@ -231,11 +231,38 @@ function ourHookEntriesOf(raw: string): string {
   }
 }
 
+/**
+ * Whether `raw` (the text of ~/.claude/settings.json) registers the claudegate
+ * *capture* hook: some `hooks.PreToolUse` group whose JSON mentions
+ * "claudegate". Port of the Desktop app's `registered()` (core/src/capture.rs).
+ *
+ * A bare `raw.includes("claudegate")` is not this question: the audit entries
+ * (`~/.claudegate/audit.sh` under PostToolUse/PostToolUseFailure) satisfy it
+ * too, so a user who removed only the PreToolUse entry still read as
+ * registered — and the silent activation repair then re-added PreToolUse,
+ * which is a first-time install it must never perform. The substring test
+ * survives only as the fallback for a file that does not parse.
+ */
+export function isCaptureRegistered(raw: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return raw.includes("claudegate");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  const hooks = (parsed as Record<string, unknown>).hooks;
+  if (!hooks || typeof hooks !== "object" || Array.isArray(hooks)) return false;
+  const pre = (hooks as Record<string, unknown>).PreToolUse;
+  if (!Array.isArray(pre)) return false;
+  return pre.some((g) => (JSON.stringify(g) ?? "").includes("claudegate"));
+}
+
 /** True when `raw` already carries the exact registration `computeSettingsPatch`
  *  would write for `hookCommand` (and `auditCommand`, when given) — right
  *  command AND right matcher. */
 export function isRegistrationCorrect(raw: string, hookCommand: string, auditCommand?: string): boolean {
-  if (!raw.includes("claudegate")) return false;
+  if (!isCaptureRegistered(raw)) return false;
   const { changed, parseError } = computeSettingsPatch(raw, hookCommand, auditCommand);
   return !changed && !parseError;
 }
@@ -267,7 +294,7 @@ export function classifySettingsChange(
   auditCommand?: string
 ): SettingsChangeKind {
   if (currentRaw === prevRaw) return "none";
-  if (!currentRaw.includes("claudegate")) return "unregistered";
+  if (!isCaptureRegistered(currentRaw)) return "unregistered";
   if (ourHookEntriesOf(prevRaw) === ourHookEntriesOf(currentRaw)) return "benign";
   if (hookCommand !== undefined && isRegistrationCorrect(currentRaw, hookCommand, auditCommand)) return "benign";
   return "invalidated";
@@ -642,7 +669,7 @@ export class HookInstaller {
       return;
     }
 
-    if (raw.includes("claudegate")) return;
+    if (isCaptureRegistered(raw)) return;
 
     void this.context.globalState.update(HOOK_SETTINGS_WARNED_KEY, true);
     void vscode.window
@@ -662,7 +689,7 @@ export class HookInstaller {
 
     let registered = false;
     try {
-      registered = fs.readFileSync(this.claudeSettingsPath, "utf-8").includes("claudegate");
+      registered = isCaptureRegistered(fs.readFileSync(this.claudeSettingsPath, "utf-8"));
     } catch {
       registered = false;
     }
@@ -1125,6 +1152,14 @@ export class HookInstaller {
     const wrapperOk = fs.existsSync(this.hookWrapperDest);
     checks.push({ label: `hook.${this.isWindows ? "bat" : "sh"} installed`, ok: wrapperOk,
       detail: wrapperOk ? undefined : "run Setup Hook" });
+    // The capture audit (PostToolUse) runs from its own pair of files; either
+    // missing means audit lines silently stop while capture carries on.
+    const auditPyOk = fs.existsSync(this.auditPyDest);
+    checks.push({ label: "audit.py installed", ok: auditPyOk,
+      detail: auditPyOk ? undefined : "run Setup Hook" });
+    const auditWrapperOk = fs.existsSync(this.auditWrapperDest);
+    checks.push({ label: `audit.${this.isWindows ? "bat" : "sh"} installed`, ok: auditWrapperOk,
+      detail: auditWrapperOk ? undefined : "run Setup Hook" });
 
     if (scriptOk) {
       // Smoke-test the hook against a throwaway cwd that matches no workspace
@@ -1152,7 +1187,7 @@ export class HookInstaller {
     }
 
     let registered = false;
-    try { registered = JSON.stringify(JSON.parse(fs.readFileSync(this.claudeSettingsPath, "utf-8"))).includes("claudegate"); }
+    try { registered = isCaptureRegistered(fs.readFileSync(this.claudeSettingsPath, "utf-8")); }
     catch { /* unreadable/missing → not registered */ }
     checks.push({ label: "registered in ~/.claude/settings.json", ok: registered,
       detail: registered ? undefined : "run Setup Hook" });

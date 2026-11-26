@@ -199,6 +199,57 @@ class AuditClassifyTest(AuditTestBase):
         audit.run(self.payload())
         self.assertEqual(self.one()["covered"], 1)
 
+    def _decided_session(self, a, decided_at, kind="rejected"):
+        sess = {"files": {}, "accepted": [], "rejected": {}}
+        rec = {"id": "x", "path": a, "before": "x", "after": "y", "decidedAt": decided_at,
+               "sessionId": "s"}
+        if kind == "rejected":
+            sess["rejected"][a] = rec
+        else:
+            sess["accepted"].append(rec)
+        with open(os.path.join(self.cg, "sessions", md5(self.root) + ".json"), "w") as f:
+            json.dump(sess, f)
+
+    @staticmethod
+    def _iso(ms, z=True):
+        from datetime import datetime, timezone
+        dt = datetime.fromtimestamp(ms / 1000.0, timezone.utc)
+        if z:   # the extension's toISOString()
+            return dt.strftime("%Y-%m-%dT%H:%M:%S.") + "%03dZ" % (ms % 1000)
+        return dt.isoformat()   # chrono-like, +00:00 and microseconds
+
+    def test_reject_in_window_is_covered(self):
+        # The user's own reject (or reapply) during the call writes the file
+        # and removes it from `files`: never "Claude changed X, not captured".
+        a = self.put("a.go", changed=True)
+        self._decided_session(a, self._iso(self.start + 500))
+        self.record()
+        audit.run(self.payload())
+        line = self.one()
+        self.assertEqual((line["covered"], line["missed"]), (1, []))
+
+    def test_accept_in_window_is_covered(self):
+        a = self.put("a.go", changed=True)
+        self._decided_session(a, self._iso(self.start - 500, z=False), kind="accepted")
+        self.record()
+        audit.run(self.payload())
+        line = self.one()
+        self.assertEqual((line["covered"], line["missed"]), (1, []))
+
+    def test_decision_before_window_still_missed(self):
+        a = self.put("a.go", changed=True)
+        self._decided_session(a, self._iso(self.start - audit.WINDOW_SLACK_MS - 5000))
+        self.record()
+        audit.run(self.payload())
+        self.assertEqual(self.one()["missed"], [a])
+
+    def test_iso_ms(self):
+        self.assertEqual(audit._iso_ms("2026-11-13T10:00:00.123Z"), 1_794_564_000_123)
+        self.assertEqual(audit._iso_ms("2026-11-13T10:00:00+00:00"), 1_794_564_000_000)
+        self.assertEqual(audit._iso_ms("2026-11-13T17:00:00.123456+07:00"), 1_794_564_000_123)
+        self.assertIsNone(audit._iso_ms("yesterday"))
+        self.assertIsNone(audit._iso_ms(None))
+
     def test_long_call_uncertain(self):
         started = int(time.time() * 1000) - 11000
         self.start = started
@@ -379,6 +430,9 @@ class AuditClassifyTest(AuditTestBase):
              ["pw1", "tk2", "ak3", "sc4"]),
             ("GITHUB_TOKEN=ghp_xyz API_KEY='k k' my_password=p9 AWS_ACCESS_KEY_ID=AK make",
              ["ghp_xyz", "k k", "p9", "=AK"]),
+            ("tool --password pw1 --token  tk2 --api-key ak3 --secret 'sc 4'",
+             ["pw1", "tk2", "ak3", "sc 4"]),
+            ("cli --api_key AK9 --access-token AT9 --db-password=DP9", ["AK9", "AT9", "DP9"]),
         ]
         for cmd, secrets in cases:
             out = audit.redact(cmd)
@@ -386,6 +440,7 @@ class AuditClassifyTest(AuditTestBase):
                 self.assertNotIn(secret, out, out)
             self.assertIn("***", out)
         self.assertEqual(audit.redact("sed -i s/a/b/ a.go && ls -p x"), "sed -i s/a/b/ a.go && ls -p x")
+        self.assertEqual(audit.redact("tool --token-file t.txt --tokens 3"), "tool --token-file t.txt --tokens 3")
         self.put("a.go", changed=True)
         self.record()
         audit.run(self.payload(command="DB_PASSWORD=" + "z" * 200 + " ./migrate"))
@@ -394,7 +449,62 @@ class AuditClassifyTest(AuditTestBase):
         self.assertNotIn("z", head)
 
 
+class AuditHashTest(unittest.TestCase):
+    def test_audit_file_names_are_pinned(self):
+        with open(os.path.join(HERE, "audit_hash_cases.json")) as f:
+            cases = json.load(f)["cases"]
+        self.assertTrue(cases)
+        for c in cases:
+            if os.name == "nt":
+                continue   # POSIX roots
+            self.assertEqual(audit._hash(c["root"]) + ".jsonl", c["file"])
+
+
 class AuditScanTest(AuditTestBase):
+    def test_claude_dir_is_skipped(self):
+        # A workspace containing $HOME must not list Claude's own transcripts.
+        self.roots = [self.home]
+        self.write_roots()
+        t = self.put("transcript.jsonl", changed=True, root=os.path.join(self.home, ".claude", "projects"))
+        a = self.put("a.go", changed=True)
+        changed, _ = audit.scan_changed([self.home], self.start - 1000)
+        self.assertIn(a, changed)
+        self.assertNotIn(t, changed)
+
+    def test_claude_dir_symlink_target_is_skipped(self):
+        real = os.path.join(self.root, "dotclaude")
+        os.makedirs(real)
+        os.symlink(real, os.path.join(self.home, ".claude"))
+        t = self.put("dotclaude/todo.json", changed=True)
+        changed, _ = audit.scan_changed([self.root], self.start - 1000)
+        self.assertNotIn(t, changed)
+
+    def test_git_timeout_capped_by_run_budget(self):
+        # The run budget (300 ms) bounds walk + git; each check-ignore call
+        # gets at most what is left of it.
+        self.assertEqual(audit.RUN_BUDGET_MS, 300)
+        self.assertLess(audit.SCAN_BUDGET_MS, audit.RUN_BUDGET_MS)
+        import subprocess
+        if subprocess.run(["git", "init", "-q", self.root], capture_output=True).returncode != 0:
+            self.skipTest("git unavailable")
+        a = self.put("a.go", changed=True)
+        seen = []
+        real = subprocess.run
+
+        def spy(*args, **kw):
+            seen.append(kw.get("timeout"))
+            return real(*args, **kw)
+        subprocess.run = spy
+        try:
+            audit.git_ignored([a], time.perf_counter() + 0.05)
+            past = audit.git_ignored([a], time.perf_counter() - 1)
+        finally:
+            subprocess.run = real
+        self.assertEqual(len(seen), 1, "an exhausted budget runs no git at all")
+        self.assertLessEqual(seen[0], 0.05)
+        self.assertEqual(past, (set(), {a}), "out of time: unchecked, so never a miss")
+
+
     def test_scan_stops_at_budget(self):
         for d in range(50):
             dd = os.path.join(self.root, "d%d" % d)
