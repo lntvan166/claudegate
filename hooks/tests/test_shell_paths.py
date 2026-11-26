@@ -684,13 +684,27 @@ class CdAwareResolutionTest(unittest.TestCase):
             "cd svc-lib && go build ./...\n"
             "cd svc-lib\n"
             "Then edit manager/repo/rule.go\n"
-            "PLAN"
+            "PLAN\n"
+            "sed -i 's/a/b/' after.go"
         )
         self.assertEqual(
             [os.path.join(self.tmp, "docs/plan.md"),
-             os.path.join(self.tmp, "manager/repo/rule.go")],
+             os.path.join(self.tmp, "after.go")],
             targets(cmd, self.tmp),
         )
+        # A shell body is scanned as a script of its own: its cd moves its own
+        # targets, and never the outer command's.
+        ran = (
+            "bash -s <<'SH'\n"
+            "cd svc-lib\n"
+            "sed -i 's/a/b/' manager/repo/rule.go\n"
+            "SH\n"
+            "sed -i 's/a/b/' after.go"
+        )
+        got = targets(ran, self.tmp)
+        self.assertIn(os.path.join(self.tmp, "svc-lib/manager/repo/rule.go"), got)
+        self.assertIn(os.path.join(self.tmp, "after.go"), got)
+        self.assertNotIn(os.path.join(self.tmp, "svc-lib/after.go"), got)
 
     def test_a_real_cd_still_applies_to_the_heredoc_it_opens(self):
         # The body is data, but the shell that opened it is not: candidates in
@@ -708,7 +722,7 @@ class CdAwareResolutionTest(unittest.TestCase):
         )
 
     def test_unterminated_heredoc_still_suppresses_body_cds(self):
-        cmd = "cat > f.md <<'MD'\ncd svc-lib\nedit manager/rule.go"
+        cmd = "python3 - > f.md <<'MD'\ncd svc-lib\nopen('manager/rule.go', 'w')"
         self.assertEqual(
             [os.path.join(self.tmp, "f.md"), os.path.join(self.tmp, "manager/rule.go")],
             targets(cmd, self.tmp),
@@ -786,6 +800,128 @@ class CdAwareResolutionTest(unittest.TestCase):
     def test_cd_alone_writes_nothing(self):
         self.assertEqual([], paths("cd sub", self.tmp))
         self.assertFalse(hook.command_may_write("cd sub"))
+
+
+class HeredocFeederTest(unittest.TestCase):
+    """A heredoc body is harvested only when something runs it. The body of
+    `cat > f <<EOF` is f's content; the paths it mentions are text."""
+
+    BODY = ('let p = home.join("cg/excludes.json");\n'
+            'fs::write(base.join("gen/a.go"), "x");\n'
+            "See docs/notes/sandbox.sql and open('other.json','w')\n")
+
+    def test_file_writing_bodies_yield_only_the_target(self):
+        for cmd in [
+            "cat > core/tests/x.rs <<'EOF'\n" + self.BODY + "EOF",
+            "cat >> plan.md <<'EOF'\n" + self.BODY + "EOF",
+            "cat <<'EOF' > out.md\n" + self.BODY + "EOF",
+            "cat <<EOF >> out.md\n" + self.BODY + "EOF",
+            "tee out.md <<'EOF'\n" + self.BODY + "EOF",
+            "tee -a out.md <<'EOF' >/dev/null\n" + self.BODY + "EOF",
+            "cat <<-'EOF' > out.md\n\t" + self.BODY + "\tEOF",
+            "cat <<'EOF' | sudo tee out.md\n" + self.BODY + "EOF",
+        ]:
+            with self.subTest(cmd=cmd.splitlines()[0]):
+                got = paths(cmd)
+                self.assertEqual(1, len(got), got)
+                self.assertIn(got[0], ("core/tests/x.rs", "plan.md", "out.md"))
+
+    def test_data_consumers_yield_nothing_from_the_body(self):
+        # psql reads SQL, git reads a message: neither runs the body here.
+        for cmd in ["psql -f - > rows.txt <<'SQL'\n" + self.BODY + "SQL",
+                    "git commit -F - <<'MSG'\nfix: write cfg/app.yaml\nopen('x.json','w')\nMSG"]:
+            with self.subTest(cmd=cmd.splitlines()[0]):
+                self.assertNotIn("other.json", paths(cmd))
+                self.assertNotIn("x.json", paths(cmd))
+                self.assertNotIn("cfg/app.yaml", paths(cmd))
+
+    def test_python_body_is_still_harvested(self):
+        for head in ["python3 - <<'PY'", "python3 <<PY", "python3.12 - <<'PY'",
+                     "uv run python - <<'PY'", "sudo -u svc python3 - <<'PY'",
+                     "cat <<'PY' | python3"]:
+            with self.subTest(head=head):
+                cmd = head + "\nopen('x.json', 'w').write(s)\nPY"
+                self.assertEqual(["x.json"], paths(cmd))
+
+    def test_shell_body_is_still_harvested(self):
+        self.assertEqual(["f.go"], paths("bash -s <<'SH'\nsed -i 's/a/b/' f.go\nSH"))
+        self.assertEqual(["f.go"], paths("cat <<'SH' | sh\nsed -i 's/a/b/' f.go\nSH"))
+
+    def test_unknown_feeder_keeps_harvesting(self):
+        # `$PY` could be anything; doubt keeps the old behaviour.
+        self.assertEqual(["x.json"],
+                         paths("$PY - <<'PY'\nopen('x.json', 'w').write(s)\nPY"))
+
+    def test_remote_shell_body_is_not_local(self):
+        self.assertEqual([], paths("ssh host 'bash -s' <<'EOF'\nsed -i 's/a/b/' /etc/x.conf\nEOF"))
+        self.assertEqual([], paths("cat <<'EOF' | ssh host bash\nsed -i 's/a/b/' /etc/x.conf\nEOF"))
+
+    def test_two_heredocs_with_different_feeders(self):
+        cmd = ("cat > notes.md <<'MD'\n"
+               "mentions docs/a.md and open('nope.json','w')\n"
+               "MD\n"
+               "python3 - <<'PY'\n"
+               "open('gen/out.json', 'w').write(s)\n"
+               "PY")
+        self.assertEqual(["notes.md", "gen/out.json"], paths(cmd))
+
+    def test_file_written_then_run_is_harvested(self):
+        # The body still executes, one step removed.
+        for run in ["python3 /tmp/gen.py", "bash gen.py", "/tmp/gen.py", "source gen.py",
+                    "/usr/bin/env python3 -I /tmp/gen.py",
+                    "node --import ./register.mjs gen.py"]:
+            with self.subTest(run=run):
+                cmd = ("cat > /tmp/gen.py <<'PY'\n"
+                       "open('gen/out.json', 'w').write(s)\n"
+                       "PY\n" + run)
+                self.assertIn("gen/out.json", paths(cmd))
+        # Written but not run: content only.
+        cmd = "cat > /tmp/gen.py <<'PY'\nopen('gen/out.json', 'w')\nPY\ncat /tmp/gen.py"
+        self.assertEqual(["/tmp/gen.py"], paths(cmd))
+        # Handed to a program as DATA, not run as its script: content only.
+        cmd = ("cat > notes.body <<'MD'\nopen('gen/out.json', 'w')\nMD\n"
+               "python3 render.py --out x.html notes.body")
+        self.assertNotIn("gen/out.json", paths(cmd))
+
+    def test_many_heredocs_stay_off_the_hot_path(self):
+        # A backstop for the quadratic: each heredoc once walked the rest of
+        # the command to find what it feeds (350 ms on this input).
+        import time
+        cmd = "".join("cat > f%d.txt <<E\nx\nE\n" % i
+                      + "echo a b c d e f g h > /dev/null; " * 20 + "\n"
+                      for i in range(300))[: hook.MAX_COMMAND_CHARS]
+        start = time.perf_counter()
+        hook.paths_from_command(cmd, "/w")
+        elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, 0.15, "heredoc feeder lookup went quadratic: %.3fs" % elapsed)
+
+    def test_body_still_never_steers_the_cwd_or_defines_variables(self):
+        cmd = "python3 - <<'PY'\nT=/elsewhere\ncd sub\nPY\nsed -i 's/a/b/' \"$T\"/x.go"
+        self.assertEqual([], [p for p, c in hook.paths_from_command(cmd, "/w") if "elsewhere" in p])
+
+
+class UnresolvedVariableTest(unittest.TestCase):
+    """An explicit target whose variable cannot be expanded is reported, not
+    guessed; a literal assignment earlier in the command is substituted."""
+
+    def test_unknown_variables_are_reported(self):
+        for cmd, raw in [("cat > $T/x <<'EOF'\nhi\nEOF", "$T/x"),
+                         ("sed -i 's/a/b/' \"$F\"", "$F"),
+                         ("echo x > ${name}_test.go", "${name}_test.go")]:
+            with self.subTest(cmd=cmd):
+                cands, unresolved = hook.scan_targets(cmd, "/w")
+                self.assertEqual([raw], unresolved)
+                self.assertEqual([], [p for p, _ in cands if "$" in p])
+
+    def test_literal_assignment_is_substituted_into_a_target(self):
+        cands, unresolved = hook.scan_targets("F=gen/a.go\nsed -i 's/a/b/' \"$F\"", "/w")
+        self.assertIn("gen/a.go", [p for p, _ in cands])
+        self.assertEqual([], unresolved)
+
+    def test_speculative_words_are_never_reported(self):
+        _c, unresolved = hook.scan_targets(
+            "python3 - <<'PY'\nopen(f'$HOME/{x}.json', 'w')\nPY", "/w")
+        self.assertEqual([], unresolved)
 
 
 class ShellCaptureEndToEndTest(unittest.TestCase):
@@ -935,6 +1071,13 @@ class ShellCaptureEndToEndTest(unittest.TestCase):
         self.run_bash('cd "$REPO" && sed -i \'s/a/b/\' app.go')
         self.assertFalse(os.path.exists(self.session_file))
         self.assertIn("skip-unknown-cwd", self.log())
+
+    def test_unknown_variable_target_is_logged_once_and_not_captured(self):
+        self.run_bash("cat > $T/x <<'EOF'\nhello $T/x\nEOF\necho y > $T/x")
+        lines = [l for l in self.log().splitlines() if "skip-unknown-var" in l]
+        self.assertEqual(1, len(lines), lines)
+        self.assertTrue(lines[0].endswith("skip-unknown-var $T/x"), lines[0])
+        self.assertNotIn("captured", self.log())
 
     def test_empty_bash_payload_fails_open(self):
         payload = json.dumps({
