@@ -55,9 +55,11 @@ class AuditTestBase(unittest.TestCase):
         os.utime(p, (t, t))
         return p
 
-    def record(self, tid="t1", captured=(), implicit=False, background=False, started=None):
-        rec = {"startedAt": self.start if started is None else started, "cwd": self.root,
-               "sessionId": "s", "captured": list(captured), "implicit": implicit,
+    def record(self, tid="t1", captured=(), implicit=False, background=False, started=None,
+               already=(), cwd=None):
+        rec = {"startedAt": self.start if started is None else started,
+               "cwd": cwd or self.root, "sessionId": "s", "captured": list(captured),
+               "alreadyPending": list(already), "implicit": implicit,
                "background": background}
         with open(os.path.join(self.inflight, tid + ".json"), "w") as f:
             json.dump(rec, f)
@@ -98,8 +100,10 @@ class AuditClassifyTest(AuditTestBase):
         self.assertEqual(line["commandHead"], "sed -i s/a/b/ a.go")
         self.assertEqual(set(line), {"at", "sessionId", "toolUseId", "event", "durationMs", "cwd",
                                      "root", "commandHead", "background", "truncated", "missed",
-                                     "uncertain", "phantom", "covered", "implicit", "outOfScope",
-                                     "captured"})
+                                     "uncertain", "phantom", "missedCount", "uncertainCount",
+                                     "phantomCount", "covered", "implicit", "outOfScope",
+                                     "tooLarge", "captured"})
+        self.assertEqual(line["missedCount"], 1)
         self.assertFalse(os.path.exists(os.path.join(self.inflight, "t1.json")))
 
     def test_captured_not_missed(self):
@@ -226,6 +230,8 @@ class AuditClassifyTest(AuditTestBase):
 
     def test_prune_and_symlink(self):
         self.put("node_modules/pkg/index.js", changed=True)
+        self.put(".vscode-test/vscode/x.js", changed=True)
+        self.put("web/.next/cache/y", changed=True)
         self.put(".git/index", changed=True)
         outside = os.path.join(self.home, "outside")
         os.makedirs(outside)
@@ -269,6 +275,104 @@ class AuditClassifyTest(AuditTestBase):
         audit.run(self.payload(command="x" * 500))
         self.assertEqual(len(self.one()["commandHead"]), 120)
 
+    def test_already_pending_unchanged_is_nothing(self):
+        b = self.put("b.go")
+        self.record(already=[b])
+        audit.run(self.payload())
+        self.assertEqual(self.lines(), [])
+
+    def test_already_pending_changed_is_captured(self):
+        a = self.put("a.go", changed=True)
+        self.record(already=[a])
+        audit.run(self.payload())
+        line = self.one()
+        self.assertEqual((line["captured"], line["missed"], line["phantom"]), (1, [], []))
+
+    def test_latin1_text_out_of_scope(self):
+        self.put("notes.txt", "caf\xe9 au lait\n".encode("latin-1"), changed=True)
+        self.record()
+        audit.run(self.payload())
+        line = self.one()
+        self.assertEqual((line["outOfScope"], line["missed"]), (1, []))
+
+    def test_utf8_cut_at_sample_edge_is_text(self):
+        body = ("a" * 8191 + "é" + "b" * 10).encode("utf-8")
+        p = self.put("edge.txt", body, changed=True)
+        self.record()
+        audit.run(self.payload())
+        self.assertEqual(self.one()["missed"], [p])
+
+    def test_too_large(self):
+        self.put("big.sql", "x" * (2 * 1024 * 1024 + 1), changed=True)
+        self.record()
+        audit.run(self.payload())
+        line = self.one()
+        self.assertEqual((line["tooLarge"], line["missed"]), (1, []))
+
+    def test_unparseable_session(self):
+        a = self.put("a.go", changed=True)
+        with open(os.path.join(self.cg, "sessions", md5(self.root) + ".json"), "w") as f:
+            f.write('{"files": {%s: {"reviewStatus": "pend' % json.dumps(a))
+        self.record()
+        audit.run(self.payload())
+        self.assertEqual(self.one()["missed"], [a])
+
+    def test_lists_capped_with_counts(self):
+        for i in range(205):
+            self.put("m/f%03d.go" % i, changed=True)
+        self.record()
+        audit.run(self.payload())
+        line = self.one()
+        self.assertEqual((len(line["missed"]), line["missedCount"]), (200, 205))
+
+    def test_own_files_never_audited(self):
+        self.roots = [self.home]
+        self.write_roots()
+        self.put(".claudegate/hook.log", changed=True, root=self.home)
+        self.record(cwd=self.home)
+        audit.run(self.payload())
+        self.assertEqual(self.audit_files(), [])
+
+    def test_roots_inside_cwd_selected(self):
+        a = self.put("a.go", changed=True)
+        self.record(cwd=self.home)        # cwd is the parent of the root
+        audit.run(self.payload())
+        self.assertEqual(self.one()["missed"], [a])
+
+    def test_audit_files_private(self):
+        self.put("a.go", changed=True)
+        self.record()
+        audit.run(self.payload())
+        d = os.path.join(self.cg, "audit")
+        self.assertEqual(os.stat(d).st_mode & 0o777, 0o700)
+        f = os.path.join(d, md5(self.root) + ".jsonl")
+        self.assertEqual(os.stat(f).st_mode & 0o777, 0o600)
+
+    def test_command_head_redacted(self):
+        cases = [
+            ("curl -H 'Authorization: Bearer abc.def' https://x", ["abc.def"]),
+            ("curl -H 'Authorization: tok123' https://x", ["tok123"]),
+            ("curl -H 'X: Basic dXNlcjpw' https://x", ["dXNlcjpw"]),
+            ("git clone https://bob:hunter2@host/p", ["hunter2"]),
+            ("mysql -uroot -pS3cret db < dump.sql", ["S3cret"]),
+            ("tool --password=pw1 --token=tk2 --api-key=ak3 --secret=sc4",
+             ["pw1", "tk2", "ak3", "sc4"]),
+            ("GITHUB_TOKEN=ghp_xyz API_KEY='k k' my_password=p9 AWS_ACCESS_KEY_ID=AK make",
+             ["ghp_xyz", "k k", "p9", "=AK"]),
+        ]
+        for cmd, secrets in cases:
+            out = audit.redact(cmd)
+            for secret in secrets:
+                self.assertNotIn(secret, out, out)
+            self.assertIn("***", out)
+        self.assertEqual(audit.redact("sed -i s/a/b/ a.go && ls -p x"), "sed -i s/a/b/ a.go && ls -p x")
+        self.put("a.go", changed=True)
+        self.record()
+        audit.run(self.payload(command="DB_PASSWORD=" + "z" * 200 + " ./migrate"))
+        head = self.one()["commandHead"]
+        self.assertTrue(head.startswith("DB_PASSWORD=***"), head)
+        self.assertNotIn("z", head)
+
 
 class AuditScanTest(AuditTestBase):
     def test_scan_stops_at_budget(self):
@@ -293,6 +397,16 @@ class AuditScanTest(AuditTestBase):
         self.record(captured=[a])
         audit.run(self.payload(), budget_ms=0)
         self.assertIs(self.one()["truncated"], True)
+
+    def test_truncated_empty_still_writes(self):
+        for d in range(20):
+            for i in range(100):
+                self.put("d%d/f%d.go" % (d, i))
+        self.record()
+        audit.run(self.payload(), budget_ms=0)
+        line = self.one()
+        self.assertIs(line["truncated"], True)
+        self.assertEqual((line["missed"], line["captured"]), ([], 0))
 
     def test_no_git_uses_prune_list(self):
         subprocess.run(["git", "init", "-q", self.root], check=True)
@@ -376,6 +490,38 @@ class AuditProcessTest(AuditTestBase):
         r = self.run_audit(json.dumps(self.payload()))
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
         self.assertEqual(self.one()["missed"], [a])
+
+    def fake_git(self, body):
+        bindir = os.path.join(self.home, "bin")
+        os.makedirs(bindir, exist_ok=True)
+        g = os.path.join(bindir, "git")
+        with open(g, "w") as f:
+            f.write("#!/bin/sh\n" + body + "\n")
+        os.chmod(g, 0o755)
+        os.makedirs(os.path.join(self.root, ".git"), exist_ok=True)
+        return dict(os.environ, HOME=self.home, PATH=bindir + os.pathsep + os.environ["PATH"])
+
+    def test_slow_git_bounded_by_run_deadline(self):
+        env = self.fake_git("exec sleep 2")
+        a = self.put("a.go", changed=True)
+        self.record()
+        t0 = time.monotonic()
+        r = subprocess.run([sys.executable, AUDIT], input=json.dumps(self.payload()),
+                           text=True, capture_output=True, env=env)
+        elapsed = time.monotonic() - t0
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        self.assertLess(elapsed, 1.8)
+        line = self.one()
+        self.assertEqual((line["uncertain"], line["missed"], line["truncated"]), ([a], [], True))
+
+    def test_check_ignore_128_is_uncertain(self):
+        env = self.fake_git("exit 128")
+        a = self.put("a.go", changed=True)
+        self.record()
+        subprocess.run([sys.executable, AUDIT], input=json.dumps(self.payload()),
+                       text=True, capture_output=True, env=env)
+        line = self.one()
+        self.assertEqual((line["uncertain"], line["missed"]), ([a], []))
 
 
 if __name__ == "__main__":

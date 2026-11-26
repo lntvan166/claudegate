@@ -53,10 +53,19 @@ class AuditInflightTest(unittest.TestCase):
         self.assertGreaterEqual(rec["startedAt"], before)
         self.assertEqual([n for n in os.listdir(self.inflight) if n.endswith(".tmp")], [])
 
-    def test_already_pending_counts_as_captured(self):
+    def test_already_pending_kept_apart(self):
         self.run_hook(self.bash("sed -i s/a/b/ f.go", tool_use_id="t1"))
         self.run_hook(self.bash("sed -i s/a/b/ f.go", tool_use_id="t2"))
-        self.assertEqual(self.record("t2")["captured"], [os.path.join(self.root, "f.go")])
+        self.assertEqual(self.record("t1")["captured"], [os.path.join(self.root, "f.go")])
+        self.assertEqual(self.record("t1")["alreadyPending"], [])
+        self.assertEqual(self.record("t2")["captured"], [])
+        self.assertEqual(self.record("t2")["alreadyPending"], [os.path.join(self.root, "f.go")])
+
+    def test_inflight_is_private(self):
+        self.run_hook(self.bash("sed -i s/a/b/ f.go", tool_use_id="t1"))
+        self.assertEqual(os.stat(self.inflight).st_mode & 0o777, 0o700)
+        self.assertEqual(os.stat(os.path.dirname(self.inflight)).st_mode & 0o777, 0o700)
+        self.assertEqual(os.stat(os.path.join(self.inflight, "t1.json")).st_mode & 0o777, 0o600)
 
     def test_background_flag(self):
         p = self.bash("sed -i s/a/b/ f.go", tool_use_id="t1")
@@ -142,7 +151,7 @@ class AuditInflightTest(unittest.TestCase):
         saved = hook.AUDIT_INFLIGHT_DIR, hook.AUDIT_MAX_REMOVALS
         hook.AUDIT_INFLIGHT_DIR, hook.AUDIT_MAX_REMOVALS = self.inflight, 10000
         try:
-            hook._audit_inflight({"tool_name": "Bash"}, 0, self.root, "s", [], False, False)
+            hook._audit_inflight({"tool_name": "Bash"}, 0, self.root, "s", [], [], False, False)
         finally:
             hook.AUDIT_INFLIGHT_DIR, hook.AUDIT_MAX_REMOVALS = saved
         self.assertEqual(len(os.listdir(self.inflight)), 60)

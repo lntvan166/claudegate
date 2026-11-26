@@ -4,6 +4,7 @@ The fixture mirrors the largest real root it has to walk: about 1,500 files
 spread over 70 nested directories. Set CLAUDEGATE_PERF=0 to skip on a slow or
 loaded runner; CI keeps it on.
 """
+import hashlib
 import json
 import os
 import shutil
@@ -88,6 +89,50 @@ class AuditPerfTest(unittest.TestCase):
         ms = best_of(5, once)
         print("\n  audit.py process, 1500 files: %.1f ms" % ms, file=sys.stderr)
         self.assertLess(ms, 60)
+
+    def test_process_with_7mb_session_under_35ms(self):
+        """One uncaptured change and a 7 MB session for its root: the session
+        is searched as bytes and never parsed, since the path is not in it."""
+        env = dict(os.environ, HOME=self.home)
+        root_hash = hashlib.md5(os.path.normcase(os.path.abspath(self.root)).encode()).hexdigest()
+        session = os.path.join(self.cg, "sessions", root_hash + ".json")
+        files = {}
+        for i in range(700):
+            files[os.path.join(self.root, "gen", "g%d.go" % i)] = {
+                "originalContent": "x" * 10000, "reviewStatus": "pending",
+                "sessionId": "s", "capturedAt": "2026-01-01T00:00:00+00:00"}
+        with open(session, "w") as f:
+            json.dump({"sessionId": "s", "status": "active", "files": files}, f)
+        self.assertGreater(os.path.getsize(session), 7_000_000)
+        target = os.path.join(self.root, "mod0", "pkg0", "f0.go")
+        payload = {"tool_name": "Bash", "tool_use_id": "p2", "hook_event_name": "PostToolUse",
+                   "session_id": "s", "cwd": self.root, "tool_input": {"command": "./gen"}}
+        rec = os.path.join(self.cg, "audit", "inflight", "p2.json")
+        log = os.path.join(self.cg, "audit", root_hash + ".jsonl")
+
+        def once():
+            now = time.time()
+            os.utime(target, (now, now))
+            with open(rec, "w") as f:
+                json.dump({"startedAt": int(now * 1000) - 50, "cwd": self.root,
+                           "sessionId": "s", "captured": [], "alreadyPending": [],
+                           "implicit": False, "background": False}, f)
+            r = subprocess.run([sys.executable, AUDIT], input=json.dumps(payload), text=True,
+                               capture_output=True, env=env)
+            self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+
+        try:
+            once()
+            ms = best_of(5, once)
+            with open(log) as f:
+                last = json.loads(f.readlines()[-1])
+            print("\n  audit.py process, 7 MB session + 1 change: %.1f ms" % ms, file=sys.stderr)
+            self.assertEqual(last["missed"], [target])
+            self.assertLess(ms, 35)
+        finally:
+            os.remove(session)
+            old = time.time() - 3600
+            os.utime(target, (old, old))
 
 
 if __name__ == "__main__":

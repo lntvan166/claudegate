@@ -2702,26 +2702,30 @@ def _prepare(file_path: str, cwd: str):
     return session_file, file_path, original_content
 
 
-def _commit(prepared: list, session_id, captured_at: str) -> list:
+def _commit(prepared: list, session_id, captured_at: str) -> tuple:
     """Record prepared captures: one lock, one load and one save per session
     file, however many files land in it. Per-file saves made `rm -rf` of a few
     directories cost seconds on a 2 MB session.
 
-    Returns the paths this call captured plus those already pending (the audit
-    record counts both as covered)."""
-    covered: list = []
+    Returns `(captured, already_pending)`: the paths this call newly captured,
+    and those it found already pending. The audit record keeps them apart —
+    only a new capture that did not change is a phantom."""
+    captured: list = []
+    already: list = []
     by_session: dict = {}
     for session_file, path, content in prepared:
         by_session.setdefault(session_file, []).append((path, content))
     for session_file, items in by_session.items():
         try:
-            covered.extend(_commit_one(session_file, items, session_id, captured_at))
+            new, old = _commit_one(session_file, items, session_id, captured_at)
+            captured.extend(new)
+            already.extend(old)
         except Exception:
             log_event("error")          # one session's trouble must not cost the others
-    return covered
+    return captured, already
 
 
-def _commit_one(session_file: str, items: list, session_id, captured_at: str) -> list:
+def _commit_one(session_file: str, items: list, session_id, captured_at: str) -> tuple:
     # Hold the advisory lock across the whole read-modify-write so an accept/
     # reject the extension persists in this window can't be clobbered by our
     # write (and vice-versa). Fail-open: acquire_lock returns None on timeout.
@@ -2729,7 +2733,7 @@ def _commit_one(session_file: str, items: list, session_id, captured_at: str) ->
     try:
         session = load_session(session_file) or new_session()
         changed = []
-        covered = []
+        already = []
         for path, content in items:
             existing = session["files"].get(path)
             if existing is None or existing.get("reviewStatus") != "pending":
@@ -2744,14 +2748,14 @@ def _commit_one(session_file: str, items: list, session_id, captured_at: str) ->
             else:
                 # An existing pending entry keeps its frozen baseline (no-op).
                 log_event("skip-already-pending", path)
-            covered.append(path)
+                already.append(path)
         if changed:
             if session.get("status") == "reviewed":
                 session["status"] = "active"
             save_session(session, session_file)
             for path in changed:
                 log_event("captured", path)
-        return covered
+        return changed, already
     finally:
         release_lock(fd, lock_path)
 
@@ -2763,7 +2767,8 @@ AUDIT_MAX_EXAMINED = 200   # entries the stale sweep looks at per run
 
 
 def _audit_inflight(hook_input: dict, started_ms: int, cwd: str, session_id,
-                    captured: list, implicit: bool, background: bool) -> None:
+                    captured: list, already_pending: list, implicit: bool,
+                    background: bool) -> None:
     """Leave `audit/inflight/<tool_use_id>.json` for the PostToolUse audit hook
     and sweep records older than an hour. Never raises: the audit must not
     affect capture."""
@@ -2789,15 +2794,23 @@ def _audit_inflight(hook_input: dict, started_ms: int, cwd: str, session_id,
                 or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", tool_use_id) \
                 or tool_use_id in (".", ".."):
             return
-        os.makedirs(AUDIT_INFLIGHT_DIR, exist_ok=True)
+        # Private: the record carries paths and the session id.
+        for d in (os.path.dirname(AUDIT_INFLIGHT_DIR), AUDIT_INFLIGHT_DIR):
+            os.makedirs(d, mode=0o700, exist_ok=True)
+            try:
+                os.chmod(d, 0o700)
+            except OSError:
+                pass
         record = {"startedAt": started_ms, "cwd": cwd,
                   "sessionId": session_id if isinstance(session_id, str) else None,
                   "captured": list(dict.fromkeys(captured)),
+                  "alreadyPending": list(dict.fromkeys(already_pending)),
                   "implicit": implicit, "background": background}
         final = os.path.join(AUDIT_INFLIGHT_DIR, tool_use_id + ".json")
         tmp = "%s.%d.tmp" % (final, os.getpid())
         try:
-            with open(tmp, "w", encoding="utf-8") as f:
+            with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600),
+                           "w", encoding="utf-8") as f:
                 json.dump(record, f)
             os.replace(tmp, final)
         finally:
@@ -2924,12 +2937,13 @@ def main() -> None:
         first = too_many[0].rsplit(" >", 1)[0]
         last = too_many[-1].rsplit(" >", 1)[0]
         log_event("skip-too-many", "%s..%s (%d dirs)" % (first, last, len(too_many)))
-    covered: list = []
+    captured: list = []
+    already: list = []
     try:
-        covered = _commit(prepared, session_id, captured_at)
+        captured, already = _commit(prepared, session_id, captured_at)
     except Exception:
         log_event("error")
-    _audit_inflight(hook_input, started_ms, cwd, session_id, covered,
+    _audit_inflight(hook_input, started_ms, cwd, session_id, captured, already,
                     bool(full.get("implicit")),
                     tool_input.get("run_in_background") is True)
 
