@@ -13,6 +13,8 @@ import {
   verifySettingsContent,
   SETTINGS_BACKUP_RETENTION,
   PRE_TOOL_MATCHER,
+  POST_TOOL_MATCHER,
+  AUDIT_EVENTS,
   HookInstaller,
 } from "./hookInstaller";
 
@@ -232,6 +234,115 @@ const ENTRY = {
   assert.equal(parsed.hooks.PreToolUse.length, 2, "exactly one entry appended");
   assert.deepEqual(parsed.hooks.PreToolUse[1], ENTRY, "and it is ours");
   console.log("ok - a full settings.json round-trips intact apart from our added entry");
+}
+
+// ── Capture-audit registration (PostToolUse + PostToolUseFailure) ──────────
+const AUDIT = "/home/me/.claudegate/audit.sh";
+const AUDIT_ENTRY = { matcher: POST_TOOL_MATCHER, hooks: [{ type: "command", command: AUDIT }] };
+
+// A. Fresh install writes all three entries, in a fixed key order. The exact
+//    bytes are pinned because the Desktop app ports computeSettingsPatch and
+//    cross-checks it byte for byte.
+{
+  assert.equal(POST_TOOL_MATCHER, "^Bash$");
+  assert.deepEqual([...AUDIT_EVENTS], ["PostToolUse", "PostToolUseFailure"]);
+  const { content, changed } = computeSettingsPatch("", CMD, AUDIT);
+  assert.equal(changed, true);
+  assert.equal(
+    content,
+    JSON.stringify(
+      { hooks: { PreToolUse: [ENTRY], PostToolUse: [AUDIT_ENTRY], PostToolUseFailure: [AUDIT_ENTRY] } },
+      null,
+      2
+    ),
+    "fresh install output is exactly the three entries, PreToolUse first"
+  );
+  console.log("ok - a fresh install registers the capture hook and both audit entries");
+}
+
+// B. An install that has only the PreToolUse entry (every install before the
+//    audit existed) is repaired by adding the post entries — PreToolUse intact.
+{
+  const preOnly = computeSettingsPatch("", CMD).content;
+  const { content, changed } = computeSettingsPatch(preOnly, CMD, AUDIT);
+  assert.equal(changed, true, "missing audit entries are a semantic change");
+  const parsed = JSON.parse(content);
+  assert.deepEqual(parsed.hooks.PreToolUse, [ENTRY], "PreToolUse untouched");
+  assert.deepEqual(parsed.hooks.PostToolUse, [AUDIT_ENTRY]);
+  assert.deepEqual(parsed.hooks.PostToolUseFailure, [AUDIT_ENTRY]);
+  console.log("ok - a PreToolUse-only install gains the audit entries");
+}
+
+// C. A wrong audit path (and/or matcher) is repaired in place, no duplicate.
+{
+  const stale = JSON.stringify(
+    {
+      hooks: {
+        PreToolUse: [ENTRY],
+        PostToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "/old/home/.claudegate/audit.sh" }] }],
+        PostToolUseFailure: [AUDIT_ENTRY],
+      },
+    },
+    null,
+    2
+  );
+  const { content, changed } = computeSettingsPatch(stale, CMD, AUDIT);
+  assert.equal(changed, true, "stale audit path is repaired");
+  const parsed = JSON.parse(content);
+  assert.deepEqual(parsed.hooks.PostToolUse, [AUDIT_ENTRY], "repaired in place, matcher and command current");
+  assert.deepEqual(parsed.hooks.PostToolUseFailure, [AUDIT_ENTRY], "the correct one is left alone");
+  console.log("ok - a stale audit registration is repaired in place");
+}
+
+// D. Other tools' PostToolUse / PostToolUseFailure entries — including a
+//    foreign ^Bash$ one — are byte-identical after the patch; ours is appended.
+{
+  const foreignPost = { matcher: "^Bash$", hooks: [{ type: "command", command: "/other/post.sh" }] };
+  const foreignFail = { matcher: "*", hooks: [{ type: "command", command: "/other/fail.sh", timeout: 5 }] };
+  const before = { model: "x", hooks: { PostToolUse: [foreignPost], PostToolUseFailure: [foreignFail], PreToolUse: [] } };
+  const { content, changed } = computeSettingsPatch(JSON.stringify(before, null, 2), CMD, AUDIT);
+  assert.equal(changed, true);
+  const parsed = JSON.parse(content);
+  assert.deepEqual(Object.keys(parsed.hooks), ["PostToolUse", "PostToolUseFailure", "PreToolUse"], "key order kept");
+  assert.deepEqual(parsed.hooks.PostToolUse, [foreignPost, AUDIT_ENTRY], "foreign PostToolUse untouched, ours appended");
+  assert.deepEqual(parsed.hooks.PostToolUseFailure, [foreignFail, AUDIT_ENTRY], "foreign failure hook untouched");
+  console.log("ok - foreign post-tool hooks are left untouched");
+}
+
+// E. Idempotent: patching its own output is a no-op with byte-identical content,
+//    from a fresh install and from a repair alike.
+{
+  for (const start of ["", computeSettingsPatch("", CMD).content, USER_CONFIG_FOR_AUDIT()]) {
+    const once = computeSettingsPatch(start, CMD, AUDIT).content;
+    const twice = computeSettingsPatch(once, CMD, AUDIT);
+    assert.equal(twice.changed, false, "second run is not a change");
+    assert.equal(twice.content, once, "second run is byte-identical");
+  }
+  assert.equal(isRegistrationCorrect(computeSettingsPatch("", CMD, AUDIT).content, CMD, AUDIT), true);
+  assert.equal(isRegistrationCorrect(computeSettingsPatch("", CMD).content, CMD, AUDIT), false,
+    "a registration without the audit entries is not correct once audit is expected");
+  console.log("ok - the audit patch is idempotent and byte-stable");
+}
+
+// F. Verification requires every audit entry when an audit command is given.
+{
+  const full = computeSettingsPatch("", CMD, AUDIT).content;
+  assert.equal(verifySettingsContent(full, "", CMD, AUDIT), null);
+  const noFail = JSON.parse(full);
+  delete noFail.hooks.PostToolUseFailure;
+  assert.ok(
+    (verifySettingsContent(JSON.stringify(noFail), "", CMD, AUDIT) ?? "").includes("PostToolUseFailure"),
+    "a missing audit entry fails verification by name"
+  );
+  console.log("ok - verification checks the audit entries landed");
+}
+
+function USER_CONFIG_FOR_AUDIT(): string {
+  return JSON.stringify(
+    { model: "m", hooks: { PreToolUse: [{ matcher: "^Bash$", hooks: [{ type: "command", command: "/other/tool.sh" }] }] } },
+    null,
+    2
+  );
 }
 
 // ── verifySettingsContent (post-write verification) ──────────────────────────
@@ -778,8 +889,83 @@ function testAutomaticWriteHealsStaleMatcherOnly(): void {
   console.log("ok - the automatic write heals a stale matcher but never performs a first-time install");
 }
 
+// audit.py and audit.sh are installed next to hook.py with the same hash
+// compare, and an audit.py change alone is enough to trigger a sync.
+async function testHookSyncInstallsAudit(): Promise<void> {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cg-audithome-"));
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  const extPath = fs.mkdtempSync(path.join(os.tmpdir(), "cg-ext-"));
+  fs.mkdirSync(path.join(extPath, "hooks"), { recursive: true });
+  fs.writeFileSync(path.join(extPath, "hooks", "hook.py"), "print('hook')\n");
+  fs.writeFileSync(path.join(extPath, "hooks", "audit.py"), "print('audit v1')\n");
+  const context = {
+    extensionPath: extPath,
+    globalState: { get: () => undefined, update: async () => undefined },
+    extension: { packageJSON: { version: "9.9.9" } },
+  } as never;
+  const installer = new HookInstaller(context, NO_LOG);
+  const cg = path.join(home, ".claudegate");
+
+  assert.equal(await installer.syncHookIfNeeded(), "installed");
+  assert.equal(fs.readFileSync(path.join(cg, "audit.py"), "utf-8"), "print('audit v1')\n", "audit.py copied");
+  if (process.platform !== "win32") {
+    const sh = fs.readFileSync(path.join(cg, "audit.sh"), "utf-8");
+    assert.ok(sh.includes(".claudegate/audit.py"), "audit.sh runs audit.py");
+    assert.ok(sh.includes("|| exit 0"), "audit.sh exits 0 when audit.py is absent");
+    assert.ok((fs.statSync(path.join(cg, "audit.sh")).mode & 0o111) !== 0, "audit.sh is executable");
+  }
+  assert.equal(await installer.syncHookIfNeeded(), "none", "matching hashes → no-op");
+
+  fs.writeFileSync(path.join(extPath, "hooks", "audit.py"), "print('audit v2')\n");
+  assert.equal(installer.getStatus().upToDate, false, "a stale audit.py is reported as not up to date");
+  assert.equal(await installer.syncHookIfNeeded(), "updated", "an audit.py change alone triggers a sync");
+  assert.equal(fs.readFileSync(path.join(cg, "audit.py"), "utf-8"), "print('audit v2')\n");
+  assert.equal(installer.getStatus().upToDate, true);
+
+  fs.rmSync(path.join(cg, "audit.py"));
+  assert.equal(await installer.syncHookIfNeeded(), "updated", "a deleted audit.py is restored");
+  assert.ok(fs.existsSync(path.join(cg, "audit.py")));
+
+  fs.rmSync(home, { recursive: true, force: true });
+  fs.rmSync(extPath, { recursive: true, force: true });
+  console.log("ok - audit.py and its wrapper are synced next to hook.py by hash");
+}
+
+// The silent activation repair adds the audit entries to an install that
+// predates them, touching nothing else, and is a no-op on the next activation.
+function testAutomaticWriteAddsAuditEntries(): void {
+  const { home, claudeDir, settingsPath } = tempSettingsHome();
+  const wrapper = (name: string) =>
+    path.join(home, ".claudegate", process.platform === "win32" ? `${name}.bat` : `${name}.sh`);
+  const foreignPost = { matcher: "^Write$", hooks: [{ type: "command", command: "/other/post.sh" }] };
+  const oldInstall = JSON.parse(USER_CONFIG);
+  oldInstall.hooks.PreToolUse.push({ matcher: PRE_TOOL_MATCHER, hooks: [{ type: "command", command: wrapper("hook") }] });
+  oldInstall.hooks.PostToolUse = [foreignPost];
+  fs.writeFileSync(settingsPath, JSON.stringify(oldInstall, null, 2), "utf-8");
+
+  assert.equal(new HookInstaller(NO_CONTEXT, NO_LOG).syncSettingsIfNeeded(), true, "missing audit entries self-heal");
+  const after = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+  const audit = { matcher: POST_TOOL_MATCHER, hooks: [{ type: "command", command: wrapper("audit") }] };
+  assert.deepEqual(after.hooks.PreToolUse, oldInstall.hooks.PreToolUse, "PreToolUse untouched");
+  assert.deepEqual(after.hooks.PostToolUse, [foreignPost, audit], "foreign PostToolUse kept, ours appended");
+  assert.deepEqual(after.hooks.PostToolUseFailure, [audit]);
+  assert.equal(after.model, "opus[1m]");
+  assert.equal(backupsIn(claudeDir).length, 1, "backed up like any other write");
+
+  const bytes = fs.readFileSync(settingsPath, "utf-8");
+  assert.equal(new HookInstaller(NO_CONTEXT, NO_LOG).syncSettingsIfNeeded(), false, "next activation: no-op");
+  assert.equal(fs.readFileSync(settingsPath, "utf-8"), bytes, "…byte-identical");
+  assert.equal(backupsIn(claudeDir).length, 1, "…and no further backup");
+
+  fs.rmSync(home, { recursive: true, force: true });
+  console.log("ok - the silent activation repair adds the audit entries");
+}
+
 void (async () => {
   await testHookSyncHeals();
+  await testHookSyncInstallsAudit();
+  testAutomaticWriteAddsAuditEntries();
   testUnreadableSettingsIsNeverOverwritten();
   testSymlinkedSettingsStaysASymlink();
   testVerificationFailureRestoresBackup();

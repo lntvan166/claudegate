@@ -21,6 +21,26 @@ type HookSyncAction = "none" | "installed" | "updated";
 export const PRE_TOOL_MATCHER = "^(Write|Edit|MultiEdit|Bash)$";
 
 /**
+ * The matcher for the capture-audit hook (`audit.py`), registered under both
+ * `PostToolUse` and `PostToolUseFailure`. Only Bash: Write/Edit/MultiEdit name
+ * their target in `tool_input`, so their capture is exact and needs no audit;
+ * the audit exists to measure what shell-command path extraction missed.
+ */
+export const POST_TOOL_MATCHER = "^Bash$";
+
+/**
+ * The events the audit hook is registered under. `PostToolUseFailure` fires
+ * instead of `PostToolUse` for a call that started and then failed (a Bash
+ * command exiting non-zero), and carries the same `tool_use_id`/`tool_input` —
+ * without it the in-flight record of every failed command would be orphaned
+ * and its writes never audited. Verified against
+ * https://code.claude.com/docs/en/hooks (see CLAUDE.md).
+ */
+export const AUDIT_EVENTS = ["PostToolUse", "PostToolUseFailure"] as const;
+
+type HookGroup = { matcher?: string; hooks?: Array<{ type?: string; command?: unknown }> };
+
+/**
  * Pure decision logic for the ~/.claude/settings.json registration write.
  *
  * Given the current file contents and the hook wrapper command, returns the
@@ -41,7 +61,8 @@ export const PRE_TOOL_MATCHER = "^(Write|Edit|MultiEdit|Bash)$";
  */
 export function computeSettingsPatch(
   raw: string,
-  hookCommand: string
+  hookCommand: string,
+  auditCommand?: string
 ): { content: string; changed: boolean; parseError?: boolean } {
   const trimmed = raw.trim();
   let settings: Record<string, unknown>;
@@ -61,31 +82,59 @@ export function computeSettingsPatch(
 
   if (!settings.hooks) settings.hooks = {};
   const hooks = settings.hooks as Record<string, unknown[]>;
-  if (!hooks.PreToolUse) hooks.PreToolUse = [];
-  const preToolUse = hooks.PreToolUse as Array<{ matcher?: string; hooks?: Array<{ type?: string; command?: unknown }> }>;
 
-  // "Ours" = any PreToolUse entry that references a claudegate wrapper path.
-  // Never the matcher: a foreign tool may legitimately register `^Bash$`, and
-  // rewriting that would hijack another tool's hook.
+  // Order is load-bearing for byte-stable output (the Desktop app ports this
+  // function and cross-checks it against fixtures): PreToolUse first, then the
+  // audit pair. A key that is absent is appended in that order.
+  let changed = ensureHookEntry(hooks, "PreToolUse", PRE_TOOL_MATCHER, hookCommand);
+  if (auditCommand !== undefined) {
+    for (const event of AUDIT_EVENTS) {
+      if (ensureHookEntry(hooks, event, POST_TOOL_MATCHER, auditCommand)) changed = true;
+    }
+  }
+
+  const content = JSON.stringify(settings, null, 2);
+  return { content, changed };
+}
+
+/**
+ * Make `hooks[event]` carry exactly one correct claudegate group:
+ * `{ matcher, hooks: [{ type: "command", command }] }`. Returns true when that
+ * is a semantic change (entry added or repaired), false when it was already
+ * right — a formatting difference is never a change.
+ */
+function ensureHookEntry(
+  hooks: Record<string, unknown[]>,
+  event: string,
+  matcher: string,
+  command: string
+): boolean {
+  if (!hooks[event]) hooks[event] = [];
+  const groups = hooks[event] as HookGroup[];
+
+  // "Ours" = any entry that references a claudegate wrapper path. Never the
+  // matcher: a foreign tool may legitimately register `^Bash$`, and rewriting
+  // that would hijack another tool's hook.
   const isOurs = (h: unknown) => JSON.stringify(h).includes("claudegate");
-  const ours = preToolUse.filter(isOurs);
+  const ours = groups.filter(isOurs);
   // Correct means BOTH halves are current. Comparing only the command is what
   // made an existing install un-upgradable: the wrapper path is already right,
   // so a widened matcher could never reach anyone who had installed before.
   const correct = ours.some(
     (h) =>
-      h.matcher === PRE_TOOL_MATCHER &&
+      h.matcher === matcher &&
       Array.isArray(h.hooks) &&
-      h.hooks.some((x) => x.command === hookCommand)
+      h.hooks.some((x) => x.command === command)
   );
-
-  let changed = false;
   if (correct) {
     // Already registered with the exact command AND matcher → no semantic
-    // change. Return the reformatted content but leave `changed` false so the
-    // caller preserves the on-disk bytes.
-  } else if (ours.length > 0) {
-    // Stale claudegate registration → repair in place rather than leave capture
+    // change. The caller returns reformatted content but leaves `changed`
+    // false so the on-disk bytes are preserved.
+    return false;
+  }
+
+  if (ours.length > 0) {
+    // Stale claudegate registration → repair in place rather than leave it
     // silently broken. Either half can be stale:
     //   - the wrapper COMMAND (an old/wrong path after the home dir moved, a
     //     .sh/.bat mismatch), or
@@ -93,29 +142,25 @@ export function computeSettingsPatch(
     //     Bash writes were captured).
     // Only entries that actually carry a claudegate command are touched, and
     // only those get their matcher rewritten.
+    let changed = false;
     for (const h of ours) {
       if (!Array.isArray(h.hooks)) continue;
       let mine = false;
       for (const x of h.hooks) {
         if (typeof x.command === "string" && x.command.includes("claudegate")) {
-          x.command = hookCommand;
+          x.command = command;
           mine = true;
         }
       }
       if (!mine) continue;
-      h.matcher = PRE_TOOL_MATCHER;
+      h.matcher = matcher;
       changed = true;
     }
-  } else {
-    preToolUse.push({
-      matcher: PRE_TOOL_MATCHER,
-      hooks: [{ type: "command", command: hookCommand }],
-    });
-    changed = true;
+    return changed;
   }
 
-  const content = JSON.stringify(settings, null, 2);
-  return { content, changed };
+  groups.push({ matcher, hooks: [{ type: "command", command }] });
+  return true;
 }
 
 /**
@@ -148,10 +193,11 @@ function ourHookEntriesOf(raw: string): string {
 }
 
 /** True when `raw` already carries the exact registration `computeSettingsPatch`
- *  would write for `hookCommand` (right command AND right matcher). */
-export function isRegistrationCorrect(raw: string, hookCommand: string): boolean {
+ *  would write for `hookCommand` (and `auditCommand`, when given) — right
+ *  command AND right matcher. */
+export function isRegistrationCorrect(raw: string, hookCommand: string, auditCommand?: string): boolean {
   if (!raw.includes("claudegate")) return false;
-  const { changed, parseError } = computeSettingsPatch(raw, hookCommand);
+  const { changed, parseError } = computeSettingsPatch(raw, hookCommand, auditCommand);
   return !changed && !parseError;
 }
 
@@ -178,12 +224,13 @@ export type SettingsChangeKind = "none" | "benign" | "invalidated" | "unregister
 export function classifySettingsChange(
   prevRaw: string,
   currentRaw: string,
-  hookCommand?: string
+  hookCommand?: string,
+  auditCommand?: string
 ): SettingsChangeKind {
   if (currentRaw === prevRaw) return "none";
   if (!currentRaw.includes("claudegate")) return "unregistered";
   if (ourHookEntriesOf(prevRaw) === ourHookEntriesOf(currentRaw)) return "benign";
-  if (hookCommand !== undefined && isRegistrationCorrect(currentRaw, hookCommand)) return "benign";
+  if (hookCommand !== undefined && isRegistrationCorrect(currentRaw, hookCommand, auditCommand)) return "benign";
   return "invalidated";
 }
 
@@ -232,8 +279,6 @@ export function backupsToPrune(
   return mine.slice(0, mine.length - keep);
 }
 
-type PreToolUseEntry = { matcher?: string; hooks?: Array<{ type?: string; command?: unknown }> };
-
 /**
  * Post-write verification. Returns null when the bytes now on disk are an
  * acceptable result of our patch, or a human-readable reason when they are not
@@ -244,12 +289,15 @@ type PreToolUseEntry = { matcher?: string; hooks?: Array<{ type?: string; comman
  *  1. every top-level key that existed before is still present (nothing of the
  *     user's — model, permissions, enabledPlugins, other tools' hooks — was
  *     dropped), and
- *  2. our own entry actually landed (the write did what it claimed).
+ *  2. our own entries actually landed (the write did what it claimed) — the
+ *     PreToolUse capture hook, and the audit hook under each AUDIT_EVENTS
+ *     event when `auditCommand` is given.
  */
 export function verifySettingsContent(
   after: string,
   previousRaw: string,
-  hookCommand: string
+  hookCommand: string,
+  auditCommand?: string
 ): string | null {
   let parsed: unknown;
   try {
@@ -274,13 +322,22 @@ export function verifySettingsContent(
     }
   }
 
-  const preToolUse = (parsed as { hooks?: { PreToolUse?: unknown } }).hooks?.PreToolUse;
-  const landed =
-    Array.isArray(preToolUse) &&
-    (preToolUse as PreToolUseEntry[]).some(
-      (h) => Array.isArray(h?.hooks) && h.hooks.some((x) => x?.command === hookCommand)
+  const hooks = (parsed as { hooks?: Record<string, unknown> }).hooks;
+  const landed = (event: string, command: string): boolean => {
+    const groups = hooks?.[event];
+    return (
+      Array.isArray(groups) &&
+      (groups as HookGroup[]).some(
+        (h) => Array.isArray(h?.hooks) && h.hooks.some((x) => x?.command === command)
+      )
     );
-  if (!landed) return "the claudegate hook entry is missing";
+  };
+  if (!landed("PreToolUse", hookCommand)) return "the claudegate hook entry is missing";
+  if (auditCommand !== undefined) {
+    for (const event of AUDIT_EVENTS) {
+      if (!landed(event, auditCommand)) return `the claudegate ${event} audit entry is missing`;
+    }
+  }
 
   return null;
 }
@@ -334,11 +391,18 @@ export class HookInstaller {
   private readonly hookPyDest        = path.join(os.homedir(), ".claudegate", "hook.py");
   private readonly hookShDest        = path.join(os.homedir(), ".claudegate", "hook.sh");
   private readonly hookBatDest       = path.join(os.homedir(), ".claudegate", "hook.bat");
+  private readonly auditPyDest       = path.join(os.homedir(), ".claudegate", "audit.py");
+  private readonly auditShDest       = path.join(os.homedir(), ".claudegate", "audit.sh");
+  private readonly auditBatDest      = path.join(os.homedir(), ".claudegate", "audit.bat");
   private readonly claudeSettingsPath = path.join(os.homedir(), ".claude", "settings.json");
   private readonly hookLogSentinel = path.join(this.claudegateDir, "hooklog.enabled");
 
   private get hookWrapperDest(): string {
     return this.isWindows ? this.hookBatDest : this.hookShDest;
+  }
+
+  private get auditWrapperDest(): string {
+    return this.isWindows ? this.auditBatDest : this.auditShDest;
   }
 
   constructor(
@@ -411,6 +475,23 @@ export class HookInstaller {
     return this.hashFile(this.hookPyDest);
   }
 
+  private bundledAuditSourcePath(): string {
+    return path.join(this.context.extensionPath, "hooks", "audit.py");
+  }
+
+  /**
+   * True when the installed audit.py differs from the bundled one (or is
+   * missing). A bundle without audit.py — never a shipped build, but possible
+   * in a test fixture or a hand-trimmed install — has nothing to sync, so it
+   * reports false rather than looping on every focus.
+   */
+  private auditNeedsSync(): boolean {
+    const source = this.bundledAuditSourcePath();
+    if (!fs.existsSync(source)) return false;
+    if (!fs.existsSync(this.auditPyDest)) return true;
+    return this.hashFile(source) !== this.hashFile(this.auditPyDest);
+  }
+
   async syncHookIfNeeded(): Promise<HookSyncAction> {
     const source = this.bundledHookSourcePath();
     if (!fs.existsSync(source)) {
@@ -429,7 +510,13 @@ export class HookInstaller {
     }
 
     const installedHash = this.installedHookHash();
-    if (installedHash === bundledHash) return "none";
+    let auditStale = false;
+    try {
+      auditStale = this.auditNeedsSync();
+    } catch (err) {
+      this.log.appendLine(`[WARN] Cannot hash audit hook: ${(err as Error).message}`);
+    }
+    if (installedHash === bundledHash && !auditStale) return "none";
 
     fs.mkdirSync(this.claudegateDir, { recursive: true });
 
@@ -519,7 +606,7 @@ export class HookInstaller {
     let upToDate = false;
     if (scriptInstalled) {
       try {
-        upToDate = this.installedHookHash() === this.bundledHookHash();
+        upToDate = this.installedHookHash() === this.bundledHookHash() && !this.auditNeedsSync();
       } catch {
         upToDate = false;
       }
@@ -565,6 +652,9 @@ export class HookInstaller {
     }
   }
 
+  // Copies hook.py and, beside it, audit.py. Both are always copied together so
+  // one hash mismatch heals both; audit.py is skipped only when the bundle has
+  // none (the audit wrapper then exits 0 rather than erroring on every call).
   private installHookPy(): void {
     const sourcePath = this.bundledHookSourcePath();
     if (!fs.existsSync(sourcePath)) {
@@ -572,6 +662,12 @@ export class HookInstaller {
     }
     fs.mkdirSync(this.claudegateDir, { recursive: true });
     fs.copyFileSync(sourcePath, this.hookPyDest);
+    const auditSource = this.bundledAuditSourcePath();
+    if (fs.existsSync(auditSource)) {
+      fs.copyFileSync(auditSource, this.auditPyDest);
+    } else {
+      this.log.appendLine(`[WARN] audit.py not found at ${auditSource}; capture audit disabled.`);
+    }
   }
 
   private installHookWrapper(): void {
@@ -580,10 +676,22 @@ export class HookInstaller {
       // absolute path to hook.py so the script works regardless of cwd.
       const bat = `@echo off\n"${this.pythonCmd}" "${this.hookPyDest}"\n`;
       fs.writeFileSync(this.hookBatDest, bat, "utf-8");
+      // The audit wrapper exits 0 when audit.py is absent: `python` on a
+      // missing file exits 2, and a PostToolUse hook exiting 2 feeds its stderr
+      // to Claude after every Bash call.
+      const auditBat =
+        `@echo off\nif not exist "${this.auditPyDest}" exit /b 0\n` +
+        `"${this.pythonCmd}" "${this.auditPyDest}"\n`;
+      fs.writeFileSync(this.auditBatDest, auditBat, "utf-8");
     } else {
       const sh = `#!/usr/bin/env bash\n${this.pythonCmd} "$HOME/.claudegate/hook.py"\n`;
       fs.writeFileSync(this.hookShDest, sh, "utf-8");
       fs.chmodSync(this.hookShDest, 0o755);
+      const auditSh =
+        `#!/usr/bin/env bash\n[ -f "$HOME/.claudegate/audit.py" ] || exit 0\n` +
+        `${this.pythonCmd} "$HOME/.claudegate/audit.py"\n`;
+      fs.writeFileSync(this.auditShDest, auditSh, "utf-8");
+      fs.chmodSync(this.auditShDest, 0o755);
     }
   }
 
@@ -639,7 +747,7 @@ export class HookInstaller {
       raw = null; // genuinely absent → safe to create
     }
 
-    const { content, changed, parseError } = computeSettingsPatch(raw ?? "", this.hookWrapperDest);
+    const { content, changed, parseError } = computeSettingsPatch(raw ?? "", this.hookWrapperDest, this.auditWrapperDest);
     if (parseError) {
       this.log.appendLine(
         `[ERROR] ${this.claudeSettingsPath} is not valid JSON; refusing to overwrite it (your config is untouched).`
@@ -728,7 +836,7 @@ export class HookInstaller {
       after = ""; // unreadable → fails verification below, which restores
       this.log.appendLine(`[WARN] could not re-read settings.json after write: ${(err as Error).message}`);
     }
-    const problem = verifySettingsContent(after, previousRaw ?? "", this.hookWrapperDest);
+    const problem = verifySettingsContent(after, previousRaw ?? "", this.hookWrapperDest, this.auditWrapperDest);
     if (problem) {
       this.log.appendLine(`[ERROR] settings.json failed verification after write: ${problem}.`);
       if (backupPath && this.restoreSettingsBackup(backupPath, target)) {
@@ -855,7 +963,12 @@ export class HookInstaller {
       // clear an active trust-invalidation (which would drop the persistent
       // status-bar warning while running sessions are still untrusted).
       if (current === this.lastKnownSettingsRaw) return;
-      const kind = classifySettingsChange(this.lastKnownSettingsRaw ?? "", current, this.hookWrapperDest);
+      const kind = classifySettingsChange(
+        this.lastKnownSettingsRaw ?? "",
+        current,
+        this.hookWrapperDest,
+        this.auditWrapperDest
+      );
       this.lastKnownSettingsRaw = current;
 
       if (kind === "benign") {
@@ -864,7 +977,7 @@ export class HookInstaller {
         // and if an earlier change had raised the warning, the registration is
         // correct again, so clear it. A warning that only Setup Hook or a window
         // reload could dismiss outlived the problem it described.
-        if (this.trustInvalidated && isRegistrationCorrect(current, this.hookWrapperDest)) {
+        if (this.trustInvalidated && isRegistrationCorrect(current, this.hookWrapperDest, this.auditWrapperDest)) {
           this.trustInvalidated = false;
           this.trustWarningShown = false;
           this.fireHealth();

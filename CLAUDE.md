@@ -40,6 +40,7 @@ Claude Code (terminal CLI)   Claude Code (in-editor ext)      Non-Claude agents
 | `src/decorationProvider.ts` | File explorer badge (`!`) for pending files |
 | `src/hookInstaller.ts` | Installs `hook.py` + `hook.sh`, patches `~/.claude/settings.json` |
 | `hooks/hook.py` | Python hook script — copied to `~/.claudegate/hook.py` at setup |
+| `hooks/audit.py` | Capture-audit hook (`PostToolUse`/`PostToolUseFailure`, Bash only) — copied to `~/.claudegate/audit.py` beside `hook.py` |
 
 ---
 
@@ -163,6 +164,36 @@ Per-workspace session file at `~/.claudegate/sessions/<md5(workspacePath)>.json`
 - Otherwise (no entry yet, or — for legacy/pre-migration sessions — a non-pending entry) the hook creates a fresh pending entry with the current on-disk `originalContent`. The hook only ever writes `files`; the extension owns `accepted`/`rejected`, and accept/reject remove the entry from `files`, so on a current-model session a re-edit simply finds no entry and creates a new pending one.
 
 ---
+
+## Capture-Audit Hook (PostToolUse / PostToolUseFailure)
+
+`hooks/audit.py` runs **after** each `Bash` call and records what the call really
+changed, so missed shell captures can be measured. `HookInstaller` registers it
+next to the capture hook, through the same `computeSettingsPatch` and guarded
+write:
+
+```json
+"PostToolUse":        [{ "matcher": "^Bash$", "hooks": [{ "type": "command", "command": "~/.claudegate/audit.sh" }] }],
+"PostToolUseFailure": [{ "matcher": "^Bash$", "hooks": [{ "type": "command", "command": "~/.claudegate/audit.sh" }] }]
+```
+
+(`audit.bat` on Windows; `POST_TOOL_MATCHER` and `AUDIT_EVENTS` in
+`src/hookInstaller.ts`.) A Bash command that exits non-zero fires
+`PostToolUseFailure` **instead of** `PostToolUse`, so registering only the latter
+would orphan the in-flight record of every failed command.
+
+**Verified 2026-11-26 against https://code.claude.com/docs/en/hooks** (the old
+`docs.claude.com/en/docs/claude-code/hooks` URL 301s there):
+- `PostToolUseFailure` exists ("After a tool call fails") and matches on tool name, like `PreToolUse`.
+- Its stdin carries the same `tool_name`, `tool_input` and `tool_use_id` as `PostToolUse`, plus `error` (first line `Exit code N` for Bash), optional `is_interrupt` and `duration_ms`.
+- It does **not** fire for calls rejected before execution (validation failure, permission denial), and cancelling a running tool fires neither event. Those calls leave an in-flight record with no audit row.
+
+Like PreToolUse, "ours" is any group whose JSON mentions `claudegate`, never a
+matcher, so another tool's `^Bash$` PostToolUse hook is never touched. The silent
+activation repair (`syncSettingsIfNeeded`) adds missing audit entries to an
+existing install. `audit.sh`/`audit.bat` are generated like `hook.sh` and exit 0
+when `audit.py` is absent: `python` on a missing file exits 2, and a PostToolUse
+hook exiting 2 sends its stderr to Claude after every Bash call.
 
 ## DocumentTracker (GUI path)
 
