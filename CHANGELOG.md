@@ -7,6 +7,30 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.18.0] — 2026-11-27
+
+### Added
+
+- **Deleted files are captured, so a delete can be rejected.** `rm`, `git rm`, `unlink` and `shred -u` now capture each file before it goes, and Reject writes it back. `rm -r DIR` captures the files inside it when the folder is in your workspace, up to 50 files per command, skipping excluded folders, `.git` and symlinks. The diff shows a deleted file against an empty side, titled `(deleted · −N lines)`, instead of VS Code's "unable to open" page.
+- **More commands that name the file they write are captured:** `curl -o F` / `-O`, `wget -O F`, both sides of `git mv A B`, and a new link made with `ln`. Package commands capture the manifest and lockfile they rewrite: `go mod tidy` / `go get`, `npm`/`pnpm`/`yarn`/`bun` install and remove, `cargo add|remove|update`, `uv` and `poetry`.
+- **JavaScript run by `node -e` or a `node`/`tsx`/`deno`/`bun` heredoc is read like Python:** `writeFileSync`, `writeFile`, `appendFile`, `createWriteStream`, `Bun.write` and `Deno.writeTextFile` mark the files they write.
+- **A capture audit measures what the hook misses.** A small `audit.py` now runs after each shell command (a `PostToolUse` and `PostToolUseFailure` hook, added next to the capture hook). It records which files under your workspace actually changed during the command and compares that with what was captured. It never changes your session and never counts a `git pull`, code generator or archive extraction as Claude's edit. The records stay on your machine in `~/.claudegate/audit/`, readable only by you, with tokens and passwords removed from the command text. ClaudeGate Desktop shows the files Claude changed that weren't captured. `hooks/tools/audit_report.py` prints the numbers.
+
+### Changed
+
+- **`git pull`, merges, rebases, stashes, branch checkouts, code generators and archive extraction never create pending entries.** These bring in other people's changes or rewrite files without naming them, so they are not Claude's edits to review. Anything else in the same command that names a file, such as `git pull && sed -i … f.go`, is still captured.
+- **A folder set by a variable from your shell profile is followed.** `cd $PROJ_PATH && cat > notes.md` used to be lost, because the hook could not know the folder. A name the command never sets now falls back to the hook's own environment, when the value is an absolute folder that exists. `HOME`, `PWD` and similar are never used this way.
+- **Files over 2 MB are never captured**, on any path, including Edit and Write. Their content would sit in the session file and slow every reload.
+- **One command's captures are saved together.** `rm -rf` of ten folders used to take 7 seconds on a large session; it now takes about 50 ms. When a limit cuts candidates off, the hook log says so.
+
+### Fixed
+
+- **Removing the capture hook from `settings.json` by hand is respected.** The extension decides whether capture is set up by looking at the capture hook alone, so the new audit entries no longer make it re-add a capture hook you deleted.
+
+### Notes
+
+- **No need to re-run Setup Hook.** The new `hook.py` and `audit.py` are copied over automatically when the extension starts or the window regains focus, and the audit entries are added to an existing setup.
+
 ## [1.17.0] — 2026-11-26
 
 ### Changed
